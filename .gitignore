@@ -1,0 +1,61 @@
+# --- [보안: 가장 중요] ---
+# 사용자 정보가 담긴 설정 파일 (실제 계좌번호, 비밀번호 등)
+config.py
+auth/credentials.json
+*.env
+.env.local
+.env.*.local
+config.ini
+
+# --- [Virtual environments] ---
+venv32/
+venv/
+.venv/
+env/
+*.venv
+kiwoom_32/
+
+# --- [Python] ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- [IDE & Editor] ---
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.code-workspace
+.idea/
+*.swp
+*.swo
+*~
+
+# --- [Logs & Reports] ---
+*.log
+logs/
+backtest/reports/*.html
+backtest_report_*.html
+
+# --- [Data] ---
+*.csv
+*.json
+data/
+temp/
+cache/
+*.sqlite
+
+# --- [OS] ---
+.DS_Store
+Thumbs.db
+desktop.ini
