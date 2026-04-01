@@ -15,7 +15,9 @@ OrderManager — 주문 관리 모듈
 
 from __future__ import annotations
 
+import json
 import logging
+import pathlib
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Callable, Optional
@@ -99,14 +101,24 @@ class Position:
         return self.pnl / cost * 100.0
 
     @property
+    def price_change_pct_vs_avg(self) -> float:
+        """순수 매수평단 대비 등락률(%) — (현재가−평단)/평단×100, 수수료·세금 미반영."""
+        if self.avg_price <= 0:
+            return 0.0
+        cp = self.current_price
+        if cp <= 0:
+            return 0.0
+        return (cp - self.avg_price) / self.avg_price * 100.0
+
+    @property
     def unrealized_cost_minus_value(self) -> int:
         """평균단가×수량 − 현재가×수량 (매입금액 − 평가금액, UI 손익 열)."""
         return self.avg_price * self.qty - self.current_price * self.qty
 
     @property
     def pnl_pct(self) -> float:
-        """return_pct_vs_avg 와 동일 (하위 호환)."""
-        return self.return_pct_vs_avg
+        """손절·익절·표시용 순수 등락률 — price_change_pct_vs_avg 와 동일."""
+        return self.price_change_pct_vs_avg
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +163,15 @@ class OrderManager(QObject):
         self._pending:  set[str] = set()                 # 주문 중 종목 (중복 방지)
         self._app_pending_buys: dict[str, int] = {}       # code -> 남은 앱 매수 주문 수량 (부분체결 추적)
         self._pnl_date: date = date.today()
-        self.daily_realized_pnl: int = 0                 # 당일 실현손익 — _today_fill_log 매도 실현 합
-        self._today_fill_log: list[dict] = []             # 당일 매수/매도 체결 기록(날짜 바뀌면 비움)
+        # 당일 실현손익 = 파일에서 복구한 이전 세션 합 + 이번 세션 매도 체결 합
+        self.daily_realized_pnl: int = 0
+        self._broker_realized_base: int = 0               # 시작 시 파일/opt10074에서 복구한 당일 누적 기준값
+        self._today_fill_log: list[dict] = []             # 이번 세션 체결 로그
+        self._fills_initialized: bool = False             # 시작 시 1회만 파일 로드하는 플래그
+
+        # 포지션 실시간 현재가 구독 콜백 (SmartScanner에서 주입)
+        self.on_position_opened: Optional[Callable[[str], None]] = None
+        self.on_position_closed: Optional[Callable[[str], None]] = None
 
         self._connect_chejan()
 
@@ -199,6 +218,7 @@ class OrderManager(QObject):
             logger.info("잔고 동기화 완료 — 예수금 %s원 (서버=%s / 투자=%s) / 보유 %d종목",
                         f"{self.cash:,}", f"{server_cash:,}", f"{invested:,}",
                         len(self.positions))
+            self._sync_daily_realized_from_broker()
         except Exception as e:
             logger.error("잔고 동기화 실패: %s", e)
         return self.cash
@@ -224,7 +244,9 @@ class OrderManager(QObject):
         try:
             from config import RISK as _RISK
             _mx = float(_RISK.get("max_change_pct", 15.0))
-            _pct = float(self._kiwoom.get_stock_info(code).get("change_pct", 0) or 0)
+            _info = self._kiwoom.get_stock_info(code)
+            _pct = float(_info.get("change_pct", 0) or 0)
+            logger.debug("[매수 등락률 체크] %s — 현재 등락률: %.2f%% (상한: %.1f%%)", name, _pct, _mx)
             if _pct >= _mx:
                 msg = f"매수 차단 — 등락률 {_pct:.1f}% ≥ 상한 {_mx:.1f}% ({name})"
                 logger.warning(msg)
@@ -248,17 +270,19 @@ class OrderManager(QObject):
             self.order_failed.emit(msg)
             return
 
-        if self.cash < 100_000:
-            msg = f"가용 예수금 부족 — {self.cash:,}원"
+        # ── 수량 계산 — 100% 현금 운용 (예수금 전액 소진) ──────────────────
+        # 남은 슬롯 수 기준으로 예수금을 균등 분배
+        remaining_slots = self.max_positions - len(self.positions) - len(self._pending)
+        remaining_slots = max(remaining_slots, 1)  # 0 나누기 방지
+        budget = self.cash // remaining_slots
+        qty = budget // price if price > 0 else 0
+
+        # ── 가용 예수금 부족 체크 ─────────────────────────────────────────
+        # 최소 1주 매수 불가능하면 주문 미실행
+        if qty <= 0:
+            msg = f"가용 예수금 부족 — 최소 1주 매수 불가 (예수금 {self.cash:,} / 주가 {price:,})"
             logger.warning(msg)
             self.order_failed.emit(msg)
-            return
-
-        # ── 수량 계산 ─────────────────────────────────────────────────────
-        budget = min(self.cash, self.max_order_amount)
-        qty = budget // price if price > 0 else 0
-        if qty <= 0:
-            self.order_failed.emit(f"{name} 수량 0 — 예산 {budget:,} / 가격 {price:,}")
             return
 
         self.buy(code, name, qty, price=0)  # 시장가 매수
@@ -272,15 +296,95 @@ class OrderManager(QObject):
         if self._pnl_date != today:
             self._pnl_date = today
             self.daily_realized_pnl = 0
+            self._broker_realized_base = 0
             self._today_fill_log.clear()
+            self._fills_initialized = False  # 새 날짜 → 세션 초기화 재허용
             for p in self.positions.values():
                 p.qty_buy_today_app = 0
 
+    # ── 당일 실현손익 — 체결 이력 파일 (append-only, 재시작 복구 지원) ─────────
+    # 절대 경로: order_manager.py 위치 기준 → 프로젝트루트/logs/fills_YYYYMMDD.jsonl
+    _FILLS_DIR = pathlib.Path(__file__).resolve().parent.parent / "logs"
+
+    def _fills_path(self) -> pathlib.Path:
+        return self._FILLS_DIR / f"fills_{date.today().strftime('%Y%m%d')}.jsonl"
+
+    def _append_fill_to_file(self, realized: int, code: str, name: str,
+                              sell_price: int, avg_price: int, qty: int) -> None:
+        """매도 체결 1건을 오늘 이력 파일에 추가한다 (append-only)."""
+        try:
+            self._FILLS_DIR.mkdir(parents=True, exist_ok=True)
+            entry = json.dumps({
+                "ts":         datetime.now().isoformat(timespec="seconds"),
+                "code":       code,
+                "name":       name,
+                "sell_price": sell_price,
+                "avg_price":  avg_price,
+                "qty":        qty,
+                "realized":   realized,
+            }, ensure_ascii=False)
+            with self._fills_path().open("a", encoding="utf-8") as f:
+                f.write(entry + "\n")
+        except Exception as e:
+            logger.warning("체결 이력 파일 저장 실패 — 재시작 후 손익 복구 불가: %s", e)
+
+    def _load_realized_from_fills_file(self) -> int:
+        """오늘 이력 파일의 모든 realized 합계를 반환한다."""
+        try:
+            fpath = self._fills_path()
+            if not fpath.exists():
+                return 0
+            total = 0
+            for line in fpath.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    total += int(json.loads(line).get("realized", 0))
+            return total
+        except Exception as e:
+            logger.debug("체결 이력 파일 로드 실패(무시): %s", e)
+            return 0
+
     def _recompute_daily_realized_from_ledger(self) -> None:
-        """매도 체결 기록의 realized 합으로 당일 실현손익을 맞춘다."""
-        self.daily_realized_pnl = sum(
+        """기준값(_broker_realized_base) + 이번 세션 매도 체결 합."""
+        extra = sum(
             int(x.get("realized", 0)) for x in self._today_fill_log if x.get("side") == "sell"
         )
+        self.daily_realized_pnl = self._broker_realized_base + extra
+
+    def _sync_daily_realized_from_broker(self) -> None:
+        """당일 실현손익 기준값을 세션 시작 시 1회만 초기화한다.
+
+        우선순위: opt10074(실전) → 로컬 체결 이력 파일(모의투자/재시작)
+        _fills_initialized 플래그로 이중합산 방지.
+        """
+        if self._fills_initialized:
+            return   # 세션 내 중복 호출 무시
+
+        # ① opt10074 시도 (실전 투자)
+        v: Optional[int] = None
+        try:
+            v = self._kiwoom.get_today_realized_pnl()
+        except Exception as e:
+            logger.warning("당일 실현손익 TR 조회 예외: %s", e)
+
+        if v is not None and v != 0:
+            # opt10074 반환값이 유효한 경우 사용 (양수=이익, 음수=손실 모두 허용)
+            self._broker_realized_base = int(v)
+            self._today_fill_log.clear()
+            self._recompute_daily_realized_from_ledger()
+            logger.info("당일 실현손익 opt10074 — %s원", f"{self._broker_realized_base:,}")
+        else:
+            # v가 None(TR 실패) 또는 0(모의투자 미지원/오늘 거래 없음) → 파일에서 복구
+            file_sum = self._load_realized_from_fills_file()
+            self._broker_realized_base = file_sum
+            self._today_fill_log.clear()
+            self._recompute_daily_realized_from_ledger()
+            if file_sum != 0:
+                logger.info("당일 실현손익 파일 복구 — %s원", f"{file_sum:,}")
+            else:
+                logger.info("당일 실현손익 0원 — 오늘 매도 체결 없음 (또는 모의투자 미지원)")
+
+        self._fills_initialized = True
 
     @property
     def today_fill_log(self) -> tuple[dict, ...]:
@@ -449,6 +553,8 @@ class OrderManager(QObject):
 
         is_app_buy = order_type == OrderType.BUY and code in self._app_pending_buys
 
+        avg_buy_for_log: Optional[int] = None  # 매도 체결 로그용 (포지션 갱신 전 평단)
+
         # 포지션 반영
         if order_type == OrderType.BUY:
             if is_app_buy:
@@ -487,11 +593,19 @@ class OrderManager(QObject):
                 "price": filled_price,
                 "amount": filled_qty * filled_price,
             })
+            # [NEW] 포지션 실시간 등록
+            if self.on_position_opened:
+                self.on_position_opened(code)
 
         elif order_type == OrderType.SELL:
             if code in self.positions:
                 pos = self.positions[code]
-                realized = (filled_price - pos.avg_price) * filled_qty
+                avg_buy_for_log = pos.avg_price
+                # 실제 순익 = 가격차이 - 매도수수료 - 증권세 - 매수수수료(평단 기준)
+                sell_amount = filled_price * filled_qty
+                buy_amount  = pos.avg_price * filled_qty
+                cost = round(sell_amount * (_FEE + _TAX) + buy_amount * _FEE)
+                realized = (filled_price - pos.avg_price) * filled_qty - cost
                 self._today_fill_log.append({
                     "ts": datetime.now().strftime("%H:%M:%S"),
                     "side": "sell",
@@ -502,11 +616,19 @@ class OrderManager(QObject):
                     "amount": filled_qty * filled_price,
                     "realized": realized,
                 })
+                # [NEW] 매도 체결을 파일에 append → 재시작 후에도 복구 가능
+                self._append_fill_to_file(
+                    realized=realized, code=code, name=name,
+                    sell_price=filled_price, avg_price=pos.avg_price, qty=filled_qty,
+                )
                 self._recompute_daily_realized_from_ledger()
                 sell_from_today = min(filled_qty, pos.qty_buy_today_app)
                 pos.qty_buy_today_app -= sell_from_today
                 pos.qty -= filled_qty
                 if pos.qty <= 0:
+                    # [NEW] 포지션 실시간 해제
+                    if self.on_position_closed:
+                        self.on_position_closed(code)
                     del self.positions[code]
             self.cash += filled_qty * filled_price
 
@@ -520,6 +642,24 @@ class OrderManager(QObject):
             "filled_qty":   filled_qty,
             "filled_price": filled_price,
         }
-        logger.info("체결 — %s %s %d주 @%s원", name, payload["side"],
-                    filled_qty, f"{filled_price:,}")
+        if avg_buy_for_log is not None:
+            payload["avg_buy_price"] = avg_buy_for_log
+
+        if order_type == OrderType.SELL and avg_buy_for_log is not None:
+            logger.info(
+                "체결 — %s %s %d주 매수가 %s원 → 매도가 %s원",
+                name,
+                payload["side"],
+                filled_qty,
+                f"{avg_buy_for_log:,}",
+                f"{filled_price:,}",
+            )
+        else:
+            logger.info(
+                "체결 — %s %s %d주 @%s원",
+                name,
+                payload["side"],
+                filled_qty,
+                f"{filled_price:,}",
+            )
         self.order_filled.emit(payload)

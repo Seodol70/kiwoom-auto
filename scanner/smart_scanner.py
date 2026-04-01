@@ -26,7 +26,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime
+from datetime import date, datetime, time as dtime
 from typing import Callable, Optional
 
 import pandas as pd
@@ -68,6 +68,52 @@ scan_log: logging.Logger = _build_scan_logger()
 
 
 # ---------------------------------------------------------------------------
+# 거래대금 표기 (원 → 조·억 한글, 진단용 증가율)
+# ---------------------------------------------------------------------------
+
+_JO_WON = 1_000_000_000_000
+_EOK_WON = 100_000_000
+
+
+def format_trade_amount_korean(amount_won: int) -> str:
+    """
+    누적 거래대금(원)을 '3조 7,238억' 형으로 표기한다.
+    1억 미만은 만원·원 단위로 축약한다.
+    """
+    try:
+        n = int(amount_won)
+    except (TypeError, ValueError):
+        return "0억"
+    if n <= 0:
+        return "0억"
+    jo = n // _JO_WON
+    rem = n % _JO_WON
+    eok_int = rem // _EOK_WON
+    parts: list[str] = []
+    if jo > 0:
+        parts.append(f"{jo}조")
+    if eok_int > 0:
+        parts.append(f"{eok_int:,}억")
+    if parts:
+        return " ".join(parts)
+    man = n // 10_000
+    if man > 0:
+        return f"{man:,}만원"
+    return f"{n:,}원"
+
+
+def format_trade_amount_growth(current: int, baseline: Optional[int]) -> str:
+    """거래대금 증가율(%) — baseline 이 없거나 0이면 '—'."""
+    if baseline is None or baseline <= 0:
+        return "증가율(9시대비) —"
+    pct = (current - baseline) / baseline * 100.0
+    return (
+        f"증가율(9시대비) {pct:+.1f}% "
+        f"(기준 {format_trade_amount_korean(baseline)})"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 설정
 # ---------------------------------------------------------------------------
 
@@ -85,16 +131,28 @@ class SmartScannerConfig:
     breakout_volume_mult: float = 1.5
     jdm_ma_short:         int   = 7          # 최적화됨: 5→7
     jdm_ma_long:          int   = 15         # 최적화됨: 20→15
-    jdm_rsi_low:          float = 35.0       # 최적화됨: 30→35
-    jdm_rsi_high:         float = 70.0
+    jdm_rsi_low:          float = 35.0       # 레거시(다른 로직 참고용). 진입은 jdm_rsi_entry_min 사용
+    jdm_rsi_high:         float = 70.0       # RSI 상한(과열 차단)
+    jdm_rsi_entry_min:    float = 60.0       # JDM 진입 RSI 하한 — 횡보·무기력 구간 배제
+    jdm_min_ma_spread_abs: int = 30          # 골든크로스 시 MA단기−MA장기 최소 이격(원) — 미세 교차 방지
     jdm_take_profit_pct:  float = 3.0        # 익절 목표 (최적화됨: 4.0%→3.0%)
     jdm_stop_loss_pct:    float = -1.0       # 손절 기준 (최적화됨: -1.5%→-1.0%)
     markets:              tuple = ("0", "10")
     screen_realtime:      str   = "9200"
     display_top_n:        int   = 50    # 스캐너 UI 감시 테이블·Worker 상위 표시
+    # [진단] 로그 거래대금 상위 샘플 — 매수 후보 전체와 무관(후보는 watch_pool_max·display_top_n 참고)
+    diagnostic_sample_n:  int   = 5
     log_dir:              str   = "logs"
     # 등락률이 이 값 **이상**이면 감시·신호·매수 대상에서 제외 (config RISK.max_change_pct 와 동기화)
     max_change_pct:       float = 15.0
+    # ScannerWorker: 동일 종목 재 emit 최소 간격(초). 에지 트리거와 병행 (config RISK.signal_cooldown_sec)
+    signal_cooldown_sec:  float = 45.0
+    # [NEW] 4중 필터 — JDM 신호 품질 강화
+    entry_start_time:     dtime = dtime(9, 0, 0)    # 진입 허용 시작
+    entry_end_time:       dtime = dtime(9, 30, 0)   # 진입 허용 종료
+    min_chejan_strength:  float = 120.0             # 체결강도 하한 (%)
+    volume_surge_mult:    float = 3.0               # 분봉 거래량 배수 (직전 5분 평균 대비)
+    max_disparity_pct:    float = 5.0               # MA20 이격도 상한 (%)
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +269,8 @@ class StockSnapshot:
     prev_close:    int   = 0
     change_pct:    float = 0.0
     closes_1min:   list  = field(default_factory=list)
+    chejan_strength: float = 100.0          # [NEW] 체결강도 (FID 20)
+    volumes_1min:   list  = field(default_factory=list)   # [NEW] 1분봉 거래량
     updated_at:    datetime = field(default_factory=datetime.now)
 
 
@@ -235,6 +295,26 @@ _DF_COLS = [
     "rank", "updated_at",
 ]
 
+
+def _df_cell_scalar(val, default=None):
+    """
+    DataFrame.loc[code] 행에서 컬럼 값이 스칼라가 아니라 Series인 경우(중복 컬럼명 등) 대비.
+    truthiness 검사로 Series를 건드리지 않도록 첫 스칼라만 꺼낸다.
+    """
+    if val is None:
+        return default
+    if isinstance(val, pd.Series):
+        if val.empty:
+            return default
+        val = val.iloc[0]
+    try:
+        if pd.isna(val):
+            return default
+    except TypeError:
+        pass
+    return val
+
+
 class SnapshotStore:
     """
     전 종목 스냅샷을 pandas DataFrame 에 보관한다.
@@ -256,6 +336,11 @@ class SnapshotStore:
         self._df   = pd.DataFrame(columns=_DF_COLS).set_index("code")
         self._mins: dict[str, list[float]] = {}   # code → 1분봉 종가
         self._last_min: dict[str, int] = {}        # code → 마지막 기록된 분(minute)
+        # [NEW] 분봉 거래량 추적
+        self._min_vols:  dict[str, list[int]]   = {}   # code → 1분봉 별 거래량 델타
+        self._last_vol:  dict[str, int]         = {}   # code → 직전 분 경계 누적거래량
+        # [NEW] 체결강도 추적
+        self._chejan_str: dict[str, float]      = {}   # code → 체결강도 (FID 20)
         self._lock = threading.Lock()
 
     # ── 일괄 적재 ─────────────────────────────────────────────────────────
@@ -347,10 +432,19 @@ class SnapshotStore:
                        datetime.now().minute)
             if self._last_min.get(code, -1) != cur_min:
                 self._last_min[code] = cur_min
+                # [기존] 1분봉 종가 기록
                 mins = self._mins.setdefault(code, [])
                 mins.append(float(current_price))
                 if len(mins) > 120:
                     mins.pop(0)
+                # [NEW] 1분봉 거래량 델타 기록 (직전 분의 누적거래량 증가량)
+                prev_cumvol = self._last_vol.get(code, volume)
+                delta       = max(0, volume - prev_cumvol)
+                vols        = self._min_vols.setdefault(code, [])
+                vols.append(delta)
+                if len(vols) > 120:
+                    vols.pop(0)
+                self._last_vol[code] = volume  # 새 분 시작 기준선 갱신
 
     # ── 조회 ──────────────────────────────────────────────────────────────
 
@@ -360,20 +454,63 @@ class SnapshotStore:
             if code not in self._df.index:
                 return None
             row = self._df.loc[code]
+
+            def safe_int_cell(key: str, default: int = 0) -> int:
+                v = _df_cell_scalar(row.get(key, default), None)
+                if v is None:
+                    return default
+                try:
+                    iv = int(float(v))
+                except (TypeError, ValueError):
+                    return default
+                return iv if iv != 0 else default
+
+            def safe_float_cell(key: str, default: float = 0.0) -> float:
+                v = _df_cell_scalar(row.get(key, default), None)
+                if v is None:
+                    return default
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    return default
+                return fv if fv != 0 else default
+
+            nm = _df_cell_scalar(row.get("name", ""), "")
+            name_s = str(nm) if nm is not None else ""
+
+            ua_raw = _df_cell_scalar(row.get("updated_at"), None)
+            if isinstance(ua_raw, datetime):
+                updated_at = ua_raw
+            elif ua_raw is not None:
+                try:
+                    updated_at = pd.Timestamp(ua_raw).to_pydatetime()
+                except Exception:
+                    updated_at = datetime.now()
+            else:
+                updated_at = datetime.now()
+
             return StockSnapshot(
                 code          = code,
-                name          = str(row.get("name", "")),
-                current_price = int(row.get("current_price", 0) or 0),
-                open_price    = int(row.get("open_price",    0) or 0),
-                high_price    = int(row.get("high_price",    0) or 0),
-                low_price     = int(row.get("low_price",     0) or 0),
-                volume        = int(row.get("volume",        0) or 0),
-                trade_amount  = int(row.get("trade_amount",  0) or 0),
-                prev_close    = int(row.get("prev_close",    0) or 0),
-                change_pct    = float(row.get("change_pct",  0) or 0),
+                name          = name_s,
+                current_price = safe_int_cell("current_price", 0),
+                open_price    = safe_int_cell("open_price",    0),
+                high_price    = safe_int_cell("high_price",    0),
+                low_price     = safe_int_cell("low_price",     0),
+                volume        = safe_int_cell("volume",        0),
+                trade_amount  = safe_int_cell("trade_amount",  0),
+                prev_close    = safe_int_cell("prev_close",    0),
+                change_pct    = safe_float_cell("change_pct",  0.0),
                 closes_1min   = list(self._mins.get(code, [])),
-                updated_at    = row.get("updated_at", datetime.now()),
+                chejan_strength = self._chejan_str.get(code, 100.0),  # [NEW]
+                volumes_1min    = list(self._min_vols.get(code, [])),  # [NEW]
+                updated_at    = updated_at,
             )
+
+    def update_chejan_strength(self, code: str, strength: float) -> None:
+        """[NEW] 체결강도(FID 20) 갱신."""
+        if strength > 0:
+            with self._lock:
+                self._chejan_str[code] = strength
 
     def prefilter_candidates(self, max_change_pct: Optional[float] = None) -> list[str]:
         """
@@ -545,7 +682,7 @@ class ScannerDisplay:
         table.add_column("현재가",  justify="right",  width=9)
         table.add_column("등락률",  justify="right",  width=8)
         table.add_column("거래량",  justify="right",  width=10)
-        table.add_column("거래대금(억)", justify="right", width=10)
+        table.add_column("거래대금", justify="right", width=16)
         table.add_column("갱신시각", width=9)
 
         if top_df.empty:
@@ -553,7 +690,9 @@ class ScannerDisplay:
             return table
 
         for rank, (code, row) in enumerate(top_df.iterrows(), 1):
-            change = float(row.get("change_pct", 0) or 0)
+            # pandas Series에서 값 안전하게 추출 (or 연산자 사용 금지)
+            cp = row.get("change_pct", 0)
+            change = float(cp) if cp else 0.0
             if change > 0:
                 pct_text = Text(f"+{change:.2f}%", style="bright_red")
             elif change < 0:
@@ -561,9 +700,12 @@ class ScannerDisplay:
             else:
                 pct_text = Text(f"{change:.2f}%",  style="white")
 
-            price = int(row.get("current_price", 0) or 0)
-            vol   = int(row.get("volume",        0) or 0)
-            amt   = int(row.get("trade_amount",  0) or 0)
+            p = row.get("current_price", 0)
+            v = row.get("volume", 0)
+            a = row.get("trade_amount", 0)
+            price = int(p) if p else 0
+            vol   = int(v) if v else 0
+            amt   = int(a) if a else 0
             upd   = row.get("updated_at", datetime.now())
             upd_s = upd.strftime("%H:%M:%S") if isinstance(upd, datetime) else "--:--:--"
 
@@ -574,7 +716,7 @@ class ScannerDisplay:
                 f"{price:,}",
                 pct_text,
                 f"{vol:,}",
-                f"{amt / 1e8:.1f}",
+                format_trade_amount_korean(amt),
                 upd_s,
             )
 
@@ -643,7 +785,7 @@ class PriorityWatchQueue:
                 code_list = ";".join(to_add)
                 self._kiwoom._ocx.dynamicCall(
                     "SetRealReg(QString, QString, QString, QString)",
-                    [self._screen, code_list, "10;11;12;13;14;16;17;18", "1"],
+                    [self._screen, code_list, "10;11;12;13;14;16;17;18;20", "1"],  # [NEW] FID 20: 체결강도
                 )
                 self._subscribed.update(to_add)
                 logger.debug("[PriorityWatchQueue] SetRealReg 배치 등록 %d종목", len(to_add))
@@ -651,7 +793,7 @@ class PriorityWatchQueue:
     def _sub(self, code: str) -> None:
         self._kiwoom._ocx.dynamicCall(
             "SetRealReg(QString, QString, QString, QString)",
-            [self._screen, code, "10;11;12;13;14;16;17;18", "1"],
+            [self._screen, code, "10;11;12;13;14;16;17;18;20", "1"],  # [NEW] FID 20: 체결강도
         )
         self._subscribed.add(code)
 
@@ -816,10 +958,81 @@ def check_jdm_open_breakout(
     return reason
 
 
+# [NEW] 신규 필터 함수 3개 — JDM 신호 품질 강화 (4중 필터)
+
+def check_volume_surge(
+    snap: StockSnapshot,
+    surge_mult: float = 3.0,
+) -> Optional[str]:
+    """[NEW] 직전 5분 평균 거래량 대비 surge_mult 배 이상인지 확인."""
+    vols = snap.volumes_1min
+    if len(vols) < 6:
+        return None   # 데이터 부족
+    avg5 = sum(vols[-6:-1]) / 5
+    if avg5 <= 0:
+        return None
+    cur = vols[-1]
+    if cur < avg5 * surge_mult:
+        ScannerLogger.rejected(snap.code, snap.name, "VOL_SURGE",
+                               f"거래량 {cur:,} / 5분평균 {avg5:,.0f} ({cur/avg5:.1f}배 < {surge_mult}배)")
+        return None
+    return f"거래량급증{cur:,}주({cur/avg5:.1f}배)"
+
+
+def check_chejan_strength(
+    snap: StockSnapshot,
+    min_strength: float = 120.0,
+) -> Optional[str]:
+    """[NEW] 체결강도 min_strength% 이상 확인 (매수 수급 우위)."""
+    if snap.chejan_strength < min_strength:
+        ScannerLogger.rejected(snap.code, snap.name, "CHEJAN",
+                               f"체결강도 {snap.chejan_strength:.0f}% < {min_strength:.0f}%")
+        return None
+    return f"체결강도{snap.chejan_strength:.0f}%"
+
+
+def check_disparity_from_ma(
+    snap: StockSnapshot,
+    ma_period: int   = 20,
+    max_pct: float   = 5.0,
+) -> Optional[str]:
+    """[NEW] 1분봉 MA(ma_period) 대비 이격도 max_pct% 이내 확인 (과열 차단)."""
+    closes = snap.closes_1min
+    if len(closes) < ma_period:
+        return None   # 데이터 부족 시 bypass (초반 20분간 허용)
+    from strategy.jang_dong_min import calc_ma
+    ma = calc_ma(closes, ma_period)
+    if ma is None or ma <= 0:
+        return None
+    disp = (snap.current_price - ma) / ma * 100
+    if disp > max_pct:
+        ScannerLogger.rejected(snap.code, snap.name, "DISPARITY",
+                               f"MA{ma_period} 이격도 {disp:.1f}% > {max_pct:.1f}%")
+        return None
+    return f"MA{ma_period}이격{disp:.1f}%"
+
+
 def check_jdm_entry(
     snap: StockSnapshot,
     cfg:  SmartScannerConfig,
 ) -> Optional[str]:
+    """
+    JDM_ENTRY 통합 게이트 (ScannerWorker / SmartScanner._evaluate 공통).
+
+    ① 진입 허용 시각(entry_start~entry_end) — 오후 저유동 구간 등 배제
+    ② 직전 5분 평균 대비 분봉 거래량 volume_surge_mult 배 이상
+    ③ 체결강도 min_chejan_strength% 이상
+    ④ MA 골든크로스 + 단·장기 이격 jdm_min_ma_spread_abs 원 이상
+    ⑤ RSI ∈ [jdm_rsi_entry_min, jdm_rsi_high)
+    """
+    now = datetime.now().time()
+    if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM_TIME",
+            f"진입 허용 시간 아님 ({cfg.entry_start_time}~{cfg.entry_end_time})",
+        )
+        return None
+
     closes = snap.closes_1min
     need   = cfg.jdm_ma_long + 1
 
@@ -828,6 +1041,14 @@ def check_jdm_entry(
             snap.code, snap.name, "JDM",
             f"1분봉 데이터 부족 ({len(closes)}/{need})",
         )
+        return None
+
+    r_vol = check_volume_surge(snap, cfg.volume_surge_mult)
+    if r_vol is None:
+        return None
+
+    r_chej = check_chejan_strength(snap, cfg.min_chejan_strength)
+    if r_chej is None:
         return None
 
     from strategy.jang_dong_min import calc_ma, calc_rsi
@@ -841,22 +1062,31 @@ def check_jdm_entry(
         return None
 
     golden = pma_s <= pma_l and ma_s > ma_l
-    rsi_ok = cfg.jdm_rsi_low < rsi < cfg.jdm_rsi_high
-
     if not golden:
         ScannerLogger.rejected(snap.code, snap.name, "JDM", "골든크로스 미충족")
         return None
-    if not rsi_ok:
+
+    spread = float(ma_s) - float(ma_l)
+    if spread < float(cfg.jdm_min_ma_spread_abs):
         ScannerLogger.rejected(
             snap.code, snap.name, "JDM",
-            f"RSI 범위 이탈 ({rsi:.1f})",
+            f"MA 이격 부족 (단기−장기={spread:.0f}원 < {cfg.jdm_min_ma_spread_abs}원)",
         )
         return None
 
-    reason = (
+    rsi_ok = cfg.jdm_rsi_entry_min <= rsi < cfg.jdm_rsi_high
+    if not rsi_ok:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM",
+            f"RSI {rsi:.1f} (진입허용 {cfg.jdm_rsi_entry_min:.0f}~{cfg.jdm_rsi_high:.0f})",
+        )
+        return None
+
+    core = (
         f"MA골든크로스 MA{cfg.jdm_ma_short}={ma_s:.0f} / "
         f"MA{cfg.jdm_ma_long}={ma_l:.0f} | RSI={rsi:.1f}"
     )
+    reason = f"{r_vol} | {r_chej} | {core}"
     ScannerLogger.passed(snap.code, snap.name, "JDM", reason)
     return reason
 
@@ -905,11 +1135,47 @@ class SmartScanner:
 
         self.on_signal: Optional[Callable[[ScanSignal], None]] = None
 
+        # 포지션 현재가 실시간 업데이트용 (MainWindow에서 주입)
+        self._order_mgr = None
+
         # watch_q.refresh 쓰로틀 — SetRealReg를 매 틱 호출 방지 (30초 간격)
         self._last_watchq_refresh: float = 0.0
         self._WATCHQ_INTERVAL: float = 30.0
 
+        # 동적 감시 중단: 포지션 풀(max_positions)시 유니버스 감시를 보유종목만으로 축소
+        self._universe_paused: bool = False
+        # WATCH 모드 예비 종목 갱신 주기 (스코어링 기반)
+        self._last_reserve_refresh: float = 0.0
+        self._RESERVE_INTERVAL: float = 10.0   # 10초마다 예비 top-2 재선정
+
+        # 거래대금 '9시(장시작) 대비' 증가율 — 종목별 당일 최초 관측값(설정: pre_filter_time 이후·양수)을 기준
+        self._amt_baseline_date: Optional[date] = None
+        self._amt_baseline: dict[str, int] = {}
+
         self._connect_realtime_signal()
+
+    def _roll_amt_baseline_date(self) -> None:
+        t = date.today()
+        if self._amt_baseline_date != t:
+            self._amt_baseline_date = t
+            self._amt_baseline.clear()
+
+    def _touch_trade_amt_baseline(self, code: str, amt: int) -> None:
+        """기준 시각(pre_filter_time) 이후 해당 종목의 최초 양수 거래대금을 당일 기준으로 고정."""
+        self._roll_amt_baseline_date()
+        if code in self._amt_baseline or amt <= 0:
+            return
+        if datetime.now().time() < self.cfg.pre_filter_time:
+            return
+        self._amt_baseline[code] = amt
+
+    def _trade_amount_diag(self, code: str, amt: int) -> str:
+        """Pre-Filter 등 로그용: 조·억 표기 + 9시대비 증가율."""
+        a = int(amt or 0)
+        self._touch_trade_amt_baseline(code, a)
+        ta = format_trade_amount_korean(a)
+        gr = format_trade_amount_growth(a, self._amt_baseline.get(code))
+        return f"거래대금 {ta} · {gr}"
 
     # -----------------------------------------------------------------------
     # 시작 / 정지
@@ -989,12 +1255,13 @@ class SmartScanner:
 
         for idx, row in enumerate(rows, 1):
             self.top_mgr.update(row["code"], row["trade_amount"])
-            trade_billion = row["trade_amount"] / 1e8
             change_pct = row.get("change_pct", 0)
 
-            log_msg = (f"거래대금 {trade_billion:.1f}억 / "
-                      f"등락률 {change_pct:+.2f}% / "
-                      f"현재가 {row.get('current_price', 0):,}원")
+            log_msg = (
+                f"{self._trade_amount_diag(row['code'], int(row.get('trade_amount') or 0))} / "
+                f"등락률 {change_pct:+.2f}% / "
+                f"현재가 {row.get('current_price', 0):,}원"
+            )
 
             ScannerLogger.passed(
                 row["code"], row.get("name", ""), "PRE_FILTER", log_msg
@@ -1027,28 +1294,55 @@ class SmartScanner:
         while self._running:
             t0 = time.monotonic()
             if self._prefiltered:
-                for code in list(self.watch_q.subscribed):
-                    # ① API 없이 store 에서 바로 읽음
-                    snap = self.store.get_snapshot(code)
-                    if snap:
-                        self._evaluate(snap)
+                if self._universe_paused:
+                    # ====== WATCH 모드 ======
+                    # Tier 1(보유 5개): 현재가 갱신은 _on_receive_real_data + order_manager 처리
+                    #   → 여기서는 아무것도 하지 않음 (0.1초 sleep만)
+                    # Tier 2(예비 2개): 10초마다 스코어링으로 최신화
+                    if t0 - self._last_reserve_refresh >= self._RESERVE_INTERVAL:
+                        self._refresh_reserve_codes()
+                        self._last_reserve_refresh = t0
+                else:
+                    # ====== SEARCH 모드 ======
+                    # Tier 3 전체(~110개): 매 사이클 _evaluate() 실행
+                    for code in list(self.watch_q.subscribed):
+                        snap = self.store.get_snapshot(code)
+                        if snap:
+                            self._evaluate(snap)
             elapsed = time.monotonic() - t0
-            time.sleep(max(0.0, self.cfg.scan_interval - elapsed))
+            # WATCH 모드: 0.1초(초정밀 대기) / SEARCH 모드: 기본 주기(1초)
+            interval = 0.1 if self._universe_paused else self.cfg.scan_interval
+            time.sleep(max(0.0, interval - elapsed))
 
     def _evaluate(self, snap: StockSnapshot) -> None:
-        if snap.change_pct >= self.cfg.max_change_pct:
-            return
-        reason = check_breakout(snap, self.cfg.breakout_ratio,
-                                self.cfg.breakout_volume_mult)
-        if reason:
-            self._emit(ScanSignal(snap.code, snap.name,
-                                  "BREAKOUT", snap.current_price, reason))
+        # ① 유니버스 감시 중단 — 포지션 풀 시 신규 신호 판단 차단
+        if self._universe_paused:
             return
 
-        reason = check_jdm_entry(snap, self.cfg)
-        if reason:
-            self._emit(ScanSignal(snap.code, snap.name,
-                                  "JDM_ENTRY", snap.current_price, reason))
+        # ② 등락률 상한 (기존)
+        if snap.change_pct >= self.cfg.max_change_pct:
+            return
+
+        # ② 시간 필터 — check_jdm_entry에도 동일 적용(이중 차단으로 조기 return)
+        now = datetime.now().time()
+        if not (self.cfg.entry_start_time <= now <= self.cfg.entry_end_time):
+            return
+
+        # ③ 시가 돌파 + 신고가 경신
+        r_open = check_jdm_open_breakout(snap)
+        if r_open is None:
+            return
+
+        # ④ MA20 이격도 — 데이터 부족 시 bypass(None은 조인에서 제외)
+        r_disp = check_disparity_from_ma(snap, max_pct=self.cfg.max_disparity_pct)
+
+        # ⑤ JDM: 시간·거래량급증·체결강도·골든크로스·MA이격·RSI≥하한 (통합)
+        r_jdm = check_jdm_entry(snap, self.cfg)
+        if r_jdm is None:
+            return
+
+        reason = " | ".join(r for r in [r_open, r_disp, r_jdm] if r)
+        self._emit(ScanSignal(snap.code, snap.name, "JDM_ENTRY", snap.current_price, reason))
 
     # -----------------------------------------------------------------------
     # 3단계: Final Signal
@@ -1092,6 +1386,7 @@ class SmartScanner:
             low   = safe_int(fid(18))
             open_ = safe_int(fid(16))
             pct   = safe_float(fid(12))
+            strength = safe_float(fid(20))    # [NEW] FID 20: 체결강도
 
             if price <= 0:
                 return   # 유효하지 않은 체결 데이터
@@ -1102,12 +1397,21 @@ class SmartScanner:
                 low_price=low, open_price=open_, volume=vol,
                 trade_amount=amt, change_pct=pct,
             )
+            self._touch_trade_amt_baseline(code, amt)
             self.top_mgr.update(code, amt)
 
+            # [NEW] 체결강도 저장 (FID 20)
+            if strength > 0:
+                self.store.update_chejan_strength(code, strength)
+
+            # [NEW] 포지션 종목 현재가 실시간 반영 (손절/익절 정확도 개선)
+            if self._order_mgr and code in self._order_mgr.positions and price > 0:
+                self._order_mgr.positions[code].current_price = price
+
             # watch_q.refresh — SetRealReg/Remove를 매 틱 호출하면 API 과부하
-            # 30초 간격으로만 구독 목록을 갱신한다
+            # 30초 간격으로만 구독 목록을 갱신한다 (유니버스 감시 중단 중은 스킵)
             now_t = time.monotonic()
-            if now_t - self._last_watchq_refresh >= self._WATCHQ_INTERVAL:
+            if not self._universe_paused and now_t - self._last_watchq_refresh >= self._WATCHQ_INTERVAL:
                 self.watch_q.refresh(self.top_mgr.get_top_codes())
                 self._last_watchq_refresh = now_t
 
@@ -1211,6 +1515,11 @@ class SmartScanner:
             if on_progress:
                 on_progress(phase, current, total, detail)
 
+        # ① WATCH 모드(포지션 풀)이면 opt10030 호출 자체를 스킵
+        if self._universe_paused:
+            logger.info("[주기 스캔] WATCH 모드 — opt10030 스캔 스킵 (SetRealReg 감시 중)")
+            return []
+
         logger.info("=" * 60)
         logger.info("[주기 스캔] 시작 — %s", datetime.now().strftime("%H:%M:%S"))
         _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "opt10030 조회 중...")
@@ -1253,7 +1562,10 @@ class SmartScanner:
         logger.info("[주기 스캔] STEP-B: bulk_update 완료")
 
         for row in rows:
-            self.top_mgr.update(row["code"], row.get("trade_amount", 0))
+            _c = row["code"]
+            _a = int(row.get("trade_amount") or 0)
+            self._touch_trade_amt_baseline(_c, _a)
+            self.top_mgr.update(_c, _a)
         logger.info("[주기 스캔] STEP-C: top_mgr 갱신 완료")
 
         # 감시·선정용 코드 목록은 SnapshotStore(이번 스캔·유니버스필터 반영)만 사용한다.
@@ -1267,10 +1579,12 @@ class SmartScanner:
 
         # STEP-E: SetRealReg 를 이벤트루프 다음 사이클로 위임
         # — dynamicCall 내부에서 Windows 메시지 처리 → OCX 재진입 데드락 방지
+        # — 유니버스 감시 중단 중은 스킵
         _reg_codes = top_codes[:self.cfg.realtime_sub_max]
         logger.info("[주기 스캔] STEP-E: watch_q.refresh 예약 (구독대상=%d)", len(_reg_codes))
-        QTimer.singleShot(0, lambda c=_reg_codes: self.watch_q.refresh(c))
-        logger.info("[주기 스캔] STEP-F: watch_q.refresh 예약 완료")
+        if not self._universe_paused:
+            QTimer.singleShot(0, lambda c=_reg_codes: self.watch_q.refresh(c))
+        logger.info("[주기 스캔] STEP-F: watch_q.refresh %s", "스킵(감시중단)" if self._universe_paused else "예약 완료")
 
         self._prefiltered = True
         logger.info("[주기 스캔] STEP-G: prefiltered=True")
@@ -1295,93 +1609,162 @@ class SmartScanner:
         else:
             logger.info("[주기 스캔] STEP-H: 분봉 데이터 충분 — 초기 로딩 스킵")
 
-        # 진단 로그: bulk_update 이후 샘플 확인
-        sample = self.store.top_by_trade_amount(3)
+        # 진단 로그: bulk_update 이후 거래대금 상위 N종 샘플 (N=diagnostic_sample_n)
+        _dn = max(1, int(self.cfg.diagnostic_sample_n))
+        sample = self.store.top_by_trade_amount(_dn)
         if not sample.empty:
             for code_s, row_s in sample.iterrows():
-                logger.info("[진단] %s(%s) 현재가=%s 거래대금=%s 거래량=%s",
-                            row_s.get("name", "?"), code_s,
-                            f"{int(row_s.get('current_price', 0)):,}",
-                            f"{int(row_s.get('trade_amount', 0)):,}",
-                            f"{float(row_s.get('volume', 0)):,.0f}")
+                _amt = int(row_s.get("trade_amount", 0))
+                _ta = format_trade_amount_korean(_amt)
+                _gr = format_trade_amount_growth(_amt, self._amt_baseline.get(str(code_s)))
+                logger.info(
+                    "[진단] %s(%s) 현재가=%s 거래대금=%s · %s 거래량=%s",
+                    row_s.get("name", "?"), code_s,
+                    f"{int(row_s.get('current_price', 0)):,}",
+                    _ta, _gr,
+                    f"{float(row_s.get('volume', 0)):,.0f}",
+                )
+            logger.info(
+                "[진단] 안내 — 위 %d종은 거래대금 상위 샘플이다. 실제 감시·스냅샷 후보는 최대 %d종, "
+                "ScannerWorker 신호 판단은 상위 %d종에서 수행된다.",
+                _dn,
+                self.cfg.watch_pool_max,
+                self.cfg.display_top_n,
+            )
         else:
             logger.warning("[진단] top_by_trade_amount 결과 없음 — 파싱 필드명 불일치 가능성")
             # rank 기반 샘플 확인
             with self.store._lock:
-                df_sample = self.store._df.head(3)
+                df_sample = self.store._df.head(_dn)
             if not df_sample.empty:
                 logger.warning("[진단] DataFrame 직접 샘플: %s", df_sample[["trade_amount","volume","rank"]].to_dict())
 
         logger.info("[주기 스캔] SnapshotStore 갱신 완료 (%d종목)", len(rows))
 
-        # 3. 분봉 데이터: SetRealReg 실시간 틱 누적 방식으로 자동 채워짐
-        #    (opt10080 TR 호출 제거 — SnapshotStore.update_price()가 매 틱마다 누적)
-        _prog("감시종목 선정", 0, len(top_codes), "신호 판단 중...")
-
-        # 4. 필터링 (스냅샷은 이미 순수 주식만 — 종목명 재확인)
-        final_targets = []
-        testa_pass = 0
-        open_pass = 0
-        no_data_cnt = 0
-
-        for code in top_codes:
-            snap = self.store.get_snapshot(code)
-            if snap is None:
-                logger.debug("[주기 스캔] %s 스냅샷 없음 — 스킵", code)
-                continue
-
-            if not is_pure_equity_name(snap.name):
-                logger.debug("[주기 스캔] %s — ETF·파생 등 제외", snap.name)
-                continue
-
-            if snap.change_pct >= self.cfg.max_change_pct:
-                logger.debug(
-                    "[주기 스캔] %s — 등락률 %.1f%% >= 상한 %.1f%% 제외",
-                    snap.name, snap.change_pct, self.cfg.max_change_pct,
-                )
-                continue
-
-            n_bars = len(snap.closes_1min)
-            logger.debug("[주기 스캔] 종목 검사: %s(%s) 현재가=%d 시가=%d 1분봉=%d개",
-                         snap.name, code, snap.current_price,
-                         snap.open_price, n_bars)
-
-            # 1분봉 데이터 부족하면 시가돌파만 체크 (정배열 생략)
-            if n_bars < 50:
-                no_data_cnt += 1
-                if n_bars < 2:
-                    continue  # 아예 없으면 스킵
-                # 데이터 부족 시 시가돌파 조건만으로 후보 표시 (추천은 아님)
-                breakout = check_jdm_open_breakout(snap)
-                if breakout:
-                    logger.debug("[시가돌파 후보] %s(%s) 1분봉부족(%d개) %s",
-                                 snap.name, code, n_bars, breakout)
-                continue
-
-            # 정배열 체크 (데이터 충분할 때만)
-            aligned = check_testa_alignment(snap)
-            if not aligned:
-                continue
-            testa_pass += 1
-
-            # 시가 돌파 체크
-            breakout = check_jdm_open_breakout(snap)
-            if not breakout:
-                continue
-            open_pass += 1
-
-            reason = f"{aligned} | {breakout}"
-            sig = ScanSignal(code, snap.name, "TESTA+JDM", snap.current_price, reason)
-            ScannerLogger.signal(sig)
-            final_targets.append(sig)
-            logger.info("[최종선정] %s(%s) %s", snap.name, code, reason)
-
-        logger.info("[주기 스캔] 완료 — 조회=%d / 데이터부족=%d / 정배열=%d / 시가돌파=%d / 최종선정=%d",
-                    len(top_codes), no_data_cnt, testa_pass, open_pass, len(final_targets))
+        # 3. 신호 판단은 _realtime_loop()의 _evaluate()에서 백그라운드 스레드가 담당.
+        #    주기 스캔은 데이터 갱신(opt10030 + SnapshotStore)만 수행하고 종료.
+        #    (과거 TESTA+JDM 필터 루프 제거 — 110종목 동기 루프가 메인 스레드를 차단하던 원인)
+        logger.info("[주기 스캔] 완료 — 신호 판단은 실시간 워커(_evaluate)에 위임")
         logger.info("=" * 60)
-        _prog("감시종목 선정", len(final_targets), len(top_codes),
-              f"{len(final_targets)}종목 선정 완료")
-        return final_targets
+        _prog("감시종목 갱신", len(top_codes), len(top_codes), "데이터 갱신 완료")
+        return []
+
+    # -----------------------------------------------------------------------
+    # 포지션 실시간 현재가 갱신 (손절/익절 정확도 개선)
+    # -----------------------------------------------------------------------
+
+    _SCREEN_POSITION = "9210"   # 포지션 종목 전용 스크린 (watch_q의 9200과 분리)
+
+    def add_position_realtime(self, code: str) -> None:
+        """포지션 종목 실시간 현재가 구독 (별도 스크린 9210)"""
+        try:
+            self._kiwoom._ocx.dynamicCall(
+                "SetRealReg(QString, QString, QString, QString)",
+                [self._SCREEN_POSITION, code, "10;12", "1"],
+            )
+            logger.info("[포지션 실시간] 등록 — %s", code)
+        except Exception as e:
+            logger.warning("[포지션 실시간] 등록 실패 — %s: %s", code, e)
+
+    def remove_position_realtime(self, code: str) -> None:
+        """포지션 종목 실시간 구독 해제"""
+        try:
+            self._kiwoom._ocx.dynamicCall(
+                "SetRealRemove(QString, QString)", [self._SCREEN_POSITION, code]
+            )
+            logger.info("[포지션 실시간] 해제 — %s", code)
+        except Exception as e:
+            logger.warning("[포지션 실시간] 해제 실패 — %s: %s", code, e)
+
+    def pause_universe_watch(self, position_codes: list[str]) -> None:
+        """포지션 풀 — 유니버스 감시를 보유 종목 + 임시 예비 2개로 축소.
+
+        이후 _realtime_loop이 10초마다 _refresh_reserve_codes()로 예비를 스코어 기반 최신화.
+        """
+        self._universe_paused = True
+        self._last_reserve_refresh = 0.0   # 첫 루프에서 즉시 스코어링 갱신 유도
+        # 초기 예비: 스코어링 전 임시로 거래대금 상위 2개
+        reserve = [c for c in self.top_mgr.get_top_codes() if c not in position_codes][:2]
+        self.watch_q.refresh(position_codes + reserve)
+        logger.info(
+            "[Watch] WATCH 모드 진입 — 보유 %d개 + 임시예비 %d개 구독 (10초 후 스코어링 갱신)",
+            len(position_codes), len(reserve),
+        )
+
+    def resume_universe_watch(self) -> None:
+        """슬롯 생김 — 유니버스 감시 전체 복원."""
+        self._universe_paused = False
+        top = self.top_mgr.get_top_codes()
+        self.watch_q.refresh(top)
+        logger.info("[Watch] 유니버스 감시 재개 — 상위 %d종목 구독", len(top))
+
+    # -----------------------------------------------------------------------
+    # WATCH 모드 — 예비 종목 스코어링
+    # -----------------------------------------------------------------------
+
+    def _score_candidate(self, snap: "StockSnapshot") -> float:
+        """예비 종목 점수 계산. 0이면 불합격 (진입 조건 미충족).
+
+        기준:
+        - 등락률 > 0, < max_change_pct (상승 중이되 과열 아님)
+        - 현재가 > 시가 (시가 돌파 유지)
+        - 등락률 점수(0~100) + 체결강도 보너스(0~20) 합산
+        """
+        if snap.current_price <= 0 or snap.open_price <= 0:
+            return 0.0
+        if snap.change_pct <= 0:
+            return 0.0
+        if snap.change_pct >= self.cfg.max_change_pct:
+            return 0.0
+        if snap.current_price <= snap.open_price:
+            return 0.0
+
+        score = min(snap.change_pct, 10.0) * 10.0                          # 등락률 (최대 100점)
+        score += min(max(snap.chejan_strength - 100.0, 0.0), 100.0) * 0.2  # 체결강도 보너스 (최대 20점)
+        return score
+
+    def _refresh_reserve_codes(self) -> None:
+        """WATCH 모드 전용 — _RESERVE_INTERVAL마다 예비 top-2를 실시간 점수로 최신화.
+
+        TR 호출 없이 메모리(top_mgr + SnapshotStore)만 사용.
+        상위 30개 후보에서 스코어링 후 가장 좋은 2개를 watch_q에 유지.
+        """
+        if not self._universe_paused:
+            return
+
+        pos_codes: set[str] = set()
+        if self._order_mgr:
+            pos_codes = set(self._order_mgr.positions.keys())
+
+        if not pos_codes:
+            return
+
+        # top_mgr 상위 30개 중 보유 제외 → 스코어링
+        candidates = [c for c in self.top_mgr.get_top_codes() if c not in pos_codes][:30]
+        scored: list[tuple[float, str]] = []
+        for code in candidates:
+            snap = self.store.get_snapshot(code)
+            if snap is not None:
+                s = self._score_candidate(snap)
+                if s > 0.0:
+                    scored.append((s, code))
+
+        scored.sort(reverse=True)
+        new_reserve = [c for _, c in scored[:2]]
+
+        # 현재 구독 중인 예비 목록과 비교 (보유 제외)
+        old_reserve = [c for c in self.watch_q.subscribed if c not in pos_codes]
+
+        if set(new_reserve) != set(old_reserve):
+            self.watch_q.refresh(list(pos_codes) + new_reserve)
+            logger.info(
+                "[Watch] 예비 갱신 — %s → %s (점수: %s)",
+                old_reserve or "없음",
+                new_reserve or "없음",
+                [f"{c}:{s:.0f}점" for s, c in scored[:2]],
+            )
+        else:
+            logger.debug("[Watch] 예비 유지 — %s", new_reserve)
 
     def _load_candles_async(self, codes: list, idx: int) -> None:
         """

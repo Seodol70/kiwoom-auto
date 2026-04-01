@@ -16,6 +16,7 @@ import logging
 import sys
 import threading
 import time
+from datetime import date
 from typing import Callable, Optional
 
 try:
@@ -56,6 +57,7 @@ TR_STOCK_INFO  = "opt10001"   # 주식기본정보요청
 TR_ACCOUNT     = "opw00001"   # 예수금상세현황요청
 TR_HOLDINGS    = "opw00018"   # 계좌평가잔고내역요청
 TR_MIN_CANDLE  = "opt10080"   # 주식분봉차트조회요청
+TR_DAILY_REALIZED = "opt10074"  # 일자별실현손익요청 (당일 누적 실현손익)
 
 LOGIN_TIMEOUT_SEC = 30
 TR_DELAY_SEC      = 0.25      # TR 연속 조회 제한(초) — 키움 정책 200ms+
@@ -405,6 +407,32 @@ class KiwoomManager:
             "pnl_pct":     round(pnl_pct, 2),
         }
 
+    def get_today_realized_pnl(self) -> int | None:
+        """
+        계좌 기준 당일 실현손익(원). opt10074 싱글데이터 '실현손익'.
+
+        TR 실패·미지원(모의 등) 시 None — 호출측에서 기존 로컬 집계만 사용.
+        """
+        if not getattr(self, "_account", ""):
+            return None
+        ds = date.today().strftime("%Y%m%d")
+        self._set_input("계좌번호", self._account)
+        self._set_input("비밀번호", "")
+        self._set_input("비밀번호입력매체구분", "00")
+        self._set_input("시작일자", ds)
+        self._set_input("종료일자", ds)
+        self._comm_rq(TR_DAILY_REALIZED, "daily_realized", "2002")
+        d = self._tr_data
+        if not d:
+            logger.warning("opt10074 응답 없음 — 당일 실현손익 동기화 생략")
+            return None
+        raw = d.get("실현손익", "")
+        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+            logger.debug("opt10074 실현손익 필드 비어 있음 — 0으로 간주")
+            return 0
+        # 실현손익은 음수 가능 → safe_int(절댓값) 쓰지 않음
+        return int(safe_float(raw, 0.0))
+
     def get_holdings(self) -> list[dict]:
         """
         보유 종목 목록 조회.
@@ -531,7 +559,7 @@ class KiwoomManager:
         timer = QTimer()
         timer.setSingleShot(True)
         timer.timeout.connect(self._tr_loop.quit)
-        timer.start(10_000)
+        timer.start(2_000)  # 10초 → 2초 (응답 없으면 빨리 폴백)
         self._tr_loop.exec_()
         timer.stop()
         self._tr_loop = None
@@ -613,6 +641,18 @@ class KiwoomManager:
             self._tr_data = self._parse_single(tr_code, rq_name, [
                 "예수금", "유가잔고평가액", "주식평가금액", "총평가금액", "총매입금액",
             ])
+
+        elif rq_name == "daily_realized":
+            # 싱글: 총매수금액, 총매도금액, 실현손익, 매매수수료, 매매세금
+            self._tr_data = {}
+            for f in (
+                "총매수금액",
+                "총매도금액",
+                "실현손익",
+                "매매수수료",
+                "매매세금",
+            ):
+                self._tr_data[f] = self._get_comm_data(tr_code, rq_name, 0, f)
 
         elif rq_name == "holdings":
             self._tr_data = {"rows": self._parse_holdings_rows(tr_code, rq_name)}
@@ -871,6 +911,9 @@ class MockKiwoomManager:
 
     def get_holdings(self) -> list:
         return []
+
+    def get_today_realized_pnl(self):
+        return None
 
     def send_order(self, *a, **kw) -> int:
         return -1
