@@ -428,12 +428,21 @@ class ScannerPanel(QWidget):
             has_sig = bool(row.get("signal"))
             bg_color = QColor("#2a1a2e") if has_sig else None
 
+            # [진단] 거래대금 단위 확인
+            trade_amt = int(row.get("trade_amount") or 0)
+            if r < 3:  # 상위 3개만 진단 로그
+                import logging as _log
+                _log.getLogger(__name__).debug(
+                    "[ScannerPanel] %s 거래대금: raw=%d 포맷=%s",
+                    row["code"], trade_amt, format_trade_amount_korean(trade_amt)
+                )
+
             texts = [
                 row["code"],
                 row["name"],
                 f"{row['price']:,}",
                 f"{change:+.2f}%",
-                format_trade_amount_korean(int(row.get("trade_amount") or 0)),
+                format_trade_amount_korean(trade_amt),
                 row.get("signal", ""),
             ]
             for c, text in enumerate(texts):
