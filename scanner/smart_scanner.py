@@ -416,19 +416,27 @@ class SnapshotStore:
         low_price:    int,
         open_price:   int,
         volume:       int,
-        trade_amount: int,
-        change_pct:   float,
+        trade_amount: int = None,  # ← None이면 건너뜀 (opt10030 누적값 보존)
+        change_pct:   float = None,
     ) -> None:
         """
         실시간 체결 한 틱을 해당 종목 행에 반영한다.
 
-        슬림화: updated_at 컬럼을 핫패스에서 제거
-        → datetime.now() 호출 1회 / DataFrame 쓰기 컬럼 수 감소
-        1분봉 누적은 로컬 변수로 분(minute) 비교해 최소 조건에서만 append.
+        trade_amount=None이면 opt10030의 누적 거래대금을 보존한다.
+        (FID 14는 현재 틱만 포함하므로)
         """
         with self._lock:
             if code not in self._df.index:
                 return   # Pre-Filter 에 없는 종목은 무시
+
+            # trade_amount가 None이면 기존 값 유지
+            if trade_amount is None:
+                trade_amount = self._df.loc[code, "trade_amount"]
+
+            # change_pct가 None이면 기존 값 유지
+            if change_pct is None:
+                change_pct = self._df.loc[code, "change_pct"]
+
             self._df.loc[code, self._TICK_COLS] = [
                 current_price, high_price, low_price, open_price,
                 volume, trade_amount, change_pct,
@@ -1442,7 +1450,8 @@ class SmartScanner:
             from kiwoom_api import safe_int, safe_float
             price = safe_int(fid(10))
             vol   = safe_int(fid(13))
-            amt   = safe_int(fid(14)) * 1000   # 거래대금: 천원 단위 → 원
+            # [FIX] FID 14는 "누적거래금액"이 아니라 "현재 틱의 거래금액"
+            # → opt10030의 누적 거래대금을 보존하기 위해 실시간 업데이트 제외
             high  = safe_int(fid(17))
             low   = safe_int(fid(18))
             open_ = safe_int(fid(16))
@@ -1453,10 +1462,12 @@ class SmartScanner:
                 return   # 유효하지 않은 체결 데이터
 
             # ① DataFrame 갱신 (API 재호출 없음)
+            # trade_amount는 opt10030의 누적값을 유지 (FID 14는 현재 틱만 포함)
             self.store.update_price(
                 code=code, current_price=price, high_price=high,
                 low_price=low, open_price=open_, volume=vol,
-                trade_amount=amt, change_pct=pct,
+                trade_amount=None,  # ← 거래대금은 opt10030 값만 사용
+                change_pct=pct,
             )
             self._touch_trade_amt_baseline(code, amt)
             self.top_mgr.update(code, amt)
