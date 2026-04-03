@@ -735,8 +735,19 @@ class KiwoomManager:
                 continue
 
             raw_amt = g(_amt_field)
-            # 거래대금이 여전히 비어 있으면 현재가×거래량으로 근사
+            # 거래대금 단위 처리: opt10030 거래대금은 항상 천원 단위(FID 14와 동일)
             amt_val = safe_int(raw_amt)
+            # opt10030 거래대금은 천원 단위 → 원으로 변환 (×1000)
+            # 아침 9시 삼성전자 거래대금이 9,000,000천원(=9조원) 대역인지 확인용 진단
+            if amt_val > 0:
+                # 거래대금이 명시적으로 천원 단위 필드거나, 또는 합리적 범위면 ×1000
+                if "천원" in _amt_field.lower() or amt_val >= 100_000:
+                    # 천원 단위 확실 → ×1000
+                    amt_val *= 1000
+                elif amt_val < 100_000:
+                    # 작은 값(< 100,000천원) → 단위 재확인 필요
+                    # 혹시 이미 원 단위일 수도 있으니 진단 로그 확인
+                    logger.warning("[opt10030] 비정상 거래대금값 감지: %s = %d (필드:%s)", code, amt_val, _amt_field)
             if amt_val == 0:
                 price_v  = safe_int(g("현재가"))
                 volume_v = safe_int(g("거래량"))
@@ -744,9 +755,12 @@ class KiwoomManager:
                 if volume_v < 2_000_000_000:
                     amt_val = price_v * volume_v
 
-            if i < 3:
-                logger.info("[opt10030 진단] 행[%d] code=%s 거래대금raw='%s'→%d 거래량raw='%s'",
-                            i, code, raw_amt, amt_val, g("거래량"))
+            if i < 5:
+                # 거래대금 단위 진단 (천원→원 변환 확인용)
+                from scanner.smart_scanner import format_trade_amount_korean
+                amt_korean = format_trade_amount_korean(amt_val) if amt_val > 0 else "0원"
+                logger.info("[opt10030 진단] 행[%d] %s(%s) 거래대금: raw='%s' → %d원 ≈ %s",
+                            i, code, g("종목명").strip(), raw_amt, amt_val, amt_korean)
             rows.append({
                 "code":          code,
                 "name":          g("종목명").strip(),
