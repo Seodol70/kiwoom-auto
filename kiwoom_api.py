@@ -735,12 +735,13 @@ class KiwoomManager:
                 continue
 
             raw_amt = g(_amt_field)
-            # 거래대금 단위 처리: opt10030 모든 거래대금 필드는 천원 단위
+            # 거래대금 단위 처리: opt10030 모든 거래대금 필드는 '백만 원' 단위
             amt_val = safe_int(raw_amt)
-            # opt10030 거래대금은 항상 천원 단위(FID 14와 동일) → ×1000으로 원 단위 변환
+            # opt10030 거래대금: 백만원 → 원으로 변환 (×1,000,000)
+            # 예: 487 → 487,000,000원 (4억 8,700만 원)
             # 필드명: "거래대금", "누적거래대금", "거래금액" 등
             if amt_val > 0:
-                amt_val *= 1000  # 천원 → 원 변환
+                amt_val *= 1_000_000  # 백만 원 → 원 변환
             if amt_val == 0:
                 price_v  = safe_int(g("현재가"))
                 volume_v = safe_int(g("거래량"))

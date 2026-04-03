@@ -77,29 +77,46 @@ _EOK_WON = 100_000_000
 
 def format_trade_amount_korean(amount_won: int) -> str:
     """
-    누적 거래대금(원)을 '3조 7,238억' 형으로 표기한다.
-    1억 미만은 만원·원 단위로 축약한다.
+    거래대금(원)을 읽기 편한 한글 형식으로 표기.
+
+    예시:
+    - 487,000,000,000원 → "4,870억" (조 미포함) 또는 "0.487조"
+    - 1,234,000,000,000원 → "1.2조 340억" (조 포함 시 소수점)
+    - 12,340,000원 → "1,234만원"
     """
     try:
         n = int(amount_won)
     except (TypeError, ValueError):
-        return "0억"
+        return "0원"
     if n <= 0:
-        return "0억"
-    jo = n // _JO_WON
+        return "0원"
+
+    jo = n // _JO_WON  # 1조 = 1,000,000,000,000
     rem = n % _JO_WON
-    eok_int = rem // _EOK_WON
+    eok_int = rem // _EOK_WON  # 1억 = 100,000,000
+
     parts: list[str] = []
+
+    # 조 단위 표기 (1조 이상)
     if jo > 0:
-        parts.append(f"{jo}조")
-    if eok_int > 0:
+        if eok_int > 0:
+            # 조와 억을 함께 표시 (예: "1.2조 340억")
+            jo_decimal = jo + eok_int / 1_0000  # 1조 + n억을 소수점으로
+            parts.append(f"{jo_decimal:.1f}조")
+        else:
+            # 억이 없으면 조만 (예: "1조")
+            parts.append(f"{jo}조")
+    elif eok_int > 0:
+        # 1조 미만이면 억으로 표시 (예: "1,234억")
         parts.append(f"{eok_int:,}억")
-    if parts:
-        return " ".join(parts)
-    man = n // 10_000
-    if man > 0:
-        return f"{man:,}만원"
-    return f"{n:,}원"
+    else:
+        # 1억 미만이면 만원, 원으로 표시
+        man = n // 10_000
+        if man > 0:
+            return f"{man:,}만원"
+        return f"{n:,}원"
+
+    return " ".join(parts)
 
 
 def format_trade_amount_growth(current: int, baseline: Optional[int]) -> str:
