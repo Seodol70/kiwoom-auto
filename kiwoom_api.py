@@ -735,19 +735,12 @@ class KiwoomManager:
                 continue
 
             raw_amt = g(_amt_field)
-            # 거래대금 단위 처리: opt10030 거래대금은 항상 천원 단위(FID 14와 동일)
+            # 거래대금 단위 처리: opt10030 모든 거래대금 필드는 천원 단위
             amt_val = safe_int(raw_amt)
-            # opt10030 거래대금은 천원 단위 → 원으로 변환 (×1000)
-            # 아침 9시 삼성전자 거래대금이 9,000,000천원(=9조원) 대역인지 확인용 진단
+            # opt10030 거래대금은 항상 천원 단위(FID 14와 동일) → ×1000으로 원 단위 변환
+            # 필드명: "거래대금", "누적거래대금", "거래금액" 등
             if amt_val > 0:
-                # 거래대금이 명시적으로 천원 단위 필드거나, 또는 합리적 범위면 ×1000
-                if "천원" in _amt_field.lower() or amt_val >= 100_000:
-                    # 천원 단위 확실 → ×1000
-                    amt_val *= 1000
-                elif amt_val < 100_000:
-                    # 작은 값(< 100,000천원) → 단위 재확인 필요
-                    # 혹시 이미 원 단위일 수도 있으니 진단 로그 확인
-                    logger.warning("[opt10030] 비정상 거래대금값 감지: %s = %d (필드:%s)", code, amt_val, _amt_field)
+                amt_val *= 1000  # 천원 → 원 변환
             if amt_val == 0:
                 price_v  = safe_int(g("현재가"))
                 volume_v = safe_int(g("거래량"))
