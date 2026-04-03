@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
 from config import COST as _COST
 
@@ -81,6 +81,7 @@ class Position:
     current_price: int = 0
     # 앱 주문으로 인지한 메타 (opw00018 동기화 시 기존 값 병합)
     buy_date: Optional[date] = None       # 앱 매수로 최초 반영된 날짜(표시·필터 보조)
+    entry_time: Optional[datetime] = None # ← 2026-04-03 추가: 정확한 진입 시각 (Time-cut용)
     opened_by_app: bool = False           # 앱 SendOrder 매수로 보유가 생기거나 늘어난 적 있음
     qty_buy_today_app: int = 0            # 오늘 앱에서 매수한 수량 (장마감 자동청산 대상)
 
@@ -169,6 +170,13 @@ class OrderManager(QObject):
         self._today_fill_log: list[dict] = []             # 이번 세션 체결 로그
         self._fills_initialized: bool = False             # 시작 시 1회만 파일 로드하는 플래그
 
+        # [NEW] 자금 회전 (2026-04-03)
+        self._capital_rotation_sold: set[str] = set()     # 이미 매도 요청한 포지션 코드 (무한 루프 방지)
+        self._signal_last_time: dict[str, float] = {}     # code → 마지막 신호 시각 (쿨다운용)
+
+        # [NEW] 미체결 추적 (2026-04-04)
+        self._failed_sells: dict[str, dict] = {}  # code → {qty, attempts, last_time}
+
         # 포지션 실시간 현재가 구독 콜백 (SmartScanner에서 주입)
         self.on_position_opened: Optional[Callable[[str], None]] = None
         self.on_position_closed: Optional[Callable[[str], None]] = None
@@ -206,6 +214,7 @@ class OrderManager(QObject):
                     avg_price     = avg,
                     current_price = h["current_price"],
                     buy_date      = old.buy_date if old else None,
+                    entry_time    = old.entry_time if old else None,  # ← entry_time 유지
                     opened_by_app = old.opened_by_app if old else False,
                     qty_buy_today_app = qty_today,
                 )
@@ -222,6 +231,61 @@ class OrderManager(QObject):
         except Exception as e:
             logger.error("잔고 동기화 실패: %s", e)
         return self.cash
+
+    # -----------------------------------------------------------------------
+    # 자금 회전 헬퍼 (2026-04-03)
+    # -----------------------------------------------------------------------
+
+    def _find_worst_position(self) -> Optional[Position]:
+        """
+        자금 회전 대상 포지션 선택.
+        우선순위: 손실 > Time-cut 대상 > 최저 수익률
+        """
+        candidates = [p for p in self.positions.values() if p.qty > 0]
+        if not candidates:
+            return None
+
+        now = datetime.now()
+
+        # 1순위: 손실 중인 종목 중 가장 큰 손실
+        losses = [p for p in candidates if p.pnl_pct < 0]
+        if losses:
+            return min(losses, key=lambda p: p.pnl_pct)
+
+        # 2순위: Time-cut 대상 (20분 경과 + 수익 < 0.3%, 2026-04-04 강화)
+        for p in candidates:
+            if p.entry_time:
+                elapsed = (now - p.entry_time).total_seconds() / 60
+                if elapsed >= 20 and p.pnl_pct < 0.3:
+                    return p
+
+        # 3순위: 가장 낮은 수익률
+        return min(candidates, key=lambda p: p.pnl_pct)
+
+    def _find_timecut_position(self) -> Optional[Position]:
+        """
+        max_positions 초과 시 교체 대상 선택.
+        손실 중이거나 Time-cut 조건(20분 + 수익률 < 0.3%)인 포지션만 반환.
+        수익 양호 포지션은 None 반환 — 교체 불가.
+        """
+        candidates = [p for p in self.positions.values() if p.qty > 0]
+        if not candidates:
+            return None
+        now = datetime.now()
+
+        # 손실 중인 종목 중 가장 큰 손실
+        losses = [p for p in candidates if p.pnl_pct < 0]
+        if losses:
+            return min(losses, key=lambda p: p.pnl_pct)
+
+        # Time-cut 대상 (20분 경과 + 수익 < 0.3%)
+        for p in candidates:
+            if p.entry_time:
+                elapsed = (now - p.entry_time).total_seconds() / 60
+                if elapsed >= 20 and p.pnl_pct < 0.3:
+                    return p
+
+        return None  # 교체 불가 (모두 수익 양호)
 
     # -----------------------------------------------------------------------
     # 스캐너 신호 수신 → 주문 실행
@@ -245,7 +309,12 @@ class OrderManager(QObject):
             from config import RISK as _RISK
             _mx = float(_RISK.get("max_change_pct", 15.0))
             _info = self._kiwoom.get_stock_info(code)
-            _pct = float(_info.get("change_pct", 0) or 0)
+            # [NEW] opt10001 응답 없음 시 등락률 체크 스킵 (2026-04-03)
+            if _info is None:
+                logger.debug("[handle_signal] %s opt10001 응답 없음 — 등락률 체크 스킵", code)
+                _pct = 0.0
+            else:
+                _pct = float(_info.get("change_pct", 0) or 0)
             logger.debug("[매수 등락률 체크] %s — 현재 등락률: %.2f%% (상한: %.1f%%)", name, _pct, _mx)
             if _pct >= _mx:
                 msg = f"매수 차단 — 등락률 {_pct:.1f}% ≥ 상한 {_mx:.1f}% ({name})"
@@ -265,8 +334,27 @@ class OrderManager(QObject):
             return
 
         if len(self.positions) + len(self._pending) >= self.max_positions:
-            msg = f"최대 보유 종목 수 초과 ({self.max_positions}종목)"
+            # [NEW] Time-cut 교체 대상이 있으면 정리 후 재시도 (2026-04-04)
+            worst = self._find_timecut_position()
+            if worst and worst.code not in self._capital_rotation_sold:
+                logger.info(
+                    "[포지션 교체] max_positions 도달 — %s (보유 %d분, 손익 %+.2f%%) 정리 → %s 진입 대기",
+                    worst.name,
+                    int((datetime.now() - worst.entry_time).total_seconds() / 60) if worst.entry_time else -1,
+                    worst.pnl_pct,
+                    name,
+                )
+                self._capital_rotation_sold.add(worst.code)
+                self.sell(worst.code, worst.name, worst.qty)
+                if code in self._signal_last_time:
+                    del self._signal_last_time[code]
+                QTimer.singleShot(1000, lambda s=signal: self.handle_signal(s))
+                return
+            # Time-cut/손실 대상 없음 (모두 수익 양호) — 교체 안 함
+            msg = f"최대 보유 종목 수 초과 ({self.max_positions}종목) — 교체 불가 (수익 양호)"
             logger.warning(msg)
+            logger.debug("  보유 목록: %s", list(self.positions.keys()))
+            logger.debug("  대기 목록: %s", list(self._pending))  # set은 .keys() 없음
             self.order_failed.emit(msg)
             return
 
@@ -278,8 +366,24 @@ class OrderManager(QObject):
         qty = budget // price if price > 0 else 0
 
         # ── 가용 예수금 부족 체크 ─────────────────────────────────────────
-        # 최소 1주 매수 불가능하면 주문 미실행
+        # 최소 1주 매수 불가능하면 자금 회전 시도
         if qty <= 0:
+            # [NEW] 자금 회전: 최악 포지션 매도 후 1초 후 신호 재처리 (2026-04-03)
+            worst = self._find_worst_position()
+            if worst and worst.code not in self._capital_rotation_sold:
+                logger.info("[자금 회전] %s (손익: %+.2f%%) 매도 → 자금 확보 후 %s 재진입 대기",
+                           worst.name, worst.pnl_pct, name)
+                self._capital_rotation_sold.add(worst.code)
+                # 매도 주문 실행
+                self.sell(worst.code, worst.name, worst.qty)
+                # 신호 쿨다운 리셋 (같은 신호가 45초 안에 다시 나올 수 있도록)
+                if code in self._signal_last_time:
+                    del self._signal_last_time[code]
+                # 1초 후 같은 신호 재처리 (예수금 업데이트 대기)
+                QTimer.singleShot(1000, lambda s=signal: self.handle_signal(s))
+                return
+
+            # 자금 회전 불가능하면 기존 경고
             msg = f"가용 예수금 부족 — 최소 1주 매수 불가 (예수금 {self.cash:,} / 주가 {price:,})"
             logger.warning(msg)
             self.order_failed.emit(msg)
@@ -443,6 +547,76 @@ class OrderManager(QObject):
         # 정확한 잔고는 OnReceiveChejanData 콜백 + 주기 sync_balance(5분)에서 반영.
         return self._send(OrderType.BUY, code, name, qty, price)
 
+    def force_exit(
+        self,
+        code: str,
+        name: str,
+        qty: int,
+        reason: str = "Hard Stop",
+    ) -> str:
+        """
+        긴급 탈출(강제 매도) — 손절/청산 시 최우선 순위 (2026-04-04).
+        _pending 잠금 상태라도 무시하고 시장가 매도 시도.
+
+        Args:
+            code: 종목코드
+            name: 종목명
+            qty: 수량
+            reason: 탈출 사유 (로그용) — "Hard Stop", "Force Close", "Day Close" 등
+
+        Returns:
+            주문번호 (실패 시 "0")
+        """
+        try:
+            # _pending 체크 없이 바로 주문 시도
+            order_id = self._send(OrderType.SELL, code, name, qty, price=0)
+            if order_id and order_id != "0":
+                logger.warning(
+                    "[force_exit] %s(%s) %d주 시장가 매도 주문 — 사유: %s (주문번호: %s)",
+                    name, code, qty, reason, order_id
+                )
+                # pending에 수동으로 추가 (체결 콜백 대기)
+                self._pending.add(code)
+                return order_id
+            else:
+                logger.error("[force_exit] %s(%s) 주문 실패 — 사유: %s", name, code, reason)
+                return "0"
+        except Exception as e:
+            logger.exception(f"[force_exit] {name}({code}) 예외 발생: {e}")
+            return "0"
+
+    def _check_failed_sells(self) -> None:
+        """미체결 주문 10초마다 재시도 (손절 대기 중 미체결 대비, 2026-04-04)."""
+        from datetime import datetime
+        now = datetime.now()
+
+        for code, info in list(self._failed_sells.items()):
+            elapsed = (now - info["last_time"]).total_seconds()
+
+            # 10초 경과 → 재주문
+            if elapsed >= 10:
+                attempt = info.get("attempts", 0) + 1
+                if attempt > 3:
+                    # 3회 재시도 이상 실패 → 사용자 알림
+                    logger.critical(
+                        "[손절 실패 알림] %s 3회 연속 재주문 실패 — 수동 개입 필요",
+                        code
+                    )
+                    del self._failed_sells[code]
+                    continue
+
+                logger.info(
+                    "[손절 재주문] %s %d주 — %d차 시도",
+                    code, info["qty"], attempt
+                )
+                # 종목명이 없으므로 코드로만 매도 시도
+                ret = self._send(OrderType.SELL, code, code, info["qty"], price=0)
+                if ret and ret != "0":
+                    del self._failed_sells[code]  # 성공 → 제거
+                else:
+                    info["attempts"] = attempt
+                    info["last_time"] = now
+
     def sell(
         self,
         code:  str,
@@ -475,6 +649,18 @@ class OrderManager(QObject):
             msg = f"{name} {side} 주문 실패 (ret={ret})"
             logger.error(msg)
             self.order_failed.emit(msg)
+            # [NEW] 매도 주문 실패 시 미체결 추적 (2026-04-04)
+            if order_type == OrderType.SELL:
+                from datetime import datetime
+                self._failed_sells[code] = {
+                    "qty": qty,
+                    "attempts": 0,
+                    "last_time": datetime.now(),
+                }
+                logger.warning(
+                    "[미체결 추적] %s(%s) %d주 매도 — 10초 후 재주문 시도",
+                    name, code, qty
+                )
             return ""
 
         self._pending.add(code)
@@ -580,6 +766,7 @@ class OrderManager(QObject):
                     qty=filled_qty, avg_price=filled_price,
                     current_price=filled_price,
                     buy_date=date.today() if is_app_buy else None,
+                    entry_time=datetime.now() if is_app_buy else None,  # ← 2026-04-03: Time-cut용
                     opened_by_app=is_app_buy,
                     qty_buy_today_app=filled_qty if is_app_buy else 0,
                 )

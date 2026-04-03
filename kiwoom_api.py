@@ -57,6 +57,7 @@ TR_STOCK_INFO  = "opt10001"   # 주식기본정보요청
 TR_ACCOUNT     = "opw00001"   # 예수금상세현황요청
 TR_HOLDINGS    = "opw00018"   # 계좌평가잔고내역요청
 TR_MIN_CANDLE  = "opt10080"   # 주식분봉차트조회요청
+TR_DAILY_CANDLE = "opt10081"  # 주식일봉차트조회요청
 TR_DAILY_REALIZED = "opt10074"  # 일자별실현손익요청 (당일 누적 실현손익)
 
 LOGIN_TIMEOUT_SEC = 30
@@ -161,6 +162,31 @@ def safe_float(val, default: float = 0.0) -> float:
         return float(s)
     except (ValueError, TypeError):
         return default
+
+
+def _resolve_prev_close(prev_close: int, current_price: int, change_pct: float) -> int:
+    """
+    opt10030 전일종가가 0일 때 현재가+등락률로 역산 (2026-04-04).
+
+    Args:
+        prev_close: opt10030 전일종가 필드 값
+        current_price: opt10030 현재가 필드 값
+        change_pct: opt10030 등락률 필드 값
+
+    Returns:
+        계산된 또는 원본 전일종가 (int)
+
+    처리 로직:
+      1. prev_close > 0 → 원본 그대로 반환
+      2. current_price > 0 and change_pct != 0 → current_price / (1 + change_pct/100) 역산
+      3. change_pct == 0 (보합) → current_price 사용
+      4. 모두 0 → 0 반환
+    """
+    if prev_close > 0:
+        return prev_close
+    if current_price > 0 and change_pct != 0.0:
+        return max(1, int(current_price / (1.0 + change_pct / 100.0)))
+    return current_price if current_price > 0 else 0
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +312,7 @@ class KiwoomManager:
     # 종목 정보 조회 (TR: opt10001)
     # -----------------------------------------------------------------------
 
-    def get_stock_info(self, code: str) -> dict:
+    def get_stock_info(self, code: str) -> Optional[dict]:
         """
         주식 기본 정보를 조회한다.
 
@@ -299,29 +325,43 @@ class KiwoomManager:
                 "volume": int,
                 "market_cap": int,
             }
+            또는 조회 실패 시 None
         """
-        self._set_input("종목코드", code)
-        self._comm_rq(TR_STOCK_INFO, "stock_info", "0101")
+        # [NEW] 재시도 로직 추가 (2026-04-03)
+        for retry in range(2):
+            self._set_input("종목코드", code)
+            self._set_input("수정주가구분", "1")
+            self._comm_rq(TR_STOCK_INFO, "stock_info", "0101")
 
-        d = self._tr_data
-        current_price = safe_int(d.get("현재가"))
-        base_price    = safe_int(d.get("기준가"))   # 전일 종가
-        change_pct    = (
-            round((current_price - base_price) / base_price * 100, 2)
-            if base_price else 0.0
-        )
-        return {
-            "code":          code,
-            "name":          str(d.get("종목명", "")).strip(),
-            "current_price": current_price,
-            "base_price":    base_price,
-            "change_pct":    change_pct,
-            "open":          safe_int(d.get("시가")),
-            "high":          safe_int(d.get("고가")),
-            "low":           safe_int(d.get("저가")),
-            "volume":        safe_int(d.get("거래량")),
-            "market_cap":    safe_int(d.get("시가총액")),
-        }
+            d = self._tr_data
+            if d.get("현재가"):  # 유효한 응답
+                current_price = safe_int(d.get("현재가"))
+                base_price    = safe_int(d.get("기준가"))   # 전일 종가
+                change_pct    = (
+                    round((current_price - base_price) / base_price * 100, 2)
+                    if base_price else 0.0
+                )
+                return {
+                    "code":          code,
+                    "name":          str(d.get("종목명", "")).strip(),
+                    "current_price": current_price,
+                    "base_price":    base_price,
+                    "change_pct":    change_pct,
+                    "open":          safe_int(d.get("시가")),
+                    "high":          safe_int(d.get("고가")),
+                    "low":           safe_int(d.get("저가")),
+                    "volume":        safe_int(d.get("거래량")),
+                    "market_cap":    safe_int(d.get("시가총액")),
+                }
+
+            # 첫 시도 실패 → 0.3초 후 재시도
+            if retry == 0:
+                import time
+                time.sleep(0.3)
+
+        # 재시도도 실패
+        logger.warning("[opt10001] %s 응답 없음 — 스냅샷 폴백", code)
+        return None
 
     def get_current_price(self, code: str) -> int:
         """현재가만 빠르게 조회 (OCX 메모리, TR 호출 없음)"""
@@ -352,6 +392,31 @@ class KiwoomManager:
         self._set_input("틱범위",   str(tick_unit))
         self._set_input("수정주가구분", "1")
         self._comm_rq(TR_MIN_CANDLE, "min_candle", "0101")
+
+        rows: list[dict] = self._tr_data.get("rows", [])
+        return rows[:count]
+
+    # -----------------------------------------------------------------------
+    # 일봉 데이터 조회 (TR: opt10081)
+    # -----------------------------------------------------------------------
+
+    def get_daily_candles(self, code: str, count: int = 25) -> list[dict]:
+        """
+        일봉 캔들 데이터를 조회한다.
+
+        Args:
+            code: 종목코드
+            count: 최대 일봉 수
+
+        Returns:
+            최신순 정렬된 OHLCV 리스트
+            [{"date": "YYYYMMDD", "open": int, "high": int,
+              "low": int, "close": int, "volume": int}, ...]
+        """
+        self._set_input("종목코드", code)
+        self._set_input("기준일자", "")   # 오늘 기준 최근 N개
+        self._set_input("수정주가구분", "1")
+        self._comm_rq(TR_DAILY_CANDLE, "daily_candle", "0101")
 
         rows: list[dict] = self._tr_data.get("rows", [])
         return rows[:count]
@@ -637,6 +702,9 @@ class KiwoomManager:
         elif rq_name == "min_candle":
             self._tr_data = {"rows": self._parse_candle_rows(tr_code, rq_name)}
 
+        elif rq_name == "daily_candle":
+            self._tr_data = {"rows": self._parse_daily_candle_rows(tr_code, rq_name)}
+
         elif rq_name == "balance":
             self._tr_data = self._parse_single(tr_code, rq_name, [
                 "예수금", "유가잔고평가액", "주식평가금액", "총평가금액", "총매입금액",
@@ -685,7 +753,7 @@ class KiwoomManager:
             val = self._get_comm_data(tr_code, rq_name, 0, f)
             result[f] = val
             if not val:
-                logger.warning("필드 미획득: tr=%s rq=%s field=%s", tr_code, rq_name, f)
+                logger.debug("필드 미획득: tr=%s rq=%s field=%s (무시)", tr_code, rq_name, f)
         return result
 
     def _parse_candle_rows(self, tr_code: str, rq_name: str) -> list[dict]:
@@ -700,6 +768,26 @@ class KiwoomManager:
                 "high":   safe_int(g("고가")),
                 "low":    safe_int(g("저가")),
                 "close":  safe_int(g("현재가")),
+                "volume": safe_int(g("거래량")),
+            })
+        return rows
+
+    def _parse_daily_candle_rows(self, tr_code: str, rq_name: str) -> list[dict]:
+        """opt10081 일봉 차트 데이터 파싱"""
+        cnt = self._get_repeat_cnt(tr_code, rq_name)
+        rows = []
+        for i in range(cnt):
+            def g(f, _i=i):
+                return self._get_comm_data(tr_code, rq_name, _i, f)
+            close_price = safe_int(g("현재가"))
+            if close_price <= 0:
+                continue
+            rows.append({
+                "date":   g("일자").strip(),
+                "open":   safe_int(g("시가")),
+                "high":   safe_int(g("고가")),
+                "low":    safe_int(g("저가")),
+                "close":  close_price,
                 "volume": safe_int(g("거래량")),
             })
         return rows
@@ -764,7 +852,11 @@ class KiwoomManager:
                 "low_price":     safe_int(g("저가")),
                 "volume":        safe_int(g("거래량")) if safe_int(g("거래량")) < 2_000_000_000 else 0,
                 "trade_amount":  amt_val,
-                "prev_close":    safe_int(g("전일종가")),
+                "prev_close":    _resolve_prev_close(
+                                     safe_int(g("전일종가")),
+                                     safe_int(g("현재가")),
+                                     safe_float(g("등락률")),
+                                 ),
                 "change_pct":    safe_float(g("등락률")),
                 "rank":          i + 1,
             })

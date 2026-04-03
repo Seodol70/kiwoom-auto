@@ -24,8 +24,12 @@ from __future__ import annotations
 
 import os
 import time
+import logging
+import logging.handlers
 from datetime import datetime
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 import pyqtgraph as pg
@@ -1413,14 +1417,23 @@ class MainWindow(QMainWindow):
                 self._opened_today = True
                 self.log_panel.append("📈 시장 개장 — 자동매매 시작")
 
-        # 15:19 자동 청산 (평일만, 장 종료 1분 전)
-        elif time(15, 19) <= now < time(15, 20) and not self._closed_today:
-            if datetime.now().weekday() < 5:  # 월~금
+        # 15:15 자동 청산 (평일만, 미청산 포지션 계속 정리 — 2026-04-04)
+        elif time(15, 15) <= now < time(15, 30) and datetime.now().weekday() < 5:  # 월~금
+            if self.order_mgr.positions:  # 포지션 있을 때만 시도
                 self._liquidate_all_positions()
 
-        # 15:20 자동 정지 (평일만)
+        # 15:20 당일 강제청산 (평일만) — 2026-04-04 추가
         elif time(15, 20) <= now < time(15, 21) and not self._closed_today:
             if datetime.now().weekday() < 5:  # 월~금
+                # [NEW] 15:20 당일 청산 — 모든 포지션 수익률 관계없이 전량 매도 (오버나잇 리스크 방지)
+                if self.order_mgr.positions:
+                    self.log_panel.append("🔴 [15:20 강제청산] 모든 포지션 수익률 관계없이 전량 매도...")
+                    for code, pos in list(self.order_mgr.positions.items()):
+                        if pos.qty > 0:
+                            self.order_mgr.force_exit(code, pos.name, pos.qty, reason="Day Close 15:20")
+                            self.log_panel.append(f"  └─ {pos.name}({code}) {pos.qty}주 매도 주문")
+
+                # 자동매매 OFF
                 self.header._btn_auto.setChecked(False)
                 self.header._on_auto_clicked(False)
                 self._closed_today = True
@@ -1448,7 +1461,6 @@ class MainWindow(QMainWindow):
 
             if not positions:
                 self.log_panel.append("💤 보유 포지션 없음 — 청산 생략")
-                self._closed_today = True
                 return
 
             targets = []
@@ -1464,7 +1476,6 @@ class MainWindow(QMainWindow):
                 self.log_panel.append(
                     "💤 오늘 앱 매수분 없음 — 자동청산 생략 (기존 보유·전일 매수 유지)"
                 )
-                self._closed_today = True
                 return
 
             self.log_panel.append(
@@ -1484,8 +1495,7 @@ class MainWindow(QMainWindow):
                     )
                     _logger.exception(f"[청산 실패] {code}")
 
-            self._closed_today = True
-            self.log_panel.append("🔴 [자동청산 완료] 오늘 앱 매수분 청산 명령 전송")
+            self.log_panel.append("🔴 [자동청산] 청산 명령 전송 — 미체결 시 다음 분에 재확인")
         except Exception as e:
             self.log_panel.append(f"🔴 [자동청산 오류] {e}")
             _logger.exception("[_liquidate_all_positions] 예외")
@@ -1617,6 +1627,10 @@ class MainWindow(QMainWindow):
         # 뉴스 분석 요청 (백그라운드, 즉시 반환)
         self._news_analyzer.analyze(sig.code, sig.name)
         if self._auto_trading:
+            # [2026-04-03] 최대 보유수 도달 시 신호 무시 (주문 시도 X)
+            if len(self.order_mgr.positions) + len(self.order_mgr._pending) >= self.order_mgr.max_positions:
+                logger.debug("[신호 필터] 최대 보유수 도달 — %s(%s) 신호 무시", sig.name, sig.code)
+                return
             self.order_mgr.handle_signal(sig)
 
     def _drain_news_queue(self) -> None:
@@ -1700,15 +1714,17 @@ class MainWindow(QMainWindow):
                 snap = self._snap_store.get_snapshot(pos.code)
                 if snap and snap.current_price > 0:
                     price = snap.current_price
+                    src = "snapshot"
                 else:
+                    # [NEW] 스냅샷 미포함 종목 → 강제 갱신 (2026-04-04)
                     price = self._kiwoom.get_current_price(pos.code)
+                    src = "master_last (강제갱신)"
                 if price > 0 and pos.current_price != price:
                     # 현재가가 변경되었을 때만 로그 출력
                     import logging as _lg
                     _lg.getLogger(__name__).debug(
                         "현재가갱신 — %s(%s) price=%d(avg=%d, src=%s)",
-                        pos.name, pos.code, price, pos.avg_price,
-                        "snapshot" if snap and snap.current_price > 0 else "master_last",
+                        pos.name, pos.code, price, pos.avg_price, src
                     )
                     pos.current_price = price
         except Exception:
@@ -1718,37 +1734,96 @@ class MainWindow(QMainWindow):
             "positions": dict(positions),
         })
         self._auto_sell_by_pnl()
+        self.order_mgr._check_failed_sells()  # [NEW] 미체결 주문 재시도 (2026-04-04)
 
     def _auto_sell_by_pnl(self) -> None:
         """
         당일 앱 매수분(qty_buy_today_app)만 익절/손절(설정 %)에 도달하면 해당 수량만 시장가 매도.
         HTS·전일 보유분은 여기서 매도하지 않는다. ScannerWorker에서는 손절/익절을 보지 않는다.
+
+        [2026-04-03 확장]
+        - Time-cut: 40분 경과 + 수익 < 0.5% → 매도 (기회비용 확보)
+        - 동적 익절: 09:00-10:00 → +1.5%, 10:00-11:00 → +2%, 11:00+ → +3%
+        - 실시간 로깅: 보유 종목 수익률 요약
         """
         import time as _time
+        from datetime import datetime as _datetime
+
         if _time.monotonic() < getattr(self, "_sl_tp_warmup_end", 0.0):
             return
+
+        # ━━━ 실시간 보유 종목 수익률 로깅 (1분마다) ━━━
         positions = list(self.order_mgr.positions.items())
+        if positions:
+            now_time = _datetime.now()
+            pos_summary = []
+            for code, pos in positions:
+                chg = float(pos.price_change_pct_vs_avg)
+                pos_summary.append(f"{pos.name}({code}):{chg:+.2f}%")
+            logger.info(f"[포지션현황] 보유 {len(positions)}개 | {' | '.join(pos_summary)}")
+
+        # ━━━ 동적 익절 목표 결정 ━━━
+        now = _datetime.now().time()
+        if now < _datetime.strptime("10:00", "%H:%M").time():
+            dynamic_tp = 1.5  # 09:00-10:00: +1.5%
+        elif now < _datetime.strptime("11:00", "%H:%M").time():
+            dynamic_tp = 2.0  # 10:00-11:00: +2.0%
+        else:
+            dynamic_tp = self._auto_tp_pct  # 11:00+: 원래 설정값 (+3%)
+
+        # ━━━ 포지션별 청산 판정 ━━━
         for code, pos in positions:
             if self.order_mgr.is_pending(code):
                 continue
             qty_today = getattr(pos, "qty_buy_today_app", 0) or 0
+            # [2026-04-03] qty_today = 0이면 전체 qty 사용 → 이전 세션 포지션도 손절/익절 관리
             if qty_today <= 0:
-                continue
+                qty_today = pos.qty
             sell_qty = min(pos.qty, qty_today)
             if sell_qty <= 0:
                 continue
+
             chg = float(pos.price_change_pct_vs_avg)
-            hit_take = chg >= self._auto_tp_pct
+
+            # ⚠️ Hard Stop: -3% 초과 손실 → 즉시 강제 매도 (2026-04-04)
+            if chg <= -3.0:
+                logger.warning(
+                    "[Hard Stop] %s(%s) 손실률 %.2f%% (≤ -3%%) — 강제 매도 %d주",
+                    pos.name, code, chg, sell_qty
+                )
+                self.log_panel.append(
+                    f"🔴 [Hard Stop] {pos.name}({code}) 손실률 {chg:+.2f}% ≤ -3%% — {sell_qty}주 강제 매도"
+                )
+                self.order_mgr.force_exit(code, pos.name, sell_qty, reason="Hard Stop -3%")
+                continue  # 이 종목은 손절/익절 루프 스킵
+
+            # ━━━ 손절 ━━━
             hit_stop = chg <= self._auto_sl_pct
-            if not (hit_take or hit_stop):
+            if hit_stop:
+                self.log_panel.append(
+                    f"🔴 [손절] {pos.name}({code}) 하락률 {chg:+.2f}% — {sell_qty}주 매도"
+                )
+                self.order_mgr.sell(code, pos.name, sell_qty, price=0)
                 continue
-            reason = "익절" if hit_take else "손절"
-            rate_lbl = "등락률" if hit_take else "하락률"
-            self.log_panel.append(
-                f"📌 [{reason}] {pos.name}({code}) 매수가대비 {rate_lbl} {chg:+.2f}% "
-                f"도달 — 당일 매수분 {sell_qty}주만 시장가 매도 (보유 {pos.qty}주)"
-            )
-            self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+
+            # ━━━ 익절 (동적) ━━━
+            hit_take = chg >= dynamic_tp
+            if hit_take:
+                self.log_panel.append(
+                    f"🟢 [익절] {pos.name}({code}) 등락률 {chg:+.2f}% (목표 {dynamic_tp:.1f}%) — {sell_qty}주 매도"
+                )
+                self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                continue
+
+            # ━━━ Time-cut: 40분 경과 + 수익 < 0.5% ━━━
+            entry_time = getattr(pos, "entry_time", None)
+            if entry_time:
+                elapsed_min = (_datetime.now() - entry_time).total_seconds() / 60
+                if elapsed_min >= 40 and chg < 0.5:
+                    self.log_panel.append(
+                        f"⏱️ [Time-cut] {pos.name}({code}) {elapsed_min:.0f}분 경과, 수익 {chg:+.2f}% — {sell_qty}주 매도"
+                    )
+                    self.order_mgr.sell(code, pos.name, sell_qty, price=0)
 
 
 # ---------------------------------------------------------------------------
@@ -1960,12 +2035,37 @@ if __name__ == "__main__":
     from PyQt5.QtWidgets import QApplication
     _app = QApplication(sys.argv)
 
-    # 콘솔 로그 출력 설정
+    # 콘솔 + 파일 로그 설정
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+
+    # 파일 핸들러 (kiwoom_auto.log)
+    file_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(log_dir, "kiwoom_auto.log"),
+        maxBytes=20 * 1024 * 1024,  # 20 MB
+        backupCount=10,
+        encoding="utf-8",  # UTF-8 강제 (한글 대시 EM-dash 지원)
+    )
+    file_handler.setLevel(logging.INFO)
+
+    # 콘솔 핸들러 (UTF-8 강제 — Windows cp949 인코딩 우회)
+    import io
+    utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    console_handler = logging.StreamHandler(utf8_stdout)
+    console_handler.setLevel(logging.INFO)
+
+    # 포매터
+    formatter = logging.Formatter(
+        "%(asctime)s\t%(levelname)s\t%(name)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+
+    # 루트 로거 설정
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        handlers=[file_handler, console_handler],
     )
 
     try:

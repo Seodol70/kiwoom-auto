@@ -35,10 +35,10 @@ class StrategyConfig:
     bb_period: int = 20
     bb_std: float = 2.0
 
-    # 매매 조건 — 강화됨 (야간 포지션 보유 방지)
+    # 매매 조건 — 공격형으로 강화됨 (야간 포지션 보유 방지)
     holding_minutes: int = 60    # 단축됨: 90분 → 60분 (빨리 나가기)
-    stop_loss_pct: float = -1.5   # 손절 상향: -1.5% → -1.0% (손실 최소화)
-    take_profit_pct: float = 3.0  # 익절 인하: 4.0% → 3.0% (빨리 익절)
+    stop_loss_pct: float = -1.2   # 손절 타이트: -1.5% → -1.2% (공격적 진입 시 손실 방어)
+    take_profit_pct: float = 3.0  # 익절: 3.0% (절반 매도 구현은 별도)
 
     # 주문
     order_qty: int = 1         # 기본 주문 수량
@@ -266,3 +266,53 @@ def run(kiwoom, code: str, cfg: Optional[StrategyConfig] = None) -> None:
         order_id = send_sell_order(kiwoom, code, state.position.qty)
         logger.info(f"매도 주문 완료 — 주문번호: {order_id}")
         state.position = None
+
+
+# ---------------------------------------------------------------------------
+# 피봇 + 정배열 보조 함수 (2026-04-03 추가)
+# ---------------------------------------------------------------------------
+
+def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:
+    """
+    피봇 2차 저항선(R2) 계산.
+    전일 고가, 저가, 종가를 기반으로 당일 목표가를 계산한다.
+
+    공식:
+        P = (고 + 저 + 종) / 3
+        R2 = P + (고 - 저)
+
+    Args:
+        prev_high: 전일 고가
+        prev_low: 전일 저가
+        prev_close: 전일 종가
+
+    Returns:
+        피봇 R2 값 (float). 입력값이 0 이하면 0.0 반환
+    """
+    if prev_high <= 0 or prev_low <= 0 or prev_close <= 0:
+        return 0.0
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    return pivot + (prev_high - prev_low)
+
+
+def check_daily_alignment(daily_closes: list[float]) -> bool:
+    """
+    일봉 정배열 확인 (5일 MA > 10일 MA > 20일 MA).
+    상승추세의 시작 또는 확립 단계를 판별한다.
+
+    Args:
+        daily_closes: 최신순 일봉 종가 리스트
+                      (예: [100, 99, 98, ...] 형태로 최신부터 과거순)
+
+    Returns:
+        True if 5일 MA > 10일 MA > 20일 MA (정배열 확립)
+        False otherwise (데이터 부족 포함)
+    """
+    if len(daily_closes) < 20:
+        return False
+
+    ma5 = sum(daily_closes[:5]) / 5
+    ma10 = sum(daily_closes[:10]) / 10
+    ma20 = sum(daily_closes[:20]) / 20
+
+    return ma5 > ma10 > ma20
