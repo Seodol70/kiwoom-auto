@@ -294,6 +294,13 @@ class HeaderBar(QWidget):
         self._btn_auto.setFixedSize(140, 30)
         self._btn_auto.clicked.connect(self._on_auto_clicked)
 
+        # ── 재시작 버튼 ────────────────────────────────────────────────
+        self._btn_restart = QPushButton("🔄 재시작")
+        self._btn_restart.setObjectName("btn_restart")
+        self._btn_restart.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        self._btn_restart.setFixedSize(75, 30)
+        self._btn_restart.clicked.connect(self._on_restart_clicked)
+
         # ── 종료 버튼 ─────────────────────────────────────────────────
         self._btn_exit = QPushButton("⏻ 종료")
         self._btn_exit.setObjectName("btn_exit")
@@ -313,6 +320,7 @@ class HeaderBar(QWidget):
         lay.addWidget(self._lbl_pnl)
         lay.addWidget(self._divider())
         lay.addWidget(self._btn_auto)
+        lay.addWidget(self._btn_restart)
         lay.addWidget(self._btn_exit)
 
     def _make(self, text: str) -> QLabel:
@@ -337,6 +345,18 @@ class HeaderBar(QWidget):
         self._btn_auto.style().unpolish(self._btn_auto)
         self._btn_auto.style().polish(self._btn_auto)
         self.auto_trade_toggled.emit(checked)
+
+    def _on_restart_clicked(self) -> None:
+        """프로그램 재시작 버튼 클릭 — 소스 변경사항 반영"""
+        import subprocess
+        import sys
+        import os
+        # 현재 스크립트의 절대 경로 (소스 변경 시 자동 반영)
+        script_path = os.path.abspath(__file__)
+        # 새 프로세스 시작
+        subprocess.Popen([sys.executable, script_path])
+        # 현재 프로세스 종료
+        self.exit_requested.emit()
 
     def _on_exit_clicked(self) -> None:
         """프로그램 종료 버튼 클릭"""
@@ -439,71 +459,131 @@ class ScannerPanel(QWidget):
 
 
 class ChartPanel(QWidget):
-    """우하단 — 1분봉 가격/MA/거래량 차트"""
+    """우하단 — 1분봉 차트 + 종목 판단 정보 패널"""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── 좌: 차트 영역 ──────────────────────────────────────────────
+        chart_w = QWidget()
+        chart_lay = QVBoxLayout(chart_w)
+        chart_lay.setContentsMargins(0, 0, 0, 0)
+        chart_lay.setSpacing(0)
 
         self._lbl_code = QLabel("  종목 차트")
         self._lbl_code.setObjectName("panel_title")
-        lay.addWidget(self._lbl_code)
+        chart_lay.addWidget(self._lbl_code)
 
         self._gw = pg.GraphicsLayoutWidget()
-        lay.addWidget(self._gw)
+        chart_lay.addWidget(self._gw)
 
-        # ── 가격 플롯 (상단 70%) ──────────────────────────────────────────
+        # 가격 플롯 (상단 70%)
         self._price_plot = self._gw.addPlot(row=0, col=0)
         self._price_plot.showGrid(x=True, y=True, alpha=0.15)
         self._price_plot.getAxis("left").setWidth(70)
         self._price_plot.getAxis("bottom").setStyle(showValues=False)
 
-        # 채움 영역 (가격선 아래 반투명)
-        self._fill_base = self._price_plot.plot(pen=None)
+        self._fill_base  = self._price_plot.plot(pen=None)
         self._price_line = self._price_plot.plot(pen=pg.mkPen("#74b9ff", width=2))
         self._price_fill = pg.FillBetweenItem(
             self._fill_base, self._price_line,
-            brush=pg.mkBrush(116, 185, 255, 35),
+            brush=pg.mkBrush(116, 185, 255, 25),
         )
         self._price_plot.addItem(self._price_fill)
 
-        # MA 라인
-        self._ma5_line  = self._price_plot.plot(pen=pg.mkPen("#ffeaa7", width=1.5))
-        self._ma20_line = self._price_plot.plot(pen=pg.mkPen("#a29bfe", width=1.5))
-        self._ma50_line = self._price_plot.plot(pen=pg.mkPen("#00b894", width=1.5))
+        # MA7 / MA15 (JDM 전략 기준)
+        self._ma7_line  = self._price_plot.plot(pen=pg.mkPen("#ffeaa7", width=1.5))
+        self._ma15_line = self._price_plot.plot(pen=pg.mkPen("#a29bfe", width=1.5))
 
-        # 현재가 수평 점선
-        self._curr_line = pg.InfiniteLine(
-            angle=0, movable=False,
-            pen=pg.mkPen("#f38ba8", width=1, style=Qt.DashLine),
-        )
-        self._price_plot.addItem(self._curr_line)
+        # 수평선: 현재가(파랑점선) / 매수가(노랑) / 익절(초록점선) / 손절(빨강점선)
+        self._curr_line = pg.InfiniteLine(angle=0, movable=False,
+            pen=pg.mkPen("#74b9ff", width=1, style=Qt.DashLine))
+        self._buy_line  = pg.InfiniteLine(angle=0, movable=False,
+            pen=pg.mkPen("#ffeaa7", width=2, style=Qt.SolidLine))
+        self._tp_line   = pg.InfiniteLine(angle=0, movable=False,
+            pen=pg.mkPen("#a6e3a1", width=1, style=Qt.DashLine))
+        self._sl_line   = pg.InfiniteLine(angle=0, movable=False,
+            pen=pg.mkPen("#f38ba8", width=1, style=Qt.DashLine))
+        for line in [self._curr_line, self._buy_line, self._tp_line, self._sl_line]:
+            self._price_plot.addItem(line)
+        self._buy_line.setVisible(False)
+        self._tp_line.setVisible(False)
+        self._sl_line.setVisible(False)
 
         # 범례
         leg = self._price_plot.addLegend(offset=(10, 10))
-        leg.addItem(self._price_line, "종가")
-        leg.addItem(self._ma5_line,  "MA5")
-        leg.addItem(self._ma20_line, "MA20")
-        leg.addItem(self._ma50_line, "MA50")
+        leg.addItem(self._price_line, "현재가")
+        leg.addItem(self._ma7_line,  "MA7")
+        leg.addItem(self._ma15_line, "MA15")
 
-        # ── 거래량 플롯 (하단 30%) ───────────────────────────────────────
+        # 거래량 플롯 (하단 30%)
         self._volume_plot = self._gw.addPlot(row=1, col=0)
         self._volume_plot.showGrid(x=False, y=True, alpha=0.15)
         self._volume_plot.getAxis("left").setWidth(70)
         self._volume_plot.setLabel("bottom", "분봉 (분)")
         self._volume_plot.setXLink(self._price_plot)
-
         self._vol_bars = pg.BarGraphItem(x=[], height=[], width=0.7, pen=None)
         self._volume_plot.addItem(self._vol_bars)
 
         self._gw.ci.layout.setRowStretchFactor(0, 7)
         self._gw.ci.layout.setRowStretchFactor(1, 3)
+        root.addWidget(chart_w, stretch=6)
+
+        # ── 우: 정보 패널 ──────────────────────────────────────────────
+        info_w = QWidget()
+        info_w.setObjectName("chart_info_panel")
+        info_lay = QVBoxLayout(info_w)
+        info_lay.setContentsMargins(12, 12, 12, 12)
+        info_lay.setSpacing(6)
+
+        def _lbl(text="—", bold=False, size=9, color=None):
+            l = QLabel(text)
+            f = QFont("Malgun Gothic", size)
+            f.setBold(bold)
+            l.setFont(f)
+            l.setWordWrap(True)
+            if color:
+                l.setStyleSheet(f"color: {color};")
+            return l
+
+        def _sep():
+            f = QFrame()
+            f.setFrameShape(QFrame.HLine)
+            f.setStyleSheet("color: #313244; margin: 2px 0;")
+            return f
+
+        self._i_name   = _lbl("종목 선택", bold=True, size=10)
+        self._i_signal = _lbl("신호: —", size=8, color="#a6e3a1")
+        info_lay.addWidget(self._i_name)
+        info_lay.addWidget(self._i_signal)
+        info_lay.addWidget(_sep())
+
+        self._i_buy    = _lbl("매수가: —", size=9)
+        self._i_curr   = _lbl("현재가: —", size=9)
+        self._i_pnl    = _lbl("손익: —", bold=True, size=10)
+        info_lay.addWidget(self._i_buy)
+        info_lay.addWidget(self._i_curr)
+        info_lay.addWidget(self._i_pnl)
+        info_lay.addWidget(_sep())
+
+        self._i_hold   = _lbl("보유: —", size=9)
+        self._i_remain = _lbl("남은 시간: —", size=9)
+        info_lay.addWidget(self._i_hold)
+        info_lay.addWidget(self._i_remain)
+        info_lay.addWidget(_sep())
+
+        self._i_tp     = _lbl("익절까지: —", size=8, color="#a6e3a1")
+        self._i_sl     = _lbl("손절까지: —", size=8, color="#f38ba8")
+        info_lay.addWidget(self._i_tp)
+        info_lay.addWidget(self._i_sl)
+        info_lay.addStretch()
+        root.addWidget(info_w, stretch=2)
 
     @staticmethod
     def _rolling_mean(arr, window: int):
-        """numpy 기반 단순이동평균 — O(n) convolution"""
         import numpy as np
         a = np.array(arr, dtype=float)
         result = np.empty(len(a))
@@ -514,38 +594,99 @@ class ChartPanel(QWidget):
         result[window - 1:] = full[window - 1:]
         return result
 
-    def update_chart(self, closes: list, volumes: list, code: str, name: str) -> None:
-        """1분봉 종가/거래량 리스트로 차트를 갱신한다."""
-        self._lbl_code.setText(f"  📈 {name}  ({code})")
-        if len(closes) < 2:
-            return
+    def update_chart(
+        self,
+        closes: list,
+        volumes: list,
+        code: str,
+        name: str,
+        position=None,
+        tp_pct: float = 3.0,
+        sl_pct: float = -1.5,
+        signal_reason: str = None,
+    ) -> None:
+        """1분봉 데이터 + 포지션 정보로 차트와 정보 패널을 갱신한다."""
+        self._lbl_code.setText(f"  {'📈' if position else '👁️'} {name}  ({code})")
 
-        import numpy as np
-        x = list(range(len(closes)))
-        base_y = [min(closes)] * len(closes)
+        # ── 차트 갱신 ────────────────────────────────────────────────
+        if len(closes) >= 2:
+            import numpy as np
+            x = list(range(len(closes)))
+            self._price_line.setData(x=x, y=closes)
+            self._fill_base.setData(x=x, y=[min(closes)] * len(closes))
+            self._curr_line.setValue(closes[-1])
+            if len(closes) >= 7:
+                self._ma7_line.setData(x=x, y=self._rolling_mean(closes, 7))
+            if len(closes) >= 15:
+                self._ma15_line.setData(x=x, y=self._rolling_mean(closes, 15))
+            if volumes:
+                vols = volumes[:len(closes)]
+                avg_vol = float(np.mean(vols)) if vols else 1.0
+                self._vol_bars.setOpts(
+                    x=x[:len(vols)], height=vols, width=0.7,
+                    brushes=[
+                        pg.mkBrush("#a6e3a1") if v >= avg_vol else pg.mkBrush("#585b70")
+                        for v in vols
+                    ],
+                )
 
-        self._price_line.setData(x=x, y=closes)
-        self._fill_base.setData(x=x, y=base_y)
-        self._curr_line.setValue(closes[-1])
+        # ── 정보 패널 갱신 ───────────────────────────────────────────
+        curr = closes[-1] if closes else 0
 
-        if len(closes) >= 5:
-            self._ma5_line.setData(x=x, y=self._rolling_mean(closes, 5))
-        if len(closes) >= 20:
-            self._ma20_line.setData(x=x, y=self._rolling_mean(closes, 20))
-        if len(closes) >= 50:
-            self._ma50_line.setData(x=x, y=self._rolling_mean(closes, 50))
+        if position:
+            avg  = position.avg_price
+            curr = position.current_price or curr
+            qty  = position.qty
 
-        if volumes:
-            vols = volumes[:len(closes)]
-            avg_vol = float(np.mean(vols)) if vols else 1.0
-            brushes = [
-                pg.mkBrush("#a6e3a1") if v >= avg_vol else pg.mkBrush("#585b70")
-                for v in vols
-            ]
-            self._vol_bars.setOpts(
-                x=x[:len(vols)], height=vols, width=0.7,
-                brushes=brushes,
-            )
+            tp_price = int(avg * (1 + tp_pct / 100))
+            sl_price = int(avg * (1 + sl_pct / 100))
+
+            self._buy_line.setValue(avg);  self._buy_line.setVisible(True)
+            self._tp_line.setValue(tp_price); self._tp_line.setVisible(True)
+            self._sl_line.setValue(sl_price); self._sl_line.setVisible(True)
+
+            pnl      = (curr - avg) * qty
+            pnl_pct  = (curr - avg) / avg * 100 if avg else 0
+            sign     = "+" if pnl >= 0 else ""
+            color    = "#a6e3a1" if pnl >= 0 else "#f38ba8"
+
+            dist_tp_pct = (tp_price - curr) / curr * 100 if curr else 0
+            dist_sl_pct = (curr - sl_price) / curr * 100 if curr else 0
+
+            # 보유 시간 — Position.buy_date 기준 (날짜만 알 수 있음, 분 단위 미지원)
+            from datetime import datetime as _dt
+            hold_str = "—"
+            remain_str = "—"
+            if hasattr(position, "_entry_time") and position._entry_time:
+                held = int((_dt.now() - position._entry_time).total_seconds() / 60)
+                hold_str   = f"{held}분 경과"
+                remain_str = f"{max(0, 60 - held)}분 남음"
+
+            self._i_name.setText(f"📈 {name}\n({code})")
+            self._i_signal.setText(f"신호: {signal_reason or '앱 매수'}")
+            self._i_buy.setText(f"매수가:  {avg:,}원")
+            self._i_curr.setText(f"현재가:  {curr:,}원")
+            self._i_pnl.setText(f"손익:  {sign}{pnl:,}원  ({sign}{pnl_pct:.2f}%)")
+            self._i_pnl.setStyleSheet(f"color: {color}; font-weight: bold;")
+            self._i_hold.setText(f"보유: {hold_str}")
+            self._i_remain.setText(f"홀딩: {remain_str}  (최대 60분)")
+            self._i_tp.setText(f"익절까지:  +{dist_tp_pct:.2f}%  ({tp_price:,}원)")
+            self._i_sl.setText(f"손절까지:  -{dist_sl_pct:.2f}%  ({sl_price:,}원)")
+        else:
+            self._buy_line.setVisible(False)
+            self._tp_line.setVisible(False)
+            self._sl_line.setVisible(False)
+
+            self._i_name.setText(f"👁️ {name}\n({code})")
+            self._i_signal.setText(f"신호: {signal_reason or '감시 중'}")
+            self._i_buy.setText("매수가:  —  (미보유)")
+            self._i_curr.setText(f"현재가:  {curr:,}원" if curr else "현재가:  —")
+            self._i_pnl.setText("손익:  —")
+            self._i_pnl.setStyleSheet("color: #6c7086;")
+            self._i_hold.setText("보유:  —")
+            self._i_remain.setText("홀딩:  —")
+            self._i_tp.setText(f"익절 기준:  +{tp_pct:.1f}%")
+            self._i_sl.setText(f"손절 기준:  {sl_pct:.1f}%")
 
 
 class PortfolioPanel(QWidget):
@@ -858,6 +999,9 @@ class MainWindow(QMainWindow):
         self._today_watch: dict = {}
         # time.monotonic() 기준 — 이 시각 이전에는 _auto_sell_by_pnl 미실행
         self._sl_tp_warmup_end: float = 0.0
+        # 블로킹 방지 플래그
+        self._scan_in_progress: bool = False
+        self._liquidate_in_progress: bool = False
 
         self.setWindowTitle("키움 자동매매 대시보드")
         self.resize(1600, 900)
@@ -1281,48 +1425,63 @@ class MainWindow(QMainWindow):
     def _liquidate_all_positions(self) -> None:
         """오늘 이 앱에서 매수한 수량만 강제 청산 (장 종료 1분 전 15:19). 기존 보유·HTS 매수분은 제외."""
         from datetime import date as _date
+        import logging as _log
+        _logger = _log.getLogger(__name__)
 
-        positions = list(self.order_mgr.positions.items())
-
-        if not positions:
-            self.log_panel.append("💤 보유 포지션 없음 — 청산 생략")
-            self._closed_today = True
+        # 이전 청산이 아직 진행 중이면 스킵 (블로킹 방지)
+        if getattr(self, '_liquidate_in_progress', False):
+            _logger.warning("[_liquidate_all_positions] 이전 청산 진행 중 — 스킵")
             return
 
-        targets = []
-        for code, pos in positions:
-            q = getattr(pos, "qty_buy_today_app", 0) or 0
-            if q <= 0:
-                continue
-            sell_qty = min(pos.qty, q)
-            if sell_qty > 0:
-                targets.append((code, pos, sell_qty))
+        self._liquidate_in_progress = True
+        try:
+            positions = list(self.order_mgr.positions.items())
 
-        if not targets:
+            if not positions:
+                self.log_panel.append("💤 보유 포지션 없음 — 청산 생략")
+                self._closed_today = True
+                return
+
+            targets = []
+            for code, pos in positions:
+                q = getattr(pos, "qty_buy_today_app", 0) or 0
+                if q <= 0:
+                    continue
+                sell_qty = min(pos.qty, q)
+                if sell_qty > 0:
+                    targets.append((code, pos, sell_qty))
+
+            if not targets:
+                self.log_panel.append(
+                    "💤 오늘 앱 매수분 없음 — 자동청산 생략 (기존 보유·전일 매수 유지)"
+                )
+                self._closed_today = True
+                return
+
             self.log_panel.append(
-                "💤 오늘 앱 매수분 없음 — 자동청산 생략 (기존 보유·전일 매수 유지)"
+                f"🔴 [자동청산 시작] 오늘 앱 매수 {len(targets)}종목만 청산 (기준일 {_date.today().isoformat()})..."
             )
+
+            for code, pos, sell_qty in targets:
+                try:
+                    self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                    self.log_panel.append(
+                        f"  └─ {pos.name}({code}) {sell_qty}주 시장가 매도 주문 "
+                        f"(보유 {pos.qty}주 중 오늘 앱 매수분)"
+                    )
+                except Exception as e:
+                    self.log_panel.append(
+                        f"  ⚠️ {pos.name}({code}) 청산 실패: {e}"
+                    )
+                    _logger.exception(f"[청산 실패] {code}")
+
             self._closed_today = True
-            return
-
-        self.log_panel.append(
-            f"🔴 [자동청산 시작] 오늘 앱 매수 {len(targets)}종목만 청산 (기준일 {_date.today().isoformat()})..."
-        )
-
-        for code, pos, sell_qty in targets:
-            try:
-                self.order_mgr.sell(code, pos.name, sell_qty, price=0)
-                self.log_panel.append(
-                    f"  └─ {pos.name}({code}) {sell_qty}주 시장가 매도 주문 "
-                    f"(보유 {pos.qty}주 중 오늘 앱 매수분)"
-                )
-            except Exception as e:
-                self.log_panel.append(
-                    f"  ⚠️ {pos.name}({code}) 청산 실패: {e}"
-                )
-
-        self._closed_today = True
-        self.log_panel.append("🔴 [자동청산 완료] 오늘 앱 매수분 청산 명령 전송")
+            self.log_panel.append("🔴 [자동청산 완료] 오늘 앱 매수분 청산 명령 전송")
+        except Exception as e:
+            self.log_panel.append(f"🔴 [자동청산 오류] {e}")
+            _logger.exception("[_liquidate_all_positions] 예외")
+        finally:
+            self._liquidate_in_progress = False
 
     @pyqtSlot(bool)
     def _on_auto_trade_toggle(self, enabled: bool) -> None:
@@ -1360,6 +1519,11 @@ class MainWindow(QMainWindow):
             return
         self.log_panel.append(f"[수동매도] {name}({code}) {qty}주 시장가 요청")
         self.order_mgr.sell(code, name, qty, price=0)
+        # 주문 보낸 후 포트폴리오 즉시 업데이트
+        self._on_portfolio_refresh({
+            "cash":      self.order_mgr.cash,
+            "positions": dict(self.order_mgr.positions),
+        })
 
     @pyqtSlot()
     def _run_scanner_scan(self) -> None:
@@ -1368,12 +1532,19 @@ class MainWindow(QMainWindow):
         opt10030 → 테스타 정배열 + 장동민 시가돌파 필터링 → final_targets.
 
         주의: Kiwoom API는 메인 스레드에서만 작동.
-        타임아웃을 2초로 설정하여 응답 없으면 빨리 폴백.
+        장시간 블로킹되면 다음 스캔 사이클로 미루기 (타임아웃 방식).
         """
         import logging as _log
         from config import STRATEGY as _STR
         _logger = _log.getLogger(__name__)
         _logger.info("[_run_scanner_scan] 진입")
+
+        # 이전 스캔이 아직 진행 중이면 스킵 (블로킹 방지)
+        if getattr(self, '_scan_in_progress', False):
+            _logger.warning("[_run_scanner_scan] 이전 스캔 진행 중 — 스킵")
+            return
+
+        self._scan_in_progress = True
         self.log_panel.append("[스캔] opt10030 거래대금 상위 조회 중...")
         self.scan_status.reset()
         try:
@@ -1409,6 +1580,8 @@ class MainWindow(QMainWindow):
             self.log_panel.append(f"[스캔 오류] {e}")
             self.scan_status.done(f"오류: {e}")
             _logger.exception("[_run_scanner_scan] 예외")
+        finally:
+            self._scan_in_progress = False
 
     def _on_scan_signal_direct(self, sig) -> None:
         """SmartScanner.on_signal 콜백 — 메인 스레드에서 직접 호출됨"""
@@ -1496,9 +1669,13 @@ class MainWindow(QMainWindow):
         if snap is None:
             return
         closes  = snap.closes_1min or [snap.current_price]
-        volumes = []   # TODO: 분봉 거래량 별도 관리 시 연결
+        volumes = list(snap.volumes_1min) if snap.volumes_1min else []
+        pos     = self.order_mgr.positions.get(self._selected_code)
         self.chart_panel.update_chart(
-            closes, volumes, snap.code, snap.name
+            closes, volumes, snap.code, snap.name,
+            position=pos,
+            tp_pct=self._auto_tp_pct,
+            sl_pct=self._auto_sl_pct,
         )
 
     def _refresh_portfolio_prices(self) -> None:
@@ -1605,6 +1782,17 @@ QPushButton#btn_auto_on {
 }
 QPushButton#btn_auto_on:hover { background: #c3f5be; }
 
+/* ─── 재시작 버튼 ──────────────────────────────────────── */
+QPushButton#btn_restart {
+    background: #94e2d5;
+    color: #1e1e2e;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-weight: bold;
+}
+QPushButton#btn_restart:hover { background: #a8eee5; }
+
 /* ─── 종료 버튼 ───────────────────────────────────────── */
 QPushButton#btn_exit {
     background: #f38ba8;
@@ -1615,6 +1803,16 @@ QPushButton#btn_exit {
     font-weight: bold;
 }
 QPushButton#btn_exit:hover { background: #f5a3b8; }
+
+/* ─── 차트 정보 패널 ──────────────────────────────────── */
+QWidget#chart_info_panel {
+    background: #12121e;
+    border-left: 1px solid #313244;
+}
+QWidget#chart_info_panel QLabel {
+    color: #cdd6f4;
+    padding: 2px 0;
+}
 
 /* ─── 수동매도 버튼 ────────────────────────────────────── */
 QPushButton#manual_sell_btn {
@@ -1705,6 +1903,24 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 # 진입점
 # ---------------------------------------------------------------------------
 
+def _launch_log_monitor():
+    """별도 콘솔 창에서 log_monitor.py 를 자동 실행한다 (Windows 전용)."""
+    import subprocess
+    monitor_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "log_monitor.py",
+    )
+    if not os.path.exists(monitor_path):
+        return
+    try:
+        subprocess.Popen(
+            [sys.executable, monitor_path],
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+    except Exception as e:
+        print(f"[WARN] log_monitor 자동 실행 실패: {e}")
+
+
 def launch(kiwoom) -> None:
     """
     대시보드를 실행한다.
@@ -1717,6 +1933,9 @@ def launch(kiwoom) -> None:
     app = QApplication.instance() or QApplication(sys.argv)
     win = MainWindow(kiwoom)
     win.show()
+
+    # 실시간 로그 감시 대시보드 자동 실행
+    _launch_log_monitor()
 
     # 로그인 다이얼로그 — 창이 보인 뒤 실행
     QTimer.singleShot(100, win.login_mgr.show_and_login)
