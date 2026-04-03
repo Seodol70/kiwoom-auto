@@ -144,15 +144,21 @@ class SmartScannerConfig:
     diagnostic_sample_n:  int   = 5
     log_dir:              str   = "logs"
     # 등락률이 이 값 **이상**이면 감시·신호·매수 대상에서 제외 (config RISK.max_change_pct 와 동기화)
-    max_change_pct:       float = 15.0
+    max_change_pct:       float = 20.0               # 2026-04-03 상향: 15% → 20% (대장주 포함시키기)
     # ScannerWorker: 동일 종목 재 emit 최소 간격(초). 에지 트리거와 병행 (config RISK.signal_cooldown_sec)
     signal_cooldown_sec:  float = 45.0
     # [NEW] 4중 필터 — JDM 신호 품질 강화
     entry_start_time:     dtime = dtime(9, 0, 0)    # 진입 허용 시작
-    entry_end_time:       dtime = dtime(9, 30, 0)   # 진입 허용 종료
-    min_chejan_strength:  float = 120.0             # 체결강도 하한 (%)
-    volume_surge_mult:    float = 3.0               # 분봉 거래량 배수 (직전 5분 평균 대비)
+    entry_end_time:       dtime = dtime(11, 0, 0)   # 진입 허용 종료
+    min_chejan_strength:  float = 110.0             # 체결강도 하한 (%)
+    volume_surge_mult:    float = 1.5               # 분봉 거래량 배수 (직전 5분 평균 대비)
     max_disparity_pct:    float = 5.0               # MA20 이격도 상한 (%)
+    # [NEW] OR 전략 + 공격형 필터
+    prev_close_min_ratio: float = 0.98              # 조건A: V자반등 최소 비율 (시가 대비 -2% 이내)
+    vi_approach_chg_pct:  float = 7.0               # 조건B: VI 직전 등락률 기준 (%)
+    volume_1min_surge_mult: float = 1.5             # 최근 1분 거래량 급증 배수 (직전 10분 평균 대비) — 2026-04-03 완화: 5.0→1.5배(300%→150%)
+    volume_surge_lookback: int = 10                 # 직전 N분 평균 계산 구간
+    ma_alignment_time:    dtime = dtime(9, 30, 0)  # 이 시각 이후엔 MA 정배열 확인
 
 
 # ---------------------------------------------------------------------------
@@ -911,26 +917,52 @@ def check_testa_alignment(
 
 def check_jdm_open_breakout(
     snap: StockSnapshot,
+    cfg: SmartScannerConfig,
     min_body_ratio: float = 0.7,   # 양봉 몸통 비율 하한 — 윗꼬리 가짜 돌파 차단
 ) -> Optional[str]:
     """
-    장동민 시가 돌파: 현재가 > 시가 + 양봉 몸통 비율 필터.
+    장동민 개선형: OR 3조건 + 양봉 몸통 비율 필터.
 
-    조건:
-      ① current_price > open_price   (시가 돌파)
-      ② (current_price - open_price) / (high_price - low_price) ≥ min_body_ratio
-         → 몸통이 전체 캔들 범위의 70% 이상 — 윗꼬리 달린 가짜 돌파 차단
-         (예: 시가 1만, 고가 1.1만, 현재가 1.01만 → 몸통 10%에 불과 → 탈락)
+    조건 0 (기존): current_price > open_price  (시가 돌파)
+    조건 A (V자반등): current_price > prev_close AND current_price >= open_price * prev_close_min_ratio
+                    → 어제 가격을 돌파하며 V자 반등, 시가 대비 -2% 이내 제한
+    조건 B (VI직전): current_price >= high_price AND change_pct >= vi_approach_chg_pct
+                   → 이미 1차 상승 후 고점 재돌파, VI 달려가는 주도주
+
+    세 조건 중 하나라도 통과하면, 양봉 몸통 비율 필터까지 체크 후 통과.
     """
     if snap.open_price <= 0 or snap.current_price <= 0:
         ScannerLogger.rejected(snap.code, snap.name, "JDM_OPEN", "시가/현재가 0")
         return None
 
-    if snap.current_price <= snap.open_price:
-        ScannerLogger.rejected(
-            snap.code, snap.name, "JDM_OPEN",
-            f"시가 미돌파 현재가={snap.current_price:,} 시가={snap.open_price:,}",
+    # OR 3조건 검사
+    cond0 = snap.current_price > snap.open_price
+    cond_a = (snap.current_price > snap.prev_close and
+              snap.current_price >= snap.open_price * cfg.prev_close_min_ratio)
+    cond_b = (snap.current_price >= snap.high_price and
+              snap.change_pct >= cfg.vi_approach_chg_pct)
+
+    condition_met = False
+    condition_reason = ""
+
+    if cond0:
+        condition_met = True
+        condition_reason = "시가돌파"
+    elif cond_a:
+        condition_met = True
+        condition_reason = "V자반등"
+    elif cond_b:
+        condition_met = True
+        condition_reason = "VI직전"
+
+    if not condition_met:
+        detail = (
+            f"3조건 불만족: "
+            f"시가돌파({cond0}) V자반등({cond_a}) VI직전({cond_b}) "
+            f"현재={snap.current_price:,} 시가={snap.open_price:,} "
+            f"전일={snap.prev_close:,} 고가={snap.high_price:,} 등락={snap.change_pct:.1f}%"
         )
+        ScannerLogger.rejected(snap.code, snap.name, "JDM_OPEN", detail)
         return None
 
     # 양봉 몸통 비율 체크
@@ -940,8 +972,7 @@ def check_jdm_open_breakout(
         if body_ratio < min_body_ratio:
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM_OPEN",
-                f"몸통 비율 부족 {body_ratio:.0%} < {min_body_ratio:.0%} "
-                f"(윗꼬리 달린 가짜 돌파 — 고가={snap.high_price:,})",
+                f"{condition_reason} 통과했으나 몸통 비율 부족 {body_ratio:.0%} < {min_body_ratio:.0%}",
             )
             return None
 
@@ -951,8 +982,8 @@ def check_jdm_open_breakout(
         if candle_range > 0 else ""
     )
     reason = (
-        f"시가돌파 현재가={snap.current_price:,} > 시가={snap.open_price:,} "
-        f"(+{breakout_pct:.2f}%){body_ratio_str}"
+        f"{condition_reason} 현재가={snap.current_price:,} > "
+        f"시가={snap.open_price:,}(+{breakout_pct:.2f}%){body_ratio_str}"
     )
     ScannerLogger.passed(snap.code, snap.name, "JDM_OPEN", reason)
     return reason
@@ -962,21 +993,35 @@ def check_jdm_open_breakout(
 
 def check_volume_surge(
     snap: StockSnapshot,
-    surge_mult: float = 3.0,
+    surge_mult: float = 1.5,
+    lookback: int = 10,
 ) -> Optional[str]:
-    """[NEW] 직전 5분 평균 거래량 대비 surge_mult 배 이상인지 확인."""
+    """
+    [개선] 직전 N분 평균 거래량 대비 surge_mult 배 이상인지 확인.
+
+    기존: 직전 5분 평균 대비 1.5배
+    개선: 직전 lookback분(기본 10분) 평균 대비 surge_mult배(기본 5.0배)
+    → 더 강력한 수급 확인 (가짜 신호 필터링 강화)
+    """
     vols = snap.volumes_1min
-    if len(vols) < 6:
-        return None   # 데이터 부족
-    avg5 = sum(vols[-6:-1]) / 5
-    if avg5 <= 0:
+    # 데이터 부족: lookback+1개 필요 (현재 1분 + 과거 lookback분)
+    if len(vols) < lookback + 1:
         return None
+
+    # 직전 lookback분 평균
+    avg_lookback = sum(vols[-(lookback+1):-1]) / lookback
+    if avg_lookback <= 0:
+        return None
+
     cur = vols[-1]
-    if cur < avg5 * surge_mult:
-        ScannerLogger.rejected(snap.code, snap.name, "VOL_SURGE",
-                               f"거래량 {cur:,} / 5분평균 {avg5:,.0f} ({cur/avg5:.1f}배 < {surge_mult}배)")
+    if cur < avg_lookback * surge_mult:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "VOL_SURGE",
+            f"거래량 {cur:,} / {lookback}분평균 {avg_lookback:,.0f} ({cur/avg_lookback:.1f}배 < {surge_mult}배)"
+        )
         return None
-    return f"거래량급증{cur:,}주({cur/avg5:.1f}배)"
+
+    return f"거래량급증{cur:,}주({cur/avg_lookback:.1f}배)"
 
 
 def check_chejan_strength(
@@ -1043,12 +1088,20 @@ def check_jdm_entry(
         )
         return None
 
-    r_vol = check_volume_surge(snap, cfg.volume_surge_mult)
+    # [강화] 거래량 급증: 직전 N분 평균 대비 배수 이상
+    r_vol = check_volume_surge(snap, cfg.volume_1min_surge_mult, cfg.volume_surge_lookback)
     if r_vol is None:
+        # 상세 로그: 현재 거래량과 임계값 비교
+        if snap.volumes_1min and len(snap.volumes_1min) >= cfg.volume_surge_lookback + 1:
+            avg = sum(snap.volumes_1min[-(cfg.volume_surge_lookback+1):-1]) / cfg.volume_surge_lookback
+            cur = snap.volumes_1min[-1]
+            logger.debug(f"[신호필터] {snap.name}({snap.code}) 거래량 미달 — 현재 {cur:,}주 / {cfg.volume_surge_lookback}분평균 {avg:,.0f}주 ({cur/max(avg,1):.2f}배 < {cfg.volume_1min_surge_mult}배)")
         return None
 
     r_chej = check_chejan_strength(snap, cfg.min_chejan_strength)
     if r_chej is None:
+        # 상세 로그: 현재 체결강도 표시
+        logger.debug(f"[신호필터] {snap.name}({snap.code}) 체결강도 미달 — 현재 {snap.chejan_strength:.0f}% < {cfg.min_chejan_strength:.0f}%")
         return None
 
     from strategy.jang_dong_min import calc_ma, calc_rsi
@@ -1063,14 +1116,22 @@ def check_jdm_entry(
 
     golden = pma_s <= pma_l and ma_s > ma_l
     if not golden:
-        ScannerLogger.rejected(snap.code, snap.name, "JDM", "골든크로스 미충족")
+        ScannerLogger.rejected(snap.code, snap.name, "JDM",
+            f"골든크로스 미충족 (직전MA:{pma_s:.0f}/{pma_l:.0f} → 현재MA:{ma_s:.0f}/{ma_l:.0f})")
         return None
+
+    # [NEW] 09:30 이후엔 MA 정배열 유지 확인 (초기 골든크로스 이후 안정성 강화)
+    if now >= cfg.ma_alignment_time:
+        if not (ma_s > ma_l):
+            ScannerLogger.rejected(snap.code, snap.name, "JDM",
+                f"MA 정배열 미충족(09:30+) — MA{cfg.jdm_ma_short}:{ma_s:.0f} ≤ MA{cfg.jdm_ma_long}:{ma_l:.0f}")
+            return None
 
     spread = float(ma_s) - float(ma_l)
     if spread < float(cfg.jdm_min_ma_spread_abs):
         ScannerLogger.rejected(
             snap.code, snap.name, "JDM",
-            f"MA 이격 부족 (단기−장기={spread:.0f}원 < {cfg.jdm_min_ma_spread_abs}원)",
+            f"MA 이격 부족 (단기−장기={spread:.0f}원 < 최소 {cfg.jdm_min_ma_spread_abs}원)",
         )
         return None
 
@@ -1078,7 +1139,7 @@ def check_jdm_entry(
     if not rsi_ok:
         ScannerLogger.rejected(
             snap.code, snap.name, "JDM",
-            f"RSI {rsi:.1f} (진입허용 {cfg.jdm_rsi_entry_min:.0f}~{cfg.jdm_rsi_high:.0f})",
+            f"RSI 범위 초과 — 현재 {rsi:.1f}% (진입허용 {cfg.jdm_rsi_entry_min:.0f}~{cfg.jdm_rsi_high:.0f}%)",
         )
         return None
 
@@ -1328,8 +1389,8 @@ class SmartScanner:
         if not (self.cfg.entry_start_time <= now <= self.cfg.entry_end_time):
             return
 
-        # ③ 시가 돌파 + 신고가 경신
-        r_open = check_jdm_open_breakout(snap)
+        # ③ 시가 돌파 + 신고가 경신 (OR 3조건: 시가돌파 / V자반등 / VI직전)
+        r_open = check_jdm_open_breakout(snap, self.cfg)
         if r_open is None:
             return
 
