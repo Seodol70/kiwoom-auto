@@ -80,6 +80,23 @@ def calc_ma(closes: list[float], period: int) -> Optional[float]:
     return float(np.mean(closes[-period:]))
 
 
+def calc_ema(closes: list[float], period: int) -> Optional[float]:
+    """지수이동평균(EMA) — 전체 시계열을 순차 계산 (Wilder smoothing)
+
+    k = 2 / (period + 1)
+    EMA_t = price_t * k + EMA_{t-1} * (1 - k)
+    초기값: 첫 period개의 단순평균
+    """
+    if len(closes) < period:
+        return None
+    arr = np.array(closes, dtype=np.float64)
+    k = 2.0 / (period + 1)
+    ema = float(arr[:period].mean())
+    for price in arr[period:]:
+        ema = float(price) * k + ema * (1.0 - k)
+    return ema
+
+
 def calc_rsi(closes: list[float], period: int = 14) -> Optional[float]:
     """RSI(Relative Strength Index) — numpy 가속"""
     if len(closes) < period + 1:

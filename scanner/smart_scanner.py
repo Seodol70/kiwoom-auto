@@ -144,17 +144,22 @@ class SmartScannerConfig:
     realtime_sub_max:     int   = 110         # SetRealReg 감시 상한( watch_pool_max 와 맞춤)
     scan_interval:        float = 1.0
     tr_delay:             float = 0.25        # TRRequestQueue 최소 간격
-    breakout_ratio:       float = 0.03        # 2026-04-03 재강화: 1% → 3% (가짜 돌파 방지, 의미 있는 움직임만)
+    breakout_ratio:       float = 0.02        # 2026-04-08: 3% → 2% (전일종가 대비 기준, 신호 확대)
     breakout_volume_mult: float = 1.0         # 2026-04-03: 1.5 → 1.0 (거래량 완화)
+    breakout_confirm_minutes:    float = 2.0  # 2026-04-08: 3분 → 2분 (빠른 종목 타이밍 확보)
+    breakout_cancel_drawdown_pct: float = -0.8  # 2026-04-08: -0.5% → -0.8% (완화된 ratio 노이즈 흡수)
+    breakout_pullback_from_high_pct: float = 2.5  # 당일 고점 대비 N% 이상 하락 중이면 BREAKOUT 차단 (완화: 1.5→2.5)
+    breakout_min_rising_bars: int = 1         # 최근 N개 1분봉이 연속 상승이어야 BREAKOUT 통과 (완화: 2→1)
     jdm_ma_short:         int   = 7          # 최적화됨: 5→7
     jdm_ma_long:          int   = 15         # 최적화됨: 20→15
     jdm_rsi_low:          float = 35.0       # 레거시(다른 로직 참고용). 진입은 jdm_rsi_entry_min 사용
-    jdm_rsi_high:         float = 80.0       # RSI 상한(과열 차단) — 2026-04-03 확장: 70→80% (강한 주도주 포착)
+    jdm_rsi_high:         float = 70.0       # RSI 상한(과열 차단) — 과매수 구간 진입 금지
     jdm_rsi_entry_min:    float = 60.0       # JDM 진입 RSI 하한 — 횡보·무기력 구간 배제
     jdm_min_ma_spread_abs: int = 30          # [deprecated] MA 이격(원) — 레거시 호환성 유지
-    jdm_ma_spread_pct:    float = 0.3        # MA 이격 비율(%) — 2026-04-03 추가: 종목단가 독립적 (삼성전자/휴스틸 차이 제거)
+    jdm_ma_spread_pct:    float = 0.3        # MA 이격 비율(%) 하한 — 골든크로스 직후 확인
+    jdm_ma_spread_max_pct: float = 2.5      # MA 이격 비율(%) 상한 — 초과 시 이미 과열 (고점 방지)
     jdm_take_profit_pct:  float = 3.0        # 익절 목표 (최적화됨: 4.0%→3.0%)
-    jdm_stop_loss_pct:    float = -1.0       # 손절 기준 (최적화됨: -1.5%→-1.0%)
+    jdm_stop_loss_pct:    float = -1.2       # 손절 기준 — config RISK.stop_loss_pct 와 동기화 (2026-04-07)
     # [NEW] 2026-04-03 수급 절대치 필터 — 소외주 거르기 (2026-04-04 강화: 대장주 집중)
     min_trade_amount:     int = 100_000_000_000  # 최소 거래대금 (원) — 1,000억 이상 (2026-04-04 강화: 500억→1,000억, 거래대금 소형주 배제)
     min_daily_rank:       int = 30           # 거래대금 상위 몇 위 이내 (2026-04-04 강화: 50→30) (None이면 비활성)
@@ -169,13 +174,14 @@ class SmartScannerConfig:
     # ScannerWorker: 동일 종목 재 emit 최소 간격(초). 에지 트리거와 병행 (config RISK.signal_cooldown_sec)
     signal_cooldown_sec:  float = 45.0
     # [NEW] 4중 필터 — JDM 신호 품질 강화
-    entry_start_time:     dtime = dtime(9, 0, 0)    # 진입 허용 시작
+    entry_start_time:     dtime = dtime(9, 5, 0)    # 진입 허용 시작 (09:05 — 장 초반 5분 관망)
     entry_end_time:       dtime = dtime(14, 30, 0)  # 진입 허용 종료 (확대: 오후 거래 허용)
     min_chejan_strength:  float = 120.0             # 체결강도 하한 (%) — 2026-04-03 강화: 110→120% (매수세 우위 확실)
     volume_surge_mult:    float = 1.5               # 분봉 거래량 배수 (직전 5분 평균 대비)
     max_disparity_pct:    float = 5.0               # MA20 이격도 상한 (%)
     # [NEW] OR 전략 + 공격형 필터
     prev_close_min_ratio: float = 0.98              # 조건A: V자반등 최소 비율 (시가 대비 -2% 이내)
+    entry_open_surge_max: float = 3.5              # 2026-04-08: 2.0% → 3.5% (breakout_ratio 완화에 맞춰 상향)
     vi_approach_chg_pct:  float = 7.0               # 조건B: VI 직전 등락률 기준 (%)
     volume_1min_surge_mult: float = 1.5             # 최근 1분 거래량 급증 배수 (직전 10분 평균 대비) — 2026-04-03 재강화: 1.1→1.5배(150%)
     volume_surge_lookback: int = 10                 # 직전 N분 평균 계산 구간
@@ -184,6 +190,47 @@ class SmartScannerConfig:
     pivot_r2_enabled:     bool = True               # 피봇 R2 돌파 조건 활성화
     daily_alignment_enabled: bool = True            # 일봉 정배열 조건 활성화
     daily_candle_refresh_min: int = 5               # 일봉 데이터 갱신 주기(분)
+    # [NEW] 지수 등락률 기반 진입 차단 (2026-04-07)
+    # index_block_pct: 코스피/코스닥 중 하나라도 이 값 이하면 신규 진입 신호 차단
+    #   (market_crash_pct -2.0%보다 여유있는 1단계 차단 — config RISK.market_index_block_pct)
+    index_block_pct:   float = -1.5   # 신규 진입 완전 차단 기준 (%)
+    # [NEW] 공포 장세 구간 (-1% ~ -1.5%): 완전 차단이 아닌 체결강도 기준 상향 (2026-04-08)
+    market_fear_pct:       float = -1.0    # 이 값 이하 하락 시 공포 장세로 판단
+    market_fear_chejan:    float = 140.0   # 공포 장세 시 체결강도 하한 (기존 슬롯값 대신 적용)
+    # 아래 두 값은 MainWindow._check_market_crash()가 주기적으로 갱신하는 상태값
+    kospi_chg_pct:     float = 0.0    # 최신 코스피 등락률 (%) — 장 시작 전 0.0
+    kosdaq_chg_pct:    float = 0.0    # 최신 코스닥 등락률 (%) — 장 시작 전 0.0
+    # [NEW] JDM_ENTRY v2.3 — 슬리피지·EMA 이격도 과열 방지 (2026-04-08)
+    slippage_block_pct:      float = 3.0   # 직전 1분봉 종가 대비 현재 1분봉 상승 차단 상한 (%)
+    ema_disp_short:          int   = 10    # EMA 이격도 계산 단기 기간
+    ema_disp_long:           int   = 20    # EMA 이격도 계산 장기 기간
+    ema_disp_max_pct:        float = 3.0   # EMA10/EMA20 이격 상한 (%) — 초과 시 추격매수 차단
+    price_ema_disp_max_pct:  float = 3.0   # 현재가/EMA10 이격 상한 (%) — 초과 시 추격매수 차단
+    # [NEW] 시간대별 매수 조건 차등화 (2026-04-08)
+    # 구간 경계: OPENING(09:05~09:30) / MORNING(09:30~11:00) / MIDDAY(11:00~13:00) / AFTERNOON(13:00~14:30)
+    # entry_start_time(09:05), ma_alignment_time(09:30), entry_end_time(14:30) 은 기존 파라미터 재활용
+    slot_morning_end:   dtime = dtime(11, 0, 0)   # MORNING 종료 / MIDDAY 시작
+    slot_midday_end:    dtime = dtime(13, 0, 0)   # MIDDAY 종료 / AFTERNOON 시작
+    # 구간별 등락률 상한 (%) — ScannerWorker prefilter + 개별 루프에 동시 적용
+    max_change_pct_opening:   float = 20.0   # 09:05~09:30 장초반
+    max_change_pct_morning:   float = 15.0   # 09:30~11:00 핵심 오전
+    max_change_pct_midday:    float = 12.0   # 11:00~13:00 점심
+    max_change_pct_afternoon: float = 8.0    # 13:00~14:30 오후 고점 차단
+    # 구간별 체결강도 하한 (%)
+    min_chejan_strength_opening:   float = 110.0
+    min_chejan_strength_morning:   float = 120.0
+    min_chejan_strength_midday:    float = 130.0
+    min_chejan_strength_afternoon: float = 140.0
+    # 구간별 거래량 급증 배수 (직전 N분 평균 대비)
+    volume_surge_mult_opening:   float = 1.2
+    volume_surge_mult_morning:   float = 1.5
+    volume_surge_mult_midday:    float = 2.0
+    volume_surge_mult_afternoon: float = 2.5
+    # 구간별 RSI 진입 하한
+    jdm_rsi_entry_min_opening:   float = 55.0
+    jdm_rsi_entry_min_morning:   float = 60.0
+    jdm_rsi_entry_min_midday:    float = 63.0
+    jdm_rsi_entry_min_afternoon: float = 65.0
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +347,9 @@ class StockSnapshot:
     prev_close:    int   = 0
     change_pct:    float = 0.0
     closes_1min:   list  = field(default_factory=list)
+    opens_1min:    list  = field(default_factory=list)    # 1분봉 시가
+    highs_1min:    list  = field(default_factory=list)    # 1분봉 고가
+    lows_1min:     list  = field(default_factory=list)    # 1분봉 저가
     chejan_strength: float = 100.0          # [NEW] 체결강도 (FID 20)
     volumes_1min:   list  = field(default_factory=list)   # [NEW] 1분봉 거래량
     daily_closes:  list  = field(default_factory=list)   # [NEW] 일봉 종가 최신순 (최대 25개)
@@ -310,12 +360,13 @@ class StockSnapshot:
 
 @dataclass
 class ScanSignal:
-    code:         str
-    name:         str
-    signal_type:  str        # "BREAKOUT" | "JDM_ENTRY"
-    price:        int
-    reason:       str
-    generated_at: datetime = field(default_factory=datetime.now)
+    code:             str
+    name:             str
+    signal_type:      str        # "BREAKOUT" | "JDM_ENTRY"
+    price:            int
+    reason:           str
+    entry_candle_low: int = 0    # 진입 캔들 저가 → 손절가 기준
+    generated_at:     datetime = field(default_factory=datetime.now)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +424,13 @@ class SnapshotStore:
         # [NEW] 분봉 거래량 추적
         self._min_vols:  dict[str, list[int]]   = {}   # code → 1분봉 별 거래량 델타
         self._last_vol:  dict[str, int]         = {}   # code → 직전 분 경계 누적거래량
+        # [NEW] 1분봉 OHLC 추적 (캔들 패턴 판단용)
+        self._min_opens: dict[str, list[float]] = {}   # code → 1분봉 시가
+        self._min_highs: dict[str, list[float]] = {}   # code → 1분봉 고가
+        self._min_lows:  dict[str, list[float]] = {}   # code → 1분봉 저가
+        self._cur_open:  dict[str, float]       = {}   # code → 현재 분 시가 (첫 틱)
+        self._cur_high:  dict[str, float]       = {}   # code → 현재 분 고가 (진행중)
+        self._cur_low:   dict[str, float]       = {}   # code → 현재 분 저가 (진행중)
         # [NEW] 체결강도 추적
         self._chejan_str: dict[str, float]      = {}   # code → 체결강도 (FID 20)
         # [NEW] 일봉 캐시 추적 (2026-04-03)
@@ -444,7 +502,9 @@ class SnapshotStore:
             if not self._df.empty and "name" in self._df.columns:
                 keep = self._df["name"].astype(str).map(is_pure_equity_name)
                 for c in self._df.index[~keep].tolist():
-                    self._mins.pop(c, None)
+                    for d in (self._mins, self._min_opens, self._min_highs, self._min_lows,
+                              self._min_vols, self._cur_open, self._cur_high, self._cur_low):
+                        d.pop(c, None)
                 self._df = self._df[keep]
             for code in new_df.index:
                 if code not in self._mins:
@@ -494,21 +554,39 @@ class SnapshotStore:
             # 1분봉 누적 — 분(minute)이 바뀔 때만 append (초당 수십 번 실행 최소화)
             cur_min = (datetime.now().hour * 60 +  # noqa: DTZ005
                        datetime.now().minute)
+            cp = float(current_price)
             if self._last_min.get(code, -1) != cur_min:
+                # 직전 분 완성 캔들 커밋 (처음 진입 시에는 커밋할 이전 분이 없음)
+                if code in self._cur_open:
+                    def _append120(lst, val):
+                        lst.append(val)
+                        if len(lst) > 120:
+                            lst.pop(0)
+                    _append120(self._mins.setdefault(code, []),       cp)
+                    _append120(self._min_opens.setdefault(code, []),  self._cur_open[code])
+                    _append120(self._min_highs.setdefault(code, []),  self._cur_high[code])
+                    _append120(self._min_lows.setdefault(code,  []),  self._cur_low[code])
+                    # 분봉 거래량 델타
+                    prev_cumvol = self._last_vol.get(code, volume)
+                    delta = max(0, volume - prev_cumvol)
+                    _append120(self._min_vols.setdefault(code, []), delta)
+                    self._last_vol[code] = volume
+                # 새 분 시작
                 self._last_min[code] = cur_min
-                # [기존] 1분봉 종가 기록
-                mins = self._mins.setdefault(code, [])
-                mins.append(float(current_price))
-                if len(mins) > 120:
-                    mins.pop(0)
-                # [NEW] 1분봉 거래량 델타 기록 (직전 분의 누적거래량 증가량)
-                prev_cumvol = self._last_vol.get(code, volume)
-                delta       = max(0, volume - prev_cumvol)
-                vols        = self._min_vols.setdefault(code, [])
-                vols.append(delta)
-                if len(vols) > 120:
-                    vols.pop(0)
-                self._last_vol[code] = volume  # 새 분 시작 기준선 갱신
+                self._cur_open[code] = cp
+                self._cur_high[code] = cp
+                self._cur_low[code]  = cp
+            else:
+                # 같은 분 — 고가·저가 갱신
+                if code in self._cur_open:
+                    if cp > self._cur_high[code]:
+                        self._cur_high[code] = cp
+                    if cp < self._cur_low[code]:
+                        self._cur_low[code] = cp
+                else:
+                    self._cur_open[code] = cp
+                    self._cur_high[code] = cp
+                    self._cur_low[code]  = cp
 
     # ── 조회 ──────────────────────────────────────────────────────────────
 
@@ -571,6 +649,9 @@ class SnapshotStore:
                 prev_close    = safe_int_cell("prev_close",    0),
                 change_pct    = safe_float_cell("change_pct",  0.0),
                 closes_1min   = list(self._mins.get(code, [])),
+                opens_1min    = list(self._min_opens.get(code, [])),
+                highs_1min    = list(self._min_highs.get(code, [])),
+                lows_1min     = list(self._min_lows.get(code,  [])),
                 chejan_strength = self._chejan_str.get(code, 100.0),  # [NEW]
                 volumes_1min    = list(self._min_vols.get(code, [])),  # [NEW]
                 daily_closes  = daily_closes,  # [NEW] 일봉 종가 리스트 (최신순)
@@ -619,6 +700,19 @@ class SnapshotStore:
         """opt10080 등으로 가져온 분봉 종가 리스트를 초기값으로 설정한다."""
         with self._lock:
             self._mins[code] = [float(c) for c in closes if c]
+
+    def set_min_candles_ohlc(self, code: str, candles: list[dict]) -> None:
+        """분봉 OHLCV 전체를 초기값으로 설정한다 (캔들 패턴 판단용).
+
+        Args:
+            candles: [{"open": int, "high": int, "low": int, "close": int}, ...]
+                     오래된 것 → 최신 순 (시간순 오름차순)
+        """
+        with self._lock:
+            self._mins[code]       = [float(c["close"]) for c in candles if c.get("close")]
+            self._min_opens[code]  = [float(c["open"])  for c in candles if c.get("open")]
+            self._min_highs[code]  = [float(c["high"])  for c in candles if c.get("high")]
+            self._min_lows[code]   = [float(c["low"])   for c in candles if c.get("low")]
 
     def set_daily_candles(self, code: str, candles: list[dict]) -> None:
         """
@@ -904,9 +998,11 @@ class PriorityWatchQueue:
 # ---------------------------------------------------------------------------
 
 def check_breakout(
-    snap:           StockSnapshot,
-    breakout_ratio: float = 0.03,  # 2026-04-03 재강화: 1% → 3% (가짜 돌파 방지, 의미 있는 움직임만)
-    volume_mult:    float = 1.0,   # 2026-04-03: 1.5 → 1.0 (거래량 완화 — 모의투자 환경)
+    snap:                    StockSnapshot,
+    breakout_ratio:          float = 0.03,  # 2026-04-03 재강화: 1% → 3% (가짜 돌파 방지)
+    volume_mult:             float = 1.0,   # 2026-04-03: 1.5 → 1.0 (거래량 완화)
+    pullback_from_high_pct:  float = 1.5,   # 당일 고점 대비 N% 이상 하락 시 차단 (0=비활성)
+    min_rising_bars:         int   = 2,     # 최근 N개 1분봉 연속 상승 요구 (0=비활성)
 ) -> Optional[str]:
     if snap.prev_close <= 0 or snap.current_price <= 0:
         ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT", "prev_close=0")
@@ -928,21 +1024,49 @@ def check_breakout(
 
     avg_vol = snap.trade_amount / snap.current_price if snap.current_price else 0
     # 거래대금이 충분하면 거래량 체크, 부족하면 통과 (선택적 필터)
-    if snap.trade_amount <= 0 or (avg_vol > 0 and snap.volume >= avg_vol * volume_mult):
-        # ✅ 통과: 거래대금 없음 OR 거래량 충분함
-        reason = (
-            f"전일종가 {snap.prev_close:,} 대비 {breakout_ratio*100:.0f}% 돌파 "
-            f"| 현재가 {snap.current_price:,}"
-        )
-        ScannerLogger.passed(snap.code, snap.name, "BREAKOUT", reason)
-        return reason
-    else:
-        # ❌ 탈락: 거래대금 있음 + 거래량 부족
+    if snap.trade_amount > 0 and (avg_vol <= 0 or snap.volume < avg_vol * volume_mult):
         ScannerLogger.rejected(
             snap.code, snap.name, "BREAKOUT",
             f"거래량 부족 ({snap.volume:,} < 기준 {avg_vol * volume_mult:,.0f})",
         )
         return None
+
+    # ── ① 당일 고점 대비 하락폭 차단 ─────────────────────────────────────
+    # 현재가가 당일 고점에서 pullback_from_high_pct% 이상 내려와 있으면 하락 추세로 판단
+    if pullback_from_high_pct > 0 and snap.high_price > 0:
+        pullback = (snap.current_price - snap.high_price) / snap.high_price * 100
+        if pullback <= -pullback_from_high_pct:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "BREAKOUT",
+                f"고점({snap.high_price:,}) 대비 {pullback:.2f}% 하락 중 "
+                f"(차단기준 -{pullback_from_high_pct:.1f}%) — 하락추세",
+            )
+            return None
+
+    # ── ② 1분봉 연속 상승 확인 ───────────────────────────────────────────
+    # 최근 min_rising_bars개 봉이 모두 직전 봉 대비 상승이어야 통과
+    closes = snap.closes_1min
+    if min_rising_bars > 0 and len(closes) >= min_rising_bars + 1:
+        rising = all(
+            closes[-(i + 1)] > closes[-(i + 2)]
+            for i in range(min_rising_bars)
+        )
+        if not rising:
+            recent = [int(closes[-(i + 1)]) for i in range(min(min_rising_bars + 1, len(closes)))]
+            recent_str = " → ".join(f"{p:,}" for p in reversed(recent))
+            ScannerLogger.rejected(
+                snap.code, snap.name, "BREAKOUT",
+                f"1분봉 연속상승 {min_rising_bars}개 미충족 ({recent_str}) — 하락/횡보",
+            )
+            return None
+
+    # ✅ 모든 조건 통과
+    reason = (
+        f"전일종가 {snap.prev_close:,} 대비 {breakout_ratio*100:.0f}% 돌파 "
+        f"| 현재가 {snap.current_price:,}"
+    )
+    ScannerLogger.passed(snap.code, snap.name, "BREAKOUT", reason)
+    return reason
 
 
 def check_testa_alignment(
@@ -1143,6 +1267,175 @@ def check_disparity_from_ma(
     return f"MA{ma_period}이격{disp:.1f}%"
 
 
+def check_ema20_filter(snap: StockSnapshot, period: int = 20) -> Optional[str]:
+    """
+    EMA20 추세 필터 — 현재가가 20분 EMA 위에 있어야 진입 허용.
+
+    완성된 1분봉 closes_1min 기준으로 EMA20 계산.
+    현재가 > EMA20 이면 상승 추세로 판단, 통과.
+    """
+    closes = snap.closes_1min
+    if len(closes) < period:
+        ScannerLogger.rejected(snap.code, snap.name, "EMA20",
+                               f"데이터 부족 ({len(closes)}/{period})")
+        return None
+    from strategy.jang_dong_min import calc_ema
+    ema20 = calc_ema(closes, period)
+    if ema20 is None:
+        return None
+    if snap.current_price <= ema20:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "EMA20",
+            f"현재가 {snap.current_price:,} ≤ EMA20 {ema20:,.0f} — 하락 추세",
+        )
+        return None
+    return f"EMA20상단(현재가={snap.current_price:,}/EMA20={ema20:,.0f})"
+
+
+def check_bullish_engulfing(snap: StockSnapshot) -> Optional[str]:
+    """
+    상승 장악형(Bullish Engulfing) 완성 여부 확인.
+
+    완성된 마지막 두 1분봉 기준:
+      ① 직전 봉이 음봉 (open > close)
+      ② 현재 봉 시가 ≤ 직전 봉 종가 (갭다운 or 동가 출발)
+      ③ 현재 봉 종가 > 직전 봉 시가 (완전 장악)
+
+    Returns:
+        패턴 설명 문자열 or None
+    """
+    c = snap.closes_1min
+    o = snap.opens_1min
+    if len(c) < 2 or len(o) < 2:
+        return None
+    prev_o, prev_c = o[-2], c[-2]
+    curr_o, curr_c = o[-1], c[-1]
+    if prev_c >= prev_o:          # 직전 봉이 양봉이면 패턴 불성립
+        return None
+    if curr_o <= prev_c and curr_c > prev_o:
+        return f"상승장악형(직전음봉:{prev_o:.0f}→{prev_c:.0f} / 현재:{curr_o:.0f}→{curr_c:.0f})"
+    return None
+
+
+def check_bullish_pin_bar(snap: StockSnapshot, min_tail_ratio: float = 0.55) -> Optional[str]:
+    """
+    강세 핀바(Bullish Pin Bar) 완성 여부 확인.
+
+    완성된 마지막 1분봉 기준:
+      ① 하단 꼬리 길이 ≥ 전체 범위의 min_tail_ratio (기본 55%)
+      ② 종가 ≥ 봉 중간값 ((고가 + 저가) / 2) — 회복 확인
+
+    Returns:
+        패턴 설명 문자열 or None
+    """
+    c = snap.closes_1min
+    h = snap.highs_1min
+    l = snap.lows_1min
+    o = snap.opens_1min
+    if len(c) < 1 or len(h) < 1 or len(l) < 1 or len(o) < 1:
+        return None
+    curr_c, curr_h, curr_l, curr_o = c[-1], h[-1], l[-1], o[-1]
+    total_range = curr_h - curr_l
+    if total_range <= 0:
+        return None
+    body_low    = min(curr_o, curr_c)
+    lower_tail  = body_low - curr_l
+    mid_price   = (curr_h + curr_l) / 2
+    tail_ratio  = lower_tail / total_range
+    if tail_ratio >= min_tail_ratio and curr_c >= mid_price:
+        return f"강세핀바(하꼬리{tail_ratio*100:.0f}%,저가:{curr_l:.0f})"
+    return None
+
+
+def check_breakout_gate(snap: "StockSnapshot", cfg: SmartScannerConfig) -> Optional[str]:
+    """
+    BREAKOUT 확인 후 진입 가능 여부를 검증하는 공통 게이트.
+
+    check_jdm_entry 와 동일한 시장 안전 필터를 BREAKOUT 경로에도 적용한다.
+      ① 지수 등락률 차단 (index_block_pct)
+      ② 진입 허용 시각
+      ③ 시간대 슬롯 기반 등락률 상한 (max_change_pct_*)
+      ④ 시간대 슬롯 기반 체결강도 하한 (공포 장세 상향 포함)
+      ⑤ 손절 블랙리스트는 handle_signal() 에서 처리하므로 여기선 생략
+
+    Returns:
+        None   → 진입 거부 (ScannerLogger 에 이유 기록됨)
+        reason → 거부 없음 (추가 필터 통과 이유 문자열)
+    """
+    # ① 지수 등락률 완전 차단
+    _block_pct  = getattr(cfg, "index_block_pct", -1.5)
+    _kospi_chg  = getattr(cfg, "kospi_chg_pct",   0.0)
+    _kosdaq_chg = getattr(cfg, "kosdaq_chg_pct",  0.0)
+    if _kospi_chg <= _block_pct:
+        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_INDEX",
+            f"코스피 하락 차단 — {_kospi_chg:+.2f}% ≤ {_block_pct:.1f}%")
+        return None
+    if _kosdaq_chg <= _block_pct:
+        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_INDEX",
+            f"코스닥 하락 차단 — {_kosdaq_chg:+.2f}% ≤ {_block_pct:.1f}%")
+        return None
+
+    # ② 진입 허용 시각
+    now = datetime.now().time()
+    if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
+        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_TIME",
+            f"진입 허용 시간 아님 ({cfg.entry_start_time}~{cfg.entry_end_time})")
+        return None
+
+    # ③ 시간대 슬롯 기반 등락률 상한
+    _slot       = _resolve_time_slot(now, cfg)
+    _eff_ch_max = _get_slot_value(_slot, cfg, "max_change_pct", cfg.max_change_pct)
+    _snap_chg   = float(getattr(snap, "change_pct", 0) or 0)
+    if _snap_chg >= _eff_ch_max:
+        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_CHGPCT",
+            f"[{_slot}] 등락률 {_snap_chg:.2f}% ≥ 구간 상한 {_eff_ch_max:.0f}%")
+        return None
+
+    # ④ 시간대 슬롯 기반 체결강도 (공포 장세 상향 포함)
+    _eff_chejan = _get_slot_value(_slot, cfg, "min_chejan_strength", cfg.min_chejan_strength)
+    _fear_pct    = getattr(cfg, "market_fear_pct",    -1.0)
+    _fear_chejan = getattr(cfg, "market_fear_chejan", 140.0)
+    if (_kospi_chg <= _fear_pct or _kosdaq_chg <= _fear_pct) and _eff_chejan < _fear_chejan:
+        logger.debug("[BREAKOUT_GATE] %s(%s) 공포 장세 → 체결강도 기준 %.0f%% → %.0f%%",
+                     snap.name, snap.code, _eff_chejan, _fear_chejan)
+        _eff_chejan = _fear_chejan
+    if snap.chejan_strength < _eff_chejan:
+        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_CHEJAN",
+            f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%")
+        return None
+
+    return f"[{_slot}] 체결강도 {snap.chejan_strength:.0f}% | 등락률 {_snap_chg:.1f}%"
+
+
+def _resolve_time_slot(now: "dtime", cfg: SmartScannerConfig) -> str:
+    """
+    현재 시각을 기준으로 매매 시간 슬롯 문자열을 반환한다.
+
+    Returns:
+        "OPENING"   — 09:05 ~ 09:30 (장 초반, MA정배열 미확인 구간)
+        "MORNING"   — 09:30 ~ 11:00 (핵심 오전, 표준 기준)
+        "MIDDAY"    — 11:00 ~ 13:00 (점심, 중간 강화)
+        "AFTERNOON" — 13:00 ~ 14:30 (오후, 고점 차단)
+    """
+    if now < cfg.ma_alignment_time:
+        return "OPENING"
+    if now < cfg.slot_morning_end:
+        return "MORNING"
+    if now < cfg.slot_midday_end:
+        return "MIDDAY"
+    return "AFTERNOON"
+
+
+def _get_slot_value(slot: str, cfg: SmartScannerConfig, param_base: str, fallback: float) -> float:
+    """
+    슬롯과 파라미터 기본명으로 구간별 값을 반환한다.
+
+    예) param_base="max_change_pct", slot="AFTERNOON"
+        → cfg.max_change_pct_afternoon (없으면 fallback)
+    """
+    return float(getattr(cfg, f"{param_base}_{slot.lower()}", fallback))
+
+
 def check_jdm_entry(
     snap: StockSnapshot,
     cfg:  SmartScannerConfig,
@@ -1150,12 +1443,30 @@ def check_jdm_entry(
     """
     JDM_ENTRY 통합 게이트 (ScannerWorker / SmartScanner._evaluate 공통).
 
-    ① 진입 허용 시각(entry_start~entry_end) — 오후 저유동 구간 등 배제
-    ② 직전 5분 평균 대비 분봉 거래량 volume_surge_mult 배 이상
-    ③ 체결강도 min_chejan_strength% 이상
-    ④ MA 골든크로스 + 단·장기 이격 jdm_min_ma_spread_abs 원 이상
-    ⑤ RSI ∈ [jdm_rsi_entry_min, jdm_rsi_high)
+    ① 지수 등락률 차단 — 코스피/코스닥 중 하나라도 index_block_pct 이하면 즉시 차단
+    ② 진입 허용 시각(entry_start~entry_end) — 오후 저유동 구간 등 배제
+    ③ 직전 5분 평균 대비 분봉 거래량 volume_surge_mult 배 이상
+    ④ 체결강도 min_chejan_strength% 이상
+    ⑤ MA 골든크로스 + 단·장기 이격 jdm_min_ma_spread_abs 원 이상
+    ⑥ RSI ∈ [jdm_rsi_entry_min, jdm_rsi_high)
     """
+    # [NEW] 2026-04-07 지수 등락률 차단 — 시장 전체 하락 시 신규 진입 금지
+    _block_pct   = getattr(cfg, "index_block_pct",  -1.5)
+    _kospi_chg   = getattr(cfg, "kospi_chg_pct",     0.0)
+    _kosdaq_chg  = getattr(cfg, "kosdaq_chg_pct",    0.0)
+    if _kospi_chg <= _block_pct:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM_INDEX",
+            f"코스피 하락 차단 — {_kospi_chg:+.2f}% ≤ {_block_pct:.1f}%",
+        )
+        return None
+    if _kosdaq_chg <= _block_pct:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM_INDEX",
+            f"코스닥 하락 차단 — {_kosdaq_chg:+.2f}% ≤ {_block_pct:.1f}%",
+        )
+        return None
+
     # [NEW] 2026-04-03 수급 절대치 필터 — 소외주 거르기
     # 조건 A: 거래대금 상위 50위 이내 (rank 우선)
     # 조건 B: OR 누적 거래대금 300억 이상
@@ -1175,11 +1486,56 @@ def check_jdm_entry(
             )
             return None
 
+    # [고점 방지] 현재가가 시가 대비 entry_open_surge_max% 이상 이미 올랐으면 진입 차단
+    if snap.open_price > 0:
+        surge_from_open = (snap.current_price - snap.open_price) / snap.open_price * 100
+        if surge_from_open >= cfg.entry_open_surge_max:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "JDM_SURGE",
+                f"시가 대비 이미 {surge_from_open:.2f}% 상승 — 고점 진입 차단 (상한 {cfg.entry_open_surge_max:.1f}%)",
+            )
+            return None
+
     now = datetime.now().time()
     if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
         ScannerLogger.rejected(
             snap.code, snap.name, "JDM_TIME",
             f"진입 허용 시간 아님 ({cfg.entry_start_time}~{cfg.entry_end_time})",
+        )
+        return None
+
+    # [NEW] 시간대 슬롯 resolve — 구간별 기준값 동적 선택 (2026-04-08)
+    _slot         = _resolve_time_slot(now, cfg)
+    _eff_ch_max   = _get_slot_value(_slot, cfg, "max_change_pct",       cfg.max_change_pct)
+    _eff_chejan   = _get_slot_value(_slot, cfg, "min_chejan_strength",   cfg.min_chejan_strength)
+    _eff_vol_mult = _get_slot_value(_slot, cfg, "volume_surge_mult",     cfg.volume_1min_surge_mult)
+    _eff_rsi_min  = _get_slot_value(_slot, cfg, "jdm_rsi_entry_min",     cfg.jdm_rsi_entry_min)
+
+    # ── Safety Filter ① 공포 장세 체결강도 상향 ────────────────────────────
+    # 지수가 market_fear_pct(기본 -1%) 이하로 하락 중이면 체결강도 기준을 강화.
+    # index_block_pct(-1.5%)까지는 차단하지 않고 조건만 더 까다롭게 적용.
+    _fear_pct    = getattr(cfg, "market_fear_pct",    -1.0)
+    _fear_chejan = getattr(cfg, "market_fear_chejan", 140.0)
+    _is_fear = (_kospi_chg <= _fear_pct) or (_kosdaq_chg <= _fear_pct)
+    if _is_fear and _eff_chejan < _fear_chejan:
+        _prev_chejan = _eff_chejan
+        _eff_chejan  = _fear_chejan
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM_FEAR",
+            f"공포 장세 감지 (코스피 {_kospi_chg:+.2f}% / 코스닥 {_kosdaq_chg:+.2f}%) "
+            f"→ 체결강도 기준 {_prev_chejan:.0f}% → {_eff_chejan:.0f}% 상향 (아직 통과 여부 미확정)",
+        ) if False else None  # 상향만 하고 차단은 하지 않음 — 이후 체결강도 체크에서 판정
+        logger.debug(
+            "[Safety] %s(%s) 공포 장세 — 체결강도 기준 %.0f%% → %.0f%%",
+            snap.name, snap.code, _prev_chejan, _eff_chejan,
+        )
+
+    # 구간별 등락률 상한 체크 (prefilter 이후 2차 보호)
+    _snap_chg = float(getattr(snap, "change_pct", 0) or 0)
+    if _snap_chg >= _eff_ch_max:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM_CHGPCT",
+            f"[{_slot}] 등락률 {_snap_chg:.2f}% ≥ 구간 상한 {_eff_ch_max:.0f}%",
         )
         return None
 
@@ -1193,23 +1549,32 @@ def check_jdm_entry(
         )
         return None
 
-    # [강화] 거래량 급증: 직전 N분 평균 대비 배수 이상
-    r_vol = check_volume_surge(snap, cfg.volume_1min_surge_mult, cfg.volume_surge_lookback)
+    # [NEW] 슬리피지 방지 — 직전 1분봉 종가 대비 현재 1분봉 3% 이상 급등 시 진입 유보
+    if len(closes) >= 2 and closes[-2] > 0:
+        slip_pct = (closes[-1] - closes[-2]) / closes[-2] * 100
+        _slip_max = getattr(cfg, "slippage_block_pct", 3.0)
+        if slip_pct >= _slip_max:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "JDM_SLIP",
+                f"슬리피지 차단 — 직전 1분봉 대비 {slip_pct:.2f}% 급등 (상한 {_slip_max:.1f}%)",
+            )
+            return None
+
+    # [강화] 거래량 급증: 직전 N분 평균 대비 배수 이상 (슬롯별 배수 적용)
+    r_vol = check_volume_surge(snap, _eff_vol_mult, cfg.volume_surge_lookback)
     if r_vol is None:
-        # 상세 로그: 현재 거래량과 임계값 비교
         if snap.volumes_1min and len(snap.volumes_1min) >= cfg.volume_surge_lookback + 1:
             avg = sum(snap.volumes_1min[-(cfg.volume_surge_lookback+1):-1]) / cfg.volume_surge_lookback
             cur = snap.volumes_1min[-1]
-            logger.debug(f"[신호필터] {snap.name}({snap.code}) 거래량 미달 — 현재 {cur:,}주 / {cfg.volume_surge_lookback}분평균 {avg:,.0f}주 ({cur/max(avg,1):.2f}배 < {cfg.volume_1min_surge_mult}배)")
+            logger.debug(f"[신호필터] {snap.name}({snap.code}) [{_slot}] 거래량 미달 — 현재 {cur:,}주 / {cfg.volume_surge_lookback}분평균 {avg:,.0f}주 ({cur/max(avg,1):.2f}배 < {_eff_vol_mult}배)")
         return None
 
-    r_chej = check_chejan_strength(snap, cfg.min_chejan_strength)
+    r_chej = check_chejan_strength(snap, _eff_chejan)
     if r_chej is None:
-        # 상세 로그: 현재 체결강도 표시
-        logger.debug(f"[신호필터] {snap.name}({snap.code}) 체결강도 미달 — 현재 {snap.chejan_strength:.0f}% < {cfg.min_chejan_strength:.0f}%")
+        logger.debug(f"[신호필터] {snap.name}({snap.code}) [{_slot}] 체결강도 미달 — 현재 {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%")
         return None
 
-    from strategy.jang_dong_min import calc_ma, calc_rsi, calc_pivot_r2, check_daily_alignment
+    from strategy.jang_dong_min import calc_ma, calc_rsi, calc_ema, calc_pivot_r2, check_daily_alignment
     ma_s  = calc_ma(closes,      cfg.jdm_ma_short)
     ma_l  = calc_ma(closes,      cfg.jdm_ma_long)
     rsi   = calc_rsi(closes,     14)
@@ -1242,21 +1607,64 @@ def check_jdm_entry(
             f"MA 이격 부족 (단기−장기={spread_abs:.0f}원={spread_pct:.2f}% < 최소 {cfg.jdm_ma_spread_pct:.1f}%)",
         )
         return None
-
-    rsi_ok = cfg.jdm_rsi_entry_min <= rsi < cfg.jdm_rsi_high
-    if not rsi_ok:
+    if spread_pct > float(cfg.jdm_ma_spread_max_pct):
         ScannerLogger.rejected(
             snap.code, snap.name, "JDM",
-            f"RSI 범위 초과 — 현재 {rsi:.1f}% (진입허용 {cfg.jdm_rsi_entry_min:.0f}~{cfg.jdm_rsi_high:.0f}%)",
+            f"MA 이격 과열 ({spread_pct:.2f}% > 상한 {cfg.jdm_ma_spread_max_pct:.1f}%) — 골든크로스 이후 너무 많이 올라 고점 위험",
         )
         return None
 
-    # [NEW] 체결강도 최종 재확인 (2026-04-03)
-    # 체크 직후에 시간이 경과했을 수 있으니 다시 한번 확인
-    if snap.chejan_strength < cfg.min_chejan_strength:
+    # ── Safety Filter ② EMA10/EMA20 이격 과열 (기존) + 현재가/EMA10 이격 과열 (신규) ──
+    _ema_s_period      = getattr(cfg, "ema_disp_short",         10)
+    _ema_l_period      = getattr(cfg, "ema_disp_long",          20)
+    _ema_disp_max      = getattr(cfg, "ema_disp_max_pct",       3.0)
+    _price_ema_disp_max = getattr(cfg, "price_ema_disp_max_pct", 3.0)
+    if len(closes) >= _ema_l_period:
+        ema_s = calc_ema(closes, _ema_s_period)
+        ema_l = calc_ema(closes, _ema_l_period)
+        if ema_s is not None and ema_l is not None and ema_l > 0:
+            # ② -A: EMA10/EMA20 이격 (추격매수 방지)
+            ema_disp_pct = (ema_s - ema_l) / ema_l * 100
+            if ema_disp_pct >= _ema_disp_max:
+                ScannerLogger.rejected(
+                    snap.code, snap.name, "JDM_EMA",
+                    f"EMA10/EMA20 이격 과열 — {ema_disp_pct:.2f}% ≥ {_ema_disp_max:.1f}%",
+                )
+                return None
+            # ② -B: 현재가/EMA10 이격 (추격매수 방지) — 단기 급등 포착
+            if ema_s > 0:
+                price_ema_disp = (snap.current_price - ema_s) / ema_s * 100
+                if price_ema_disp >= _price_ema_disp_max:
+                    ScannerLogger.rejected(
+                        snap.code, snap.name, "JDM_PRICE_EMA",
+                        f"현재가/EMA{_ema_s_period} 이격 과열 — {price_ema_disp:.2f}% ≥ {_price_ema_disp_max:.1f}% (현재가 {snap.current_price:,} / EMA{_ema_s_period} {ema_s:,.0f})",
+                    )
+                    return None
+
+    rsi_ok = _eff_rsi_min <= rsi < cfg.jdm_rsi_high
+    if not rsi_ok:
         ScannerLogger.rejected(
             snap.code, snap.name, "JDM",
-            f"체결강도 최종 재확인 미충족 — 현재 {snap.chejan_strength:.0f}% < {cfg.min_chejan_strength:.0f}%",
+            f"[{_slot}] RSI 범위 초과 — 현재 {rsi:.1f}% (진입허용 {_eff_rsi_min:.0f}~{cfg.jdm_rsi_high:.0f}%)",
+        )
+        return None
+
+    # [NEW] 캔들 패턴 확인 — 상승장악형 OR 강세핀바 (완성봉 기준)
+    r_engulf = check_bullish_engulfing(snap)
+    r_pinbar = check_bullish_pin_bar(snap)
+    if r_engulf is None and r_pinbar is None:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM_CANDLE",
+            "캔들 패턴 미충족 (상승장악형·강세핀바 모두 불성립)",
+        )
+        return None
+    candle_reason = r_engulf or r_pinbar
+
+    # [NEW] 체결강도 최종 재확인 (슬롯 기반 기준값 적용)
+    if snap.chejan_strength < _eff_chejan:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM",
+            f"[{_slot}] 체결강도 최종 재확인 미충족 — 현재 {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
         )
         return None
 
@@ -1283,7 +1691,7 @@ def check_jdm_entry(
         f"MA골든크로스 MA{cfg.jdm_ma_short}={ma_s:.0f} / "
         f"MA{cfg.jdm_ma_long}={ma_l:.0f} | RSI={rsi:.1f}"
     )
-    reason = f"{r_vol} | {r_chej} | {core}"
+    reason = f"[{_slot}] {r_vol} | {r_chej} | {core} | {candle_reason}"
     ScannerLogger.passed(snap.code, snap.name, "JDM", reason)
     return reason
 
@@ -1345,6 +1753,9 @@ class SmartScanner:
 
         # 동적 감시 중단: 포지션 풀(max_positions)시 유니버스 감시를 보유종목만으로 축소
         self._universe_paused: bool = False
+
+        # 캔들 마감 게이팅: 분이 바뀔 때만 _evaluate() 실행 (틱 기반 고점 진입 방지)
+        self._eval_min: dict[str, int] = {}
         # WATCH 모드 예비 종목 갱신 주기 (스코어링 기반)
         self._last_reserve_refresh: float = 0.0
         self._RESERVE_INTERVAL: float = 10.0   # 10초마다 예비 top-2 재선정
@@ -1520,30 +1931,38 @@ class SmartScanner:
         if self._universe_paused:
             return
 
-        # ② 등락률 상한 (기존)
+        # ① 캔들 마감 게이팅 — 분이 바뀔 때만 평가 (틱 기반 고점 진입 방지)
+        cur_min = datetime.now().minute
+        if self._eval_min.get(snap.code, -1) == cur_min:
+            return
+        self._eval_min[snap.code] = cur_min
+
+        # ② 등락률 상한
         if snap.change_pct >= self.cfg.max_change_pct:
             return
 
-        # ② 시간 필터 — check_jdm_entry에도 동일 적용(이중 차단으로 조기 return)
+        # ② 시간 필터
         now = datetime.now().time()
         if not (self.cfg.entry_start_time <= now <= self.cfg.entry_end_time):
             return
 
-        # ③ 시가 돌파 + 신고가 경신 (OR 3조건: 시가돌파 / V자반등 / VI직전)
-        r_open = check_jdm_open_breakout(snap, self.cfg)
-        if r_open is None:
+        # ③ [신규] EMA20 필터 — 현재가가 20분 EMA 위에 있어야 진입 (추세 상승 확인)
+        r_ema20 = check_ema20_filter(snap)
+        if r_ema20 is None:
             return
 
         # ④ MA20 이격도 — 데이터 부족 시 bypass(None은 조인에서 제외)
         r_disp = check_disparity_from_ma(snap, max_pct=self.cfg.max_disparity_pct)
 
-        # ⑤ JDM: 시간·거래량급증·체결강도·골든크로스·MA이격·RSI≥하한 (통합)
+        # ⑤ JDM: 시간·거래량급증·체결강도·골든크로스·MA이격·RSI≥하한·캔들패턴 (통합)
         r_jdm = check_jdm_entry(snap, self.cfg)
         if r_jdm is None:
             return
 
-        reason = " | ".join(r for r in [r_open, r_disp, r_jdm] if r)
-        self._emit(ScanSignal(snap.code, snap.name, "JDM_ENTRY", snap.current_price, reason))
+        reason = " | ".join(r for r in [r_ema20, r_disp, r_jdm] if r)
+        candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+        self._emit(ScanSignal(snap.code, snap.name, "JDM_ENTRY", snap.current_price, reason,
+                              entry_candle_low=candle_low))
 
     # -----------------------------------------------------------------------
     # 3단계: Final Signal
@@ -2003,10 +2422,10 @@ class SmartScanner:
         code = codes[idx]
         try:
             candles = self._tr_q.call(self._kiwoom.get_min_candles, code, 1, 70)
-            closes = [c["close"] for c in reversed(candles) if c.get("close")]
-            if closes:
-                self.store.set_min_candles(code, closes)
-                logger.debug("[STEP-H async] %s 1분봉 %d개 로딩 완료", code, len(closes))
+            ohlc = [c for c in reversed(candles) if c.get("close")]
+            if ohlc:
+                self.store.set_min_candles_ohlc(code, ohlc)
+                logger.debug("[STEP-H async] %s 1분봉 OHLC %d개 로딩 완료", code, len(ohlc))
             else:
                 logger.debug("[STEP-H async] %s 응답 없음 — 스킵", code)
         except Exception as e:

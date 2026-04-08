@@ -17,7 +17,8 @@ from typing import Optional
 from PyQt5.QtCore import Qt, QObject, QEventLoop, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QCheckBox, QFrame,
+    QPushButton, QCheckBox, QFrame, QListWidget, QListWidgetItem,
+    QAbstractItemView,
 )
 from PyQt5.QtGui import QFont, QPixmap
 
@@ -225,7 +226,14 @@ class LoginManager(QObject):
         # 계좌번호 획득
         raw = self._kiwoom._ocx.dynamicCall("GetLoginInfo(QString)", "ACCNO")
         accounts = [a for a in raw.strip().split(";") if a]
-        self.account = accounts[0] if accounts else ""
+
+        if len(accounts) > 1:
+            dlg = AccountSelectDialog(accounts)
+            dlg.exec()
+            self.account = dlg.selected_account
+            logger.info("계좌 선택 완료: %s (전체 %d개)", self.account, len(accounts))
+        else:
+            self.account = accounts[0] if accounts else ""
 
         logger.info("로그인 성공 — 모드: %s / 계좌: %s",
                     self.server_mode, self.account)
@@ -236,6 +244,88 @@ class LoginManager(QObject):
         self._err_code = err_code
         if self._loop and self._loop.isRunning():
             self._loop.quit()
+
+
+# ---------------------------------------------------------------------------
+# 계좌 선택 다이얼로그
+# ---------------------------------------------------------------------------
+
+class AccountSelectDialog(QDialog):
+    """
+    로그인 후 계좌가 여러 개인 경우 사용할 계좌를 선택하는 다이얼로그.
+
+    ┌──────────────────────────────────┐
+    │  사용할 계좌를 선택하세요         │
+    │  ──────────────────────────────  │
+    │  ○ 1234567890  (모의투자)        │
+    │  ○ 9876543210  (모의투자)        │
+    │  ──────────────────────────────  │
+    │           [  확인  ]             │
+    └──────────────────────────────────┘
+    """
+
+    def __init__(self, accounts: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("계좌 선택")
+        self.setFixedSize(360, 240)
+        self.setStyleSheet(_DIALOG_QSS)
+        self._selected: str = accounts[0] if accounts else ""
+        self._build_ui(accounts)
+
+    def _build_ui(self, accounts: list[str]) -> None:
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 20)
+
+        title = QLabel("사용할 계좌를 선택하세요")
+        title.setFont(QFont("Malgun Gothic", 11, QFont.Bold))
+        title.setAlignment(Qt.AlignCenter)
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setObjectName("divider")
+        layout.addWidget(line)
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._list.setFont(QFont("Malgun Gothic", 10))
+        self._list.setStyleSheet(
+            "QListWidget { background:#313244; border:1px solid #45475a; border-radius:4px; color:#cdd6f4; }"
+            "QListWidget::item:selected { background:#89b4fa; color:#1e1e2e; }"
+            "QListWidget::item { padding:6px 8px; }"
+        )
+        for acc in accounts:
+            self._list.addItem(QListWidgetItem(acc))
+        self._list.setCurrentRow(0)
+        self._list.itemDoubleClicked.connect(self._on_double_click)
+        layout.addWidget(self._list)
+
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.HLine)
+        line2.setObjectName("divider")
+        layout.addWidget(line2)
+
+        btn_ok = QPushButton("확인")
+        btn_ok.setObjectName("btn_login")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self._on_ok)
+        layout.addWidget(btn_ok)
+
+    def _on_ok(self) -> None:
+        item = self._list.currentItem()
+        if item:
+            self._selected = item.text()
+        self.accept()
+
+    def _on_double_click(self, item: QListWidgetItem) -> None:
+        self._selected = item.text()
+        self.accept()
+
+    @property
+    def selected_account(self) -> str:
+        return self._selected
 
 
 # ---------------------------------------------------------------------------

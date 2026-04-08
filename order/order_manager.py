@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from config import COST as _COST
 
@@ -84,6 +84,9 @@ class Position:
     entry_time: Optional[datetime] = None # ← 2026-04-03 추가: 정확한 진입 시각 (Time-cut용)
     opened_by_app: bool = False           # 앱 SendOrder 매수로 보유가 생기거나 늘어난 적 있음
     qty_buy_today_app: int = 0            # 오늘 앱에서 매수한 수량 (장마감 자동청산 대상)
+    candle_stop_price: int = 0            # 진입 캔들 저가 기반 손절가 (0 = 비활성)
+    break_even_done: bool = False         # +1% 달성 후 본절가로 올림 완료 여부
+    half_exited: bool = False             # +1.5% 반절 익절 완료 여부
 
     @property
     def pnl(self) -> int:
@@ -162,7 +165,9 @@ class OrderManager(QObject):
         self.positions: dict[str, Position] = {}         # 보유 종목
         self.orders:    dict[str, OrderRecord] = {}      # 전체 주문 기록
         self._pending:  set[str] = set()                 # 주문 중 종목 (중복 방지)
+        self._pending_sell_time: dict[str, datetime] = {}  # 매도 주문 접수 시각
         self._app_pending_buys: dict[str, int] = {}       # code -> 남은 앱 매수 주문 수량 (부분체결 추적)
+        self._pending_candle_stop: dict[str, int] = {}    # code -> 진입 캔들 저가 (체결 시 Position에 반영)
         self._pnl_date: date = date.today()
         # 당일 실현손익 = 파일에서 복구한 이전 세션 합 + 이번 세션 매도 체결 합
         self.daily_realized_pnl: int = 0
@@ -170,16 +175,22 @@ class OrderManager(QObject):
         self._today_fill_log: list[dict] = []             # 이번 세션 체결 로그
         self._fills_initialized: bool = False             # 시작 시 1회만 파일 로드하는 플래그
 
-        # [NEW] 자금 회전 (2026-04-03)
-        self._capital_rotation_sold: set[str] = set()     # 이미 매도 요청한 포지션 코드 (무한 루프 방지)
         self._signal_last_time: dict[str, float] = {}     # code → 마지막 신호 시각 (쿨다운용)
+        self._queued_signal = None                         # 매도 체결 완료 후 실행 대기 중인 매수 신호
 
         # [NEW] 미체결 추적 (2026-04-04)
         self._failed_sells: dict[str, dict] = {}  # code → {qty, attempts, last_time}
 
+        # [NEW] 당일 손절 블랙리스트 — 손절 체결 종목은 당일 재매수 차단 (2026-04-08)
+        # 익절·Time-cut·수동 매도는 포함하지 않음 → 재진입 허용
+        self._stop_loss_today: set[str] = set()
+
         # 포지션 실시간 현재가 구독 콜백 (SmartScanner에서 주입)
         self.on_position_opened: Optional[Callable[[str], None]] = None
         self.on_position_closed: Optional[Callable[[str], None]] = None
+
+        # TradeAuditLogger 주입 (MainWindow._setup_modules에서 설정)
+        self._audit = None
 
         self._connect_chejan()
 
@@ -208,15 +219,18 @@ class OrderManager(QObject):
                 old = self.positions.get(code)
                 qty_today = min(old.qty_buy_today_app, h["qty"]) if old else 0
                 new_positions[code] = Position(
-                    code          = code,
-                    name          = h["name"],
-                    qty           = h["qty"],
-                    avg_price     = avg,
-                    current_price = h["current_price"],
-                    buy_date      = old.buy_date if old else None,
-                    entry_time    = old.entry_time if old else None,  # ← entry_time 유지
-                    opened_by_app = old.opened_by_app if old else False,
+                    code              = code,
+                    name              = h["name"],
+                    qty               = h["qty"],
+                    avg_price         = avg,
+                    current_price     = h["current_price"],
+                    buy_date          = old.buy_date if old else None,
+                    entry_time        = old.entry_time if old else None,
+                    opened_by_app     = old.opened_by_app if old else False,
                     qty_buy_today_app = qty_today,
+                    candle_stop_price = old.candle_stop_price if old else 0,
+                    break_even_done   = old.break_even_done if old else False,
+                    half_exited       = old.half_exited if old else False,
                 )
             self.positions = new_positions
 
@@ -333,29 +347,15 @@ class OrderManager(QObject):
             logger.debug("중복 매수 방지 — %s 이미 보유 중", code)
             return
 
+        # [NEW] 당일 손절 블랙리스트 — 손절 종목 당일 재매수 차단 (익절은 허용)
+        if code in self._stop_loss_today:
+            logger.info("손절 재매수 차단 — %s(%s) 당일 손절 이력", name, code)
+            return
+
         if len(self.positions) + len(self._pending) >= self.max_positions:
-            # [NEW] Time-cut 교체 대상이 있으면 정리 후 재시도 (2026-04-04)
-            worst = self._find_timecut_position()
-            if worst and worst.code not in self._capital_rotation_sold:
-                logger.info(
-                    "[포지션 교체] max_positions 도달 — %s (보유 %d분, 손익 %+.2f%%) 정리 → %s 진입 대기",
-                    worst.name,
-                    int((datetime.now() - worst.entry_time).total_seconds() / 60) if worst.entry_time else -1,
-                    worst.pnl_pct,
-                    name,
-                )
-                self._capital_rotation_sold.add(worst.code)
-                self.sell(worst.code, worst.name, worst.qty)
-                if code in self._signal_last_time:
-                    del self._signal_last_time[code]
-                QTimer.singleShot(1000, lambda s=signal: self.handle_signal(s))
-                return
-            # Time-cut/손실 대상 없음 (모두 수익 양호) — 교체 안 함
-            msg = f"최대 보유 종목 수 초과 ({self.max_positions}종목) — 교체 불가 (수익 양호)"
-            logger.warning(msg)
-            logger.debug("  보유 목록: %s", list(self.positions.keys()))
-            logger.debug("  대기 목록: %s", list(self._pending))  # set은 .keys() 없음
-            self.order_failed.emit(msg)
+            msg = f"최대 보유 종목 수 초과 ({self.max_positions}종목) — 신호 대기열 등록"
+            logger.info(msg)
+            self._queued_signal = signal   # 매도 체결 완료 시 자동 실행
             return
 
         # ── 수량 계산 — 100% 현금 운용 (예수금 전액 소진) ──────────────────
@@ -368,31 +368,37 @@ class OrderManager(QObject):
         # ── 가용 예수금 부족 체크 ─────────────────────────────────────────
         # 최소 1주 매수 불가능하면 자금 회전 시도
         if qty <= 0:
-            # [NEW] 자금 회전: 최악 포지션 매도 후 1초 후 신호 재처리 (2026-04-03)
-            worst = self._find_worst_position()
-            if worst and worst.code not in self._capital_rotation_sold:
-                logger.info("[자금 회전] %s (손익: %+.2f%%) 매도 → 자금 확보 후 %s 재진입 대기",
-                           worst.name, worst.pnl_pct, name)
-                self._capital_rotation_sold.add(worst.code)
-                # 매도 주문 실행
-                self.sell(worst.code, worst.name, worst.qty)
-                # 신호 쿨다운 리셋 (같은 신호가 45초 안에 다시 나올 수 있도록)
-                if code in self._signal_last_time:
-                    del self._signal_last_time[code]
-                # 1초 후 같은 신호 재처리 (예수금 업데이트 대기)
-                QTimer.singleShot(1000, lambda s=signal: self.handle_signal(s))
-                return
-
-            # 자금 회전 불가능하면 기존 경고
             msg = f"가용 예수금 부족 — 최소 1주 매수 불가 (예수금 {self.cash:,} / 주가 {price:,})"
             logger.warning(msg)
             self.order_failed.emit(msg)
             return
 
+        # 진입 캔들 저가 임시 보관 → 체결 콜백에서 Position에 반영
+        candle_low = getattr(signal, "entry_candle_low", 0)
+        if candle_low > 0:
+            self._pending_candle_stop[code] = candle_low
+
         self.buy(code, name, qty, price=0)  # 시장가 매수
 
     def is_pending(self, code: str) -> bool:
-        return code in self._pending
+        if code not in self._pending:
+            return False
+        # 매도 주문이 30초 이상 미체결이면 pending 해제 — 손절 재시도 허용
+        sell_time = self._pending_sell_time.get(code)
+        if sell_time and (datetime.now() - sell_time).total_seconds() > 30:
+            logger.warning("[미체결 해제] %s 매도 주문 30초 초과 — pending 강제 해제 후 재매도 허용", code)
+            self._pending.discard(code)
+            self._pending_sell_time.pop(code, None)
+            return False
+        return True
+
+    def mark_stop_loss(self, code: str) -> None:
+        """
+        해당 종목을 당일 손절 블랙리스트에 등록한다.
+        손절·Hard Stop·캔들손절 시 호출. 익절·수동·Day Close는 호출하지 않음.
+        """
+        self._stop_loss_today.add(code)
+        logger.info("[손절 블랙리스트] %s 등록 — 당일 재매수 차단", code)
 
     def _roll_daily_state_if_needed(self) -> None:
         """날짜가 바뀌면 당일 실현손익·체결 로그·오늘 앱 매수 수량을 초기화한다."""
@@ -403,6 +409,7 @@ class OrderManager(QObject):
             self._broker_realized_base = 0
             self._today_fill_log.clear()
             self._fills_initialized = False  # 새 날짜 → 세션 초기화 재허용
+            self._stop_loss_today.clear()    # 날짜 변경 시 손절 블랙리스트 초기화
             for p in self.positions.values():
                 p.qty_buy_today_app = 0
 
@@ -651,7 +658,6 @@ class OrderManager(QObject):
             self.order_failed.emit(msg)
             # [NEW] 매도 주문 실패 시 미체결 추적 (2026-04-04)
             if order_type == OrderType.SELL:
-                from datetime import datetime
                 self._failed_sells[code] = {
                     "qty": qty,
                     "attempts": 0,
@@ -666,6 +672,12 @@ class OrderManager(QObject):
         self._pending.add(code)
         if order_type == OrderType.BUY:
             self._app_pending_buys[code] = qty
+            if self._audit:
+                self._audit.log_buy_order(code, qty, price)
+        else:
+            self._pending_sell_time[code] = datetime.now()
+            if self._audit:
+                self._audit.log_sell_order(code, qty, price)
 
         rec = OrderRecord(
             order_no=rq_name, code=code, name=name,
@@ -761,14 +773,16 @@ class OrderManager(QObject):
                     if pos.buy_date is None:
                         pos.buy_date = date.today()
             else:
+                candle_stop = self._pending_candle_stop.pop(code, 0)
                 self.positions[code] = Position(
                     code=code, name=name,
                     qty=filled_qty, avg_price=filled_price,
                     current_price=filled_price,
                     buy_date=date.today() if is_app_buy else None,
-                    entry_time=datetime.now() if is_app_buy else None,  # ← 2026-04-03: Time-cut용
+                    entry_time=datetime.now() if is_app_buy else None,
                     opened_by_app=is_app_buy,
                     qty_buy_today_app=filled_qty if is_app_buy else 0,
+                    candle_stop_price=candle_stop,
                 )
             self.cash -= filled_qty * filled_price
             self._today_fill_log.append({
@@ -780,6 +794,8 @@ class OrderManager(QObject):
                 "price": filled_price,
                 "amount": filled_qty * filled_price,
             })
+            if self._audit:
+                self._audit.log_buy_fill(code, filled_qty, filled_price)
             # [NEW] 포지션 실시간 등록
             if self.on_position_opened:
                 self.on_position_opened(code)
@@ -808,6 +824,12 @@ class OrderManager(QObject):
                     realized=realized, code=code, name=name,
                     sell_price=filled_price, avg_price=pos.avg_price, qty=filled_qty,
                 )
+                if self._audit:
+                    self._audit.log_sell_fill(
+                        code, filled_qty, filled_price,
+                        avg_buy_price=pos.avg_price,
+                        realized_pnl=realized,
+                    )
                 self._recompute_daily_realized_from_ledger()
                 sell_from_today = min(filled_qty, pos.qty_buy_today_app)
                 pos.qty_buy_today_app -= sell_from_today
@@ -817,9 +839,17 @@ class OrderManager(QObject):
                     if self.on_position_closed:
                         self.on_position_closed(code)
                     del self.positions[code]
+                    # 매도 체결 완료 → 대기 중인 매수 신호 실행
+                    if self._queued_signal is not None:
+                        queued = self._queued_signal
+                        self._queued_signal = None
+                        logger.info("[큐 신호 실행] 매도 완료 후 대기 신호 처리 — %s(%s)",
+                                    queued.name, queued.code)
+                        self.handle_signal(queued)
             self.cash += filled_qty * filled_price
 
         self._pending.discard(code)
+        self._pending_sell_time.pop(code, None)
 
         payload = {
             "time":         datetime.now().strftime("%H:%M:%S"),

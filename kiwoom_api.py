@@ -59,6 +59,7 @@ TR_HOLDINGS    = "opw00018"   # 계좌평가잔고내역요청
 TR_MIN_CANDLE  = "opt10080"   # 주식분봉차트조회요청
 TR_DAILY_CANDLE = "opt10081"  # 주식일봉차트조회요청
 TR_DAILY_REALIZED = "opt10074"  # 일자별실현손익요청 (당일 누적 실현손익)
+TR_INDEX_INFO     = "opt20001"  # 업종현재가요청 (지수 조회 — 코스피:"001", 코스닥:"101")
 
 LOGIN_TIMEOUT_SEC = 30
 TR_DELAY_SEC      = 0.25      # TR 연속 조회 제한(초) — 키움 정책 200ms+
@@ -498,6 +499,43 @@ class KiwoomManager:
         # 실현손익은 음수 가능 → safe_int(절댓값) 쓰지 않음
         return int(safe_float(raw, 0.0))
 
+    def get_index_info(self, index_code: str) -> Optional[dict]:
+        """
+        업종(지수) 현재가 조회 — opt20001.
+
+        Args:
+            index_code: "001" = 코스피, "101" = 코스닥
+
+        Returns:
+            {"index_code": str, "current": float, "base": float, "change_pct": float}
+            조회 실패 시 None
+        """
+        self._set_input("업종코드", index_code)
+        self._comm_rq(TR_INDEX_INFO, "index_info", "9300")
+
+        d = self._tr_data
+        raw_current = d.get("현재가", "")
+        raw_base    = d.get("기준가", "")
+
+        if not raw_current:
+            logger.warning("[opt20001] 지수 응답 없음 — code=%s", index_code)
+            return None
+
+        raw_c = safe_int(raw_current)
+        raw_b = safe_int(raw_base)
+        # 키움 opt20001은 지수를 소수점 2자리 정수화하여 전송하는 경우가 있음
+        # 코스피/코스닥은 통상 1000~3000 범위. 10000 초과면 ×100 보정
+        current = raw_c / 100.0 if raw_c > 10_000 else float(raw_c)
+        base    = raw_b / 100.0 if raw_b > 10_000 else float(raw_b)
+        change_pct = round((current - base) / base * 100, 2) if base else 0.0
+
+        return {
+            "index_code": index_code,
+            "current":    current,
+            "base":       base,
+            "change_pct": change_pct,
+        }
+
     def get_holdings(self) -> list[dict]:
         """
         보유 종목 목록 조회.
@@ -721,6 +759,11 @@ class KiwoomManager:
                 "매매세금",
             ):
                 self._tr_data[f] = self._get_comm_data(tr_code, rq_name, 0, f)
+
+        elif rq_name == "index_info":
+            self._tr_data = self._parse_single(tr_code, rq_name, [
+                "현재가", "기준가", "대비", "등락률",
+            ])
 
         elif rq_name == "holdings":
             self._tr_data = {"rows": self._parse_holdings_rows(tr_code, rq_name)}
@@ -1013,6 +1056,9 @@ class MockKiwoomManager:
         return []
 
     def get_today_realized_pnl(self):
+        return None
+
+    def get_index_info(self, _index_code: str) -> Optional[dict]:
         return None
 
     def send_order(self, *a, **kw) -> int:
