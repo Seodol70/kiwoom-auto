@@ -85,8 +85,12 @@ class Position:
     opened_by_app: bool = False           # 앱 SendOrder 매수로 보유가 생기거나 늘어난 적 있음
     qty_buy_today_app: int = 0            # 오늘 앱에서 매수한 수량 (장마감 자동청산 대상)
     candle_stop_price: int = 0            # 진입 캔들 저가 기반 손절가 (0 = 비활성)
-    break_even_done: bool = False         # +1% 달성 후 본절가로 올림 완료 여부
-    half_exited: bool = False             # +1.5% 반절 익절 완료 여부
+    break_even_done: bool = False         # (레거시 — 미사용)
+    half_exited: bool = False             # (레거시 — 미사용, 트레일 스탑으로 대체)
+    peak_price: int = 0                   # [Trail] 보유 중 최고가 (트레일 스탑 기준점)
+    # [분할 익절] 1차 분할 매도 상태
+    partial_sold:     bool = False        # 1차 분할 매도 완료 여부
+    qty_partial_sold: int  = 0            # 1차에 매도한 수량
 
     @property
     def pnl(self) -> int:
@@ -181,6 +185,13 @@ class OrderManager(QObject):
         # [NEW] 미체결 추적 (2026-04-04)
         self._failed_sells: dict[str, dict] = {}  # code → {qty, attempts, last_time}
 
+        # [P2] 매수 주문 접수 시각 추적 — 10초 미체결 시 취소+재주문
+        self._pending_buy_time: dict[str, datetime] = {}   # code → 접수 시각
+        self._pending_buy_info: dict[str, dict] = {}       # code → {qty, name, order_no}
+
+        # 분할익절 체결 대기 — 이 코드의 다음 sell 체결은 is_partial=True 로 기록
+        self._partial_pending_codes: set[str] = set()
+
         # [NEW] 당일 손절 블랙리스트 — 손절 체결 종목은 당일 재매수 차단 (2026-04-08)
         # 익절·Time-cut·수동 매도는 포함하지 않음 → 재진입 허용
         self._stop_loss_today: set[str] = set()
@@ -231,6 +242,9 @@ class OrderManager(QObject):
                     candle_stop_price = old.candle_stop_price if old else 0,
                     break_even_done   = old.break_even_done if old else False,
                     half_exited       = old.half_exited if old else False,
+                    peak_price        = old.peak_price        if old else 0,
+                    partial_sold      = old.partial_sold      if old else False,
+                    qty_partial_sold  = old.qty_partial_sold  if old else 0,
                 )
             self.positions = new_positions
 
@@ -421,7 +435,8 @@ class OrderManager(QObject):
         return self._FILLS_DIR / f"fills_{date.today().strftime('%Y%m%d')}.jsonl"
 
     def _append_fill_to_file(self, realized: int, code: str, name: str,
-                              sell_price: int, avg_price: int, qty: int) -> None:
+                              sell_price: int, avg_price: int, qty: int,
+                              is_partial: bool = False) -> None:
         """매도 체결 1건을 오늘 이력 파일에 추가한다 (append-only)."""
         try:
             self._FILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -433,6 +448,7 @@ class OrderManager(QObject):
                 "avg_price":  avg_price,
                 "qty":        qty,
                 "realized":   realized,
+                "is_partial": is_partial,
             }, ensure_ascii=False)
             with self._fills_path().open("a", encoding="utf-8") as f:
                 f.write(entry + "\n")
@@ -624,6 +640,53 @@ class OrderManager(QObject):
                     info["attempts"] = attempt
                     info["last_time"] = now
 
+    def _check_pending_buys(self) -> None:
+        """[P2] 매수 주문 접수 후 10초 경과 미체결 시 취소 후 pending 해제.
+
+        키움 시장가 주문은 보통 즉시 체결되지만, 서킷브레이커·매매정지·OCX 지연
+        등으로 pending이 장기 잠금될 수 있다. 10초 초과 시:
+          1. SendOrder type=3(취소)로 취소 시도
+          2. pending 상태 강제 해제 → 다음 신호 사이클에서 재진입 허용
+        """
+        from datetime import datetime
+        now = datetime.now()
+
+        for code, t in list(self._pending_buy_time.items()):
+            elapsed = (now - t).total_seconds()
+            if elapsed < 10:
+                continue
+
+            info = self._pending_buy_info.get(code, {})
+            qty  = info.get("qty", 0)
+            name = info.get("name", code)
+            order_no = info.get("order_no", "")
+
+            logger.warning(
+                "[매수미체결] %s(%s) %d주 — %.0f초 경과, 취소 시도",
+                name, code, qty, elapsed
+            )
+
+            # 취소 주문 전송 (SendOrder type 3 = 취소)
+            if order_no:
+                try:
+                    rq_cancel = f"취소_{code}"
+                    cancel_ret = self._kiwoom._ocx.dynamicCall(
+                        "SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)",
+                        [rq_cancel, "1001", self._account, 3, code, qty, 0, "00", order_no],
+                    )
+                    logger.info(
+                        "[매수취소] %s(%s) order_no=%s → ret=%s",
+                        name, code, order_no, cancel_ret
+                    )
+                except Exception as _e:
+                    logger.warning("[매수취소 오류] %s: %s", code, _e)
+
+            # pending 상태 강제 해제
+            self._pending.discard(code)
+            self._pending_buy_time.pop(code, None)
+            self._pending_buy_info.pop(code, None)
+            self._app_pending_buys.pop(code, None)
+
     def sell(
         self,
         code:  str,
@@ -633,6 +696,53 @@ class OrderManager(QObject):
     ) -> str:
         """시장가 또는 지정가 매도 주문을 전송한다."""
         return self._send(OrderType.SELL, code, name, qty, price)
+
+    def partial_exit(
+        self,
+        code:       str,
+        name:       str,
+        sell_ratio: float = 0.30,
+        reason:     str   = "분할익절",
+    ) -> int:
+        """
+        보유 수량의 sell_ratio(기본 30%)를 시장가 1차 분할 매도한다.
+
+        반환: 실제 주문 수량 (0 = 실패 또는 이미 처리됨)
+
+        주의:
+        - 이미 partial_sold=True 이면 재호출 무시 (중복 방지)
+        - 매도 체결 후 pos.qty는 체결 콜백에서 자동 감소 → trail은 남은 수량에 적용
+        """
+        from scanner.smart_scanner import ScannerLogger
+        pos = self.positions.get(code)
+        if pos is None:
+            logger.debug("[분할익절] %s 포지션 없음 — 스킵", code)
+            return 0
+        if pos.partial_sold:
+            logger.debug("[분할익절] %s 이미 완료 — 스킵", code)
+            return 0
+        if pos.qty <= 0:
+            return 0
+
+        partial_qty = max(1, int(pos.qty * sell_ratio))
+        logger.info(
+            "[분할익절] %s(%s) %d주 매도 (보유 %d주의 %.0f%%) — %s",
+            name, code, partial_qty, pos.qty, sell_ratio * 100, reason,
+        )
+
+        ret = self.sell(code, name, partial_qty)
+        if ret:   # 주문 접수 성공 (주문번호 문자열 반환)
+            pos.partial_sold     = True
+            pos.qty_partial_sold = partial_qty
+            self._partial_pending_codes.add(code)
+            ScannerLogger.passed(
+                code, name, "PARTIAL_EXIT",
+                f"{partial_qty}주 매도 ({sell_ratio*100:.0f}%) — {reason}",
+            )
+            return partial_qty
+
+        logger.warning("[분할익절] %s(%s) 주문 실패", name, code)
+        return 0
 
     def _send(
         self,
@@ -672,6 +782,9 @@ class OrderManager(QObject):
         self._pending.add(code)
         if order_type == OrderType.BUY:
             self._app_pending_buys[code] = qty
+            # [P2] 매수 접수 시각·정보 기록 — 10초 미체결 감지용
+            self._pending_buy_time[code] = datetime.now()
+            self._pending_buy_info[code] = {"qty": qty, "name": name, "order_no": rq_name}
             if self._audit:
                 self._audit.log_buy_order(code, qty, price)
         else:
@@ -755,6 +868,9 @@ class OrderManager(QObject):
 
         # 포지션 반영
         if order_type == OrderType.BUY:
+            # [P2] 매수 체결 → 미체결 추적 해제
+            self._pending_buy_time.pop(code, None)
+            self._pending_buy_info.pop(code, None)
             if is_app_buy:
                 rem = self._app_pending_buys[code] - filled_qty
                 if rem <= 0:
@@ -820,9 +936,12 @@ class OrderManager(QObject):
                     "realized": realized,
                 })
                 # [NEW] 매도 체결을 파일에 append → 재시작 후에도 복구 가능
+                _is_partial = code in self._partial_pending_codes
+                self._partial_pending_codes.discard(code)
                 self._append_fill_to_file(
                     realized=realized, code=code, name=name,
                     sell_price=filled_price, avg_price=pos.avg_price, qty=filled_qty,
+                    is_partial=_is_partial,
                 )
                 if self._audit:
                     self._audit.log_sell_fill(

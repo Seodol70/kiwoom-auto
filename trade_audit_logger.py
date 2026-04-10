@@ -55,6 +55,7 @@ COLUMNS: list[str] = [
     "trade_amount_at_signal",   # 거래대금 (원)
     "kospi_chg_at_signal",      # 신호 당시 코스피 등락률 (%)
     "kosdaq_chg_at_signal",     # 신호 당시 코스닥 등락률 (%)
+    "investor_score_at_signal", # 수급 점수 (-1/0/+1)
     # ── 매수 주문
     "buy_order_time",           # 매수 주문 전송 시각
     "buy_order_price",          # 매수 주문가 (0=시장가)
@@ -212,6 +213,7 @@ class TradeAuditLogger:
                 "trade_amount_at_signal":   getattr(snap, "trade_amount", ""),
                 "kospi_chg_at_signal":      f"{getattr(cfg, 'kospi_chg_pct',  0):.2f}" if cfg else "",
                 "kosdaq_chg_at_signal":     f"{getattr(cfg, 'kosdaq_chg_pct', 0):.2f}" if cfg else "",
+                "investor_score_at_signal": str(getattr(snap, "investor_score", 0)),
                 "final_status":             "SIGNAL_ONLY",
             })
 

@@ -60,6 +60,7 @@ TR_MIN_CANDLE  = "opt10080"   # 주식분봉차트조회요청
 TR_DAILY_CANDLE = "opt10081"  # 주식일봉차트조회요청
 TR_DAILY_REALIZED = "opt10074"  # 일자별실현손익요청 (당일 누적 실현손익)
 TR_INDEX_INFO     = "opt20001"  # 업종현재가요청 (지수 조회 — 코스피:"001", 코스닥:"101")
+TR_INVESTOR       = "opt10059"  # 종목별투자자기관별요청 (외국인/기관 순매수)
 
 LOGIN_TIMEOUT_SEC = 30
 TR_DELAY_SEC      = 0.25      # TR 연속 조회 제한(초) — 키움 정책 200ms+
@@ -215,6 +216,8 @@ class KiwoomManager:
         self._ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
         self._tr_loop: Optional[QEventLoop] = None
         self._tr_data: dict = {}
+        self._tr_busy: bool = False        # 재진입 방지 플래그
+        self._tr_current_rq: str = ""      # 현재 처리 중인 rq_name (디버그용)
 
         self._account_list: list[str] = []
         self._account: str = ""
@@ -499,6 +502,46 @@ class KiwoomManager:
         # 실현손익은 음수 가능 → safe_int(절댓값) 쓰지 않음
         return int(safe_float(raw, 0.0))
 
+    def get_investor_trend(self, code: str) -> dict:
+        """
+        종목별 당일 외국인/기관 순매수 수량 조회 — opt10059.
+
+        입력: 종목코드, 금융투자구분(1=수량)
+        반환: {"foreign_net": int, "inst_net": int}
+          - 양수: 순매수, 음수: 순매도
+          - 조회 실패 시 {"foreign_net": 0, "inst_net": 0}
+        """
+        _FALLBACK = {"foreign_net": 0, "inst_net": 0}
+        try:
+            self._set_input("일자",       "")        # 당일은 빈 문자열
+            self._set_input("종목코드",   code)
+            self._set_input("금융투자구분", "1")     # 1=수량
+            self._comm_rq(TR_INVESTOR, f"investor_{code}", "9500")
+
+            d = self._tr_data
+            if not d:
+                return _FALLBACK
+
+            # opt10059 멀티데이터: rows 리스트에서 오늘(첫 번째 행) 추출
+            rows = d.get("rows", [])
+            if not rows:
+                return _FALLBACK
+
+            row = rows[0]   # 가장 최신 날짜(오늘)
+            foreign_net = safe_int(row.get("외국인순매수", row.get("외국계순매수", "0")))
+            # 기관 = 기관계 (투신+보험+은행+기타기관 합산)
+            inst_net    = safe_int(row.get("기관계순매수", row.get("기관순매수", "0")))
+
+            logger.debug(
+                "[opt10059] %s 외국인=%+d 기관=%+d",
+                code, foreign_net, inst_net,
+            )
+            return {"foreign_net": foreign_net, "inst_net": inst_net}
+
+        except Exception as e:
+            logger.debug("[opt10059] %s 조회 실패: %s", code, e)
+            return _FALLBACK
+
     def get_index_info(self, index_code: str) -> Optional[dict]:
         """
         업종(지수) 현재가 조회 — opt20001.
@@ -642,7 +685,19 @@ class KiwoomManager:
 
         호출 전 TRRateLimiter.acquire()로 키움 1초 4회 제한을 자동 준수한다.
         time.sleep(TR_DELAY_SEC) 하드코딩을 제거하고 슬라이딩 윈도우로 대체.
+
+        재진입(reentrant) 방지: QEventLoop.exec_() 중 다른 타이머 콜백이 TR을 다시
+        호출하면 self._tr_loop를 덮어써서 교착 상태가 발생한다.
+        _tr_busy 플래그로 중첩 호출을 차단한다.
         """
+        # ── 재진입 방지 ──────────────────────────────────────────────────────
+        if self._tr_busy:
+            logger.warning(
+                "[TR] 재진입 차단 — %s 요청 거부 (현재 '%s' 처리 중)",
+                rq_name, self._tr_current_rq,
+            )
+            return
+
         # 레이트 리미터 — 호출 간격 / 초당 횟수 보장
         self._tr_limiter.acquire()
 
@@ -658,14 +713,20 @@ class KiwoomManager:
             logger.error("CommRqData 실패 — tr=%s ret=%d", tr_code, ret)
             return
 
-        self._tr_loop = QEventLoop()
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timer.timeout.connect(self._tr_loop.quit)
-        timer.start(2_000)  # 10초 → 2초 (응답 없으면 빨리 폴백)
-        self._tr_loop.exec_()
-        timer.stop()
-        self._tr_loop = None
+        self._tr_busy = True
+        self._tr_current_rq = rq_name
+        try:
+            self._tr_loop = QEventLoop()
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._tr_loop.quit)
+            timer.start(2_000)  # 2초 타임아웃 (응답 없으면 빨리 폴백)
+            self._tr_loop.exec_()
+            timer.stop()
+            self._tr_loop = None
+        finally:
+            self._tr_busy = False
+            self._tr_current_rq = ""
 
     def _get_comm_data(self, tr_code: str, rq_name: str, index: int, field: str) -> str:
         return self._ocx.dynamicCall(
@@ -1060,6 +1121,9 @@ class MockKiwoomManager:
 
     def get_index_info(self, _index_code: str) -> Optional[dict]:
         return None
+
+    def get_investor_trend(self, _code: str) -> dict:
+        return {"foreign_net": 0, "inst_net": 0}
 
     def send_order(self, *a, **kw) -> int:
         return -1
