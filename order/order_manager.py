@@ -91,6 +91,8 @@ class Position:
     # [분할 익절] 1차 분할 매도 상태
     partial_sold:     bool = False        # 1차 분할 매도 완료 여부
     qty_partial_sold: int  = 0            # 1차에 매도한 수량
+    trend_level: int = 0                  # 요셉 시그널 현재 추세 단계(0~3)
+    trend_prev_level: int = 0             # 직전 추세 단계(Strong→No Trend 감시)
 
     @property
     def pnl(self) -> int:
@@ -172,6 +174,7 @@ class OrderManager(QObject):
         self._pending_sell_time: dict[str, datetime] = {}  # 매도 주문 접수 시각
         self._app_pending_buys: dict[str, int] = {}       # code -> 남은 앱 매수 주문 수량 (부분체결 추적)
         self._pending_candle_stop: dict[str, int] = {}    # code -> 진입 캔들 저가 (체결 시 Position에 반영)
+        self._pending_trend: dict[str, tuple[int, int]] = {}  # code -> (trend_level, trend_prev_level)
         self._pnl_date: date = date.today()
         # 당일 실현손익 = 파일에서 복구한 이전 세션 합 + 이번 세션 매도 체결 합
         self.daily_realized_pnl: int = 0
@@ -307,6 +310,8 @@ class OrderManager(QObject):
                     peak_price        = old.peak_price        if old else 0,
                     partial_sold      = old.partial_sold      if old else False,
                     qty_partial_sold  = old.qty_partial_sold  if old else 0,
+                    trend_level       = old.trend_level       if old else 0,
+                    trend_prev_level  = old.trend_prev_level  if old else 0,
                 )
             self.positions = new_positions
 
@@ -453,8 +458,32 @@ class OrderManager(QObject):
         candle_low = getattr(signal, "entry_candle_low", 0)
         if candle_low > 0:
             self._pending_candle_stop[code] = candle_low
+        self._pending_trend[code] = (
+            int(getattr(signal, "trend_level", 0) or 0),
+            int(getattr(signal, "trend_prev_level", 0) or 0),
+        )
 
         self.buy(code, name, qty, price=0)  # 시장가 매수
+
+    def update_position_trend(self, code: str, trend_level: int) -> None:
+        """보유 포지션의 추세 레벨을 갱신한다."""
+        pos = self.positions.get(code)
+        if pos is None:
+            return
+        new_lv = int(max(0, min(3, trend_level)))
+        if pos.trend_level != new_lv:
+            pos.trend_prev_level = int(pos.trend_level)
+            pos.trend_level = new_lv
+
+    def should_exit_on_trend_decay(self, code: str) -> bool:
+        """
+        요셉 시그널 추세 소멸 기반 청산 판정.
+        Strong(3) → No Trend(0) 전환 시 True 반환.
+        """
+        pos = self.positions.get(code)
+        if pos is None:
+            return False
+        return int(pos.trend_prev_level) == 3 and int(pos.trend_level) == 0
 
     def is_pending(self, code: str) -> bool:
         if code not in self._pending:
@@ -964,6 +993,7 @@ class OrderManager(QObject):
             # [P2] 매수 체결 → 미체결 추적 해제
             self._pending_buy_time.pop(code, None)
             self._pending_buy_info.pop(code, None)
+            trend_level, trend_prev_level = self._pending_trend.pop(code, (0, 0))
             if is_app_buy:
                 rem = self._app_pending_buys[code] - filled_qty
                 if rem <= 0:
@@ -978,6 +1008,9 @@ class OrderManager(QObject):
                 total_qty   = pos.qty + filled_qty
                 pos.avg_price = (pos.avg_price * pos.qty + filled_price * filled_qty) // total_qty
                 pos.qty      = total_qty
+                # 신규 체결 시 진입 시점 추세를 덮어써 최신 상태로 유지
+                pos.trend_level = int(trend_level)
+                pos.trend_prev_level = int(trend_prev_level)
                 if is_app_buy:
                     pos.qty_buy_today_app += filled_qty
                     pos.opened_by_app = True
@@ -994,6 +1027,8 @@ class OrderManager(QObject):
                     opened_by_app=is_app_buy,
                     qty_buy_today_app=filled_qty if is_app_buy else 0,
                     candle_stop_price=candle_stop,
+                    trend_level=int(trend_level),
+                    trend_prev_level=int(trend_prev_level),
                 )
             self.cash -= filled_qty * filled_price
             self._today_fill_log.append({

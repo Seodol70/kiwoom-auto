@@ -97,6 +97,82 @@ def calc_ema(closes: list[float], period: int) -> Optional[float]:
     return ema
 
 
+def calc_atr(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    period: int = 14,
+) -> Optional[float]:
+    """ATR(Average True Range) — Wilder smoothing 기반."""
+    if period <= 0:
+        return None
+    if len(highs) < period + 1 or len(lows) < period + 1 or len(closes) < period + 1:
+        return None
+
+    h = np.array(highs[-(period + 1):], dtype=np.float64)
+    l = np.array(lows[-(period + 1):], dtype=np.float64)
+    c = np.array(closes[-(period + 1):], dtype=np.float64)
+
+    prev_close = c[:-1]
+    tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - prev_close), np.abs(l[1:] - prev_close)))
+    if tr.size < period:
+        return None
+    atr = float(tr[:period].mean())
+    # period와 동일 길이면 초기값만으로 충분; 일반식 유지해 향후 확장 대비
+    alpha = 1.0 / period
+    for v in tr[period:]:
+        atr = (1.0 - alpha) * atr + alpha * float(v)
+    return atr
+
+
+def get_trend_status(
+    closes: list[float],
+    highs: list[float],
+    lows: list[float],
+    volumes: list[int],
+    *,
+    ema_period: int = 20,
+    atr_period: int = 14,
+    volume_lookback: int = 20,
+) -> int:
+    """
+    요셉 시그널 스타일 추세 강도(0~3) 반환.
+
+    0: No Trend
+    1: Weak Trend
+    2: Medium Trend
+    3: Strong Trend
+    """
+    need = max(ema_period + 1, atr_period + 1, volume_lookback + 1)
+    if len(closes) < need or len(highs) < need or len(lows) < need or len(volumes) < need:
+        return 0
+
+    ema_now = calc_ema(closes, ema_period)
+    ema_prev = calc_ema(closes[:-1], ema_period)
+    atr = calc_atr(highs, lows, closes, atr_period)
+    if ema_now is None or ema_prev is None or atr is None or atr <= 0:
+        return 0
+
+    cur_price = float(closes[-1])
+    # 상승 추세 판정의 최소 조건: 가격이 EMA 위 + EMA 기울기 양수
+    if cur_price <= ema_now or ema_now <= ema_prev:
+        return 0
+
+    dist_atr = (cur_price - ema_now) / atr
+    avg_vol = float(np.mean(np.array(volumes[-(volume_lookback + 1):-1], dtype=np.float64)))
+    if avg_vol <= 0:
+        return 0
+    vol_ratio = float(volumes[-1]) / avg_vol
+
+    if dist_atr >= 1.30 and vol_ratio >= 1.50:
+        return 3
+    if dist_atr >= 0.70 and vol_ratio >= 1.20:
+        return 2
+    if dist_atr >= 0.25 and vol_ratio >= 0.90:
+        return 1
+    return 0
+
+
 def calc_rsi(closes: list[float], period: int = 14) -> Optional[float]:
     """RSI(Relative Strength Index) — numpy 가속"""
     if len(closes) < period + 1:

@@ -27,7 +27,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
-from typing import Callable, Optional
+from typing import Callable, ClassVar, Optional
 
 import pandas as pd
 
@@ -261,6 +261,14 @@ class SmartScannerConfig:
     enabled_strategies: tuple[str, ...] = ("BREAKOUT", "JDM_ENTRY")
     # 평가/우선순위 (앞선 전략이 먼저 emit되면 같은 분의 후속 전략 평가는 중단)
     strategy_order: tuple[str, ...] = ("BREAKOUT", "JDM_ENTRY")
+    # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
+    yosep_trend_enabled: bool = True
+    yosep_ema_period: int = 20
+    yosep_atr_period: int = 14
+    yosep_volume_lookback: int = 20
+    yosep_min_trend_level: int = 1            # 0=무추세 허용, 1+=약추세 이상만 진입
+    yosep_downtrend_block_atr: float = 0.8    # EMA 아래 ATR*N 이상이면 하락 강세로 차단
+    yosep_preset: str = "balanced"            # aggressive | balanced | conservative
 
     # ── 수급 필터 (외국인/기관 순매수, opt10059) ──────────────────────────────
     investor_filter_enabled: bool  = True   # 수급 필터 활성화 여부
@@ -289,6 +297,51 @@ class SmartScannerConfig:
     daily_loss_cut_won:     int   = -100_000 # 기본 -10만원
 
     # ── Feedback Loop ─────────────────────────────────────────────────────────
+
+    _YOSEP_PRESETS: ClassVar[dict[str, dict[str, float | int | bool]]] = {
+        "aggressive": {
+            "yosep_trend_enabled": True,
+            "yosep_ema_period": 20,
+            "yosep_atr_period": 14,
+            "yosep_volume_lookback": 14,
+            "yosep_min_trend_level": 0,
+            "yosep_downtrend_block_atr": 1.2,
+        },
+        "balanced": {
+            "yosep_trend_enabled": True,
+            "yosep_ema_period": 20,
+            "yosep_atr_period": 14,
+            "yosep_volume_lookback": 20,
+            "yosep_min_trend_level": 1,
+            "yosep_downtrend_block_atr": 0.8,
+        },
+        "conservative": {
+            "yosep_trend_enabled": True,
+            "yosep_ema_period": 20,
+            "yosep_atr_period": 14,
+            "yosep_volume_lookback": 24,
+            "yosep_min_trend_level": 2,
+            "yosep_downtrend_block_atr": 0.6,
+        },
+    }
+
+    def apply_yosep_preset(self, preset: str, protected_keys: Optional[set[str]] = None) -> None:
+        """
+        요셉 시그널 파라미터를 프리셋으로 일괄 적용한다.
+        protected_keys에 포함된 키는 덮어쓰지 않는다.
+        """
+        key = str(preset or "").strip().lower()
+        if not key:
+            return
+        conf = self._YOSEP_PRESETS.get(key)
+        if conf is None:
+            logger.warning("[YOSEP_PRESET] 알 수 없는 프리셋: %s (기본 balanced 유지)", preset)
+            return
+        for k, v in conf.items():
+            if protected_keys and k in protected_keys:
+                continue
+            setattr(self, k, v)
+        self.yosep_preset = key
 
     @classmethod
     def from_adaptive(
@@ -319,6 +372,7 @@ class SmartScannerConfig:
             from datetime import time as _dtime
             params  = data.get("params", {})
             applied = []
+            touched_keys: set[str] = set()
             for key, val in params.items():
                 if not hasattr(instance, key):
                     logger.warning("[AdaptiveParams] 알 수 없는 파라미터 무시: %s", key)
@@ -336,14 +390,24 @@ class SmartScannerConfig:
                         s = int(parts[2]) if len(parts) > 2 else 0
                         setattr(instance, key, _dtime(h, m, s))
                         applied.append(f"{key}: {orig} → {val}")
+                        touched_keys.add(key)
                     except Exception as e:
                         logger.warning("[AdaptiveParams] time 변환 실패 %s=%s: %s", key, val, e)
                     continue
                 try:
                     setattr(instance, key, type(orig)(val))
                     applied.append(f"{key}: {orig} → {val}")
+                    touched_keys.add(key)
                 except (TypeError, ValueError) as e:
                     logger.warning("[AdaptiveParams] 타입 변환 실패 %s=%s: %s", key, val, e)
+
+            # 요셉 프리셋 일괄 적용:
+            # - yosep_preset만 지정하면 프리셋값들이 채워짐
+            # - 개별 키를 adaptive에서 지정한 경우(protected)는 그대로 유지
+            instance.apply_yosep_preset(
+                getattr(instance, "yosep_preset", "balanced"),
+                protected_keys=touched_keys,
+            )
 
             if applied:
                 logger.info(
@@ -487,6 +551,8 @@ class StockSnapshot:
     inst_net_buy:        int             = 0     # 기관 당일 순매수 수량
     investor_score:      int             = 0     # -1(둘다 매도) / 0(중립) / +1(둘다 매수)
     investor_updated_at: Optional[datetime] = None  # 마지막 수급 갱신 시각
+    trend_level:         int             = 0     # 요셉 시그널 추세 단계(0~3)
+    trend_prev_level:    int             = 0     # 직전 추세 단계(강세 소멸 감시용)
 
 
 @dataclass
@@ -497,6 +563,8 @@ class ScanSignal:
     price:            int
     reason:           str
     entry_candle_low: int = 0    # 진입 캔들 저가 → 손절가 기준
+    trend_level:      int = 0
+    trend_prev_level: int = 0
     generated_at:     datetime = field(default_factory=datetime.now)
 
 
@@ -567,6 +635,13 @@ class SnapshotStore:
         # [NEW] 일봉 캐시 추적 (2026-04-03)
         self._daily_data: dict[str, list[dict]] = {}   # code → 일봉 OHLCV 리스트 (최신순)
         self._daily_updated_at: dict[str, datetime] = {}  # code → 마지막 갱신 시각
+        # [수급 필터] opt10059 결과 캐시
+        self._inv_foreign: dict[str, int] = {}
+        self._inv_inst: dict[str, int] = {}
+        self._inv_score: dict[str, int] = {}
+        self._inv_updated_at: dict[str, datetime] = {}
+        self._trend_level: dict[str, int] = {}         # code → 현재 추세 단계(0~3)
+        self._trend_prev_level: dict[str, int] = {}    # code → 직전 추세 단계
         self._lock = threading.Lock()
 
     # ── 일괄 적재 ─────────────────────────────────────────────────────────
@@ -634,7 +709,9 @@ class SnapshotStore:
                 keep = self._df["name"].astype(str).map(is_pure_equity_name)
                 for c in self._df.index[~keep].tolist():
                     for d in (self._mins, self._min_opens, self._min_highs, self._min_lows,
-                              self._min_vols, self._cur_open, self._cur_high, self._cur_low):
+                              self._min_vols, self._cur_open, self._cur_high, self._cur_low,
+                              self._trend_level, self._trend_prev_level,
+                              self._inv_foreign, self._inv_inst, self._inv_score, self._inv_updated_at):
                         d.pop(c, None)
                 self._df = self._df[keep]
             for code in new_df.index:
@@ -788,8 +865,22 @@ class SnapshotStore:
                 daily_closes  = daily_closes,  # [NEW] 일봉 종가 리스트 (최신순)
                 daily_high_prev = daily_high_prev,  # [NEW] 전일 고가
                 daily_low_prev  = daily_low_prev,   # [NEW] 전일 저가
+                foreign_net_buy = int(self._inv_foreign.get(code, 0)),
+                inst_net_buy    = int(self._inv_inst.get(code, 0)),
+                investor_score  = int(self._inv_score.get(code, 0)),
+                investor_updated_at = self._inv_updated_at.get(code),
+                trend_level   = int(self._trend_level.get(code, 0)),
+                trend_prev_level = int(self._trend_prev_level.get(code, 0)),
                 updated_at    = updated_at,
             )
+
+    def update_trend_level(self, code: str, trend_level: int) -> None:
+        """요셉 시그널 추세 레벨 갱신(0~3). 직전 단계도 함께 보관."""
+        level = int(max(0, min(3, trend_level)))
+        with self._lock:
+            prev = int(self._trend_level.get(code, 0))
+            self._trend_prev_level[code] = prev
+            self._trend_level[code] = level
 
     def update_chejan_strength(self, code: str, strength: float) -> None:
         """[NEW] 체결강도(FID 20) 갱신."""
@@ -842,18 +933,18 @@ class SnapshotStore:
           -1 : 외국인 AND 기관 모두 순매도 → 수급 비우호
         """
         with self._lock:
-            snap = self.get_snapshot(code)
-            if snap is None:
+            if code not in self._df.index:
                 return
-            snap.foreign_net_buy = foreign_net
-            snap.inst_net_buy    = inst_net
+            self._inv_foreign[code] = int(foreign_net)
+            self._inv_inst[code] = int(inst_net)
             if foreign_net > 0 and inst_net > 0:
-                snap.investor_score = 1
+                score = 1
             elif foreign_net < 0 and inst_net < 0:
-                snap.investor_score = -1
+                score = -1
             else:
-                snap.investor_score = 0
-            snap.investor_updated_at = datetime.now()   # noqa: DTZ005
+                score = 0
+            self._inv_score[code] = score
+            self._inv_updated_at[code] = datetime.now()   # noqa: DTZ005
 
     def set_min_candles(self, code: str, closes: list) -> None:
         """opt10080 등으로 가져온 분봉 종가 리스트를 초기값으로 설정한다."""
@@ -1873,7 +1964,37 @@ def check_jdm_entry(
         logger.debug(f"[신호필터] {snap.name}({snap.code}) [{_slot}] 체결강도 미달 — 현재 {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%")
         return None
 
-    from strategy.jang_dong_min import calc_ma, calc_rsi, calc_ema, calc_pivot_r2, check_daily_alignment
+    from strategy.jang_dong_min import (
+        calc_atr, calc_ema, calc_ma, calc_pivot_r2, calc_rsi, check_daily_alignment
+    )
+
+    # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
+    if getattr(cfg, "yosep_trend_enabled", True):
+        _min_trend = int(getattr(cfg, "yosep_min_trend_level", 1))
+        _trend_lv = int(getattr(snap, "trend_level", 0))
+        if _trend_lv < _min_trend:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "JDM_TREND",
+                f"요셉 추세 미달 — level {_trend_lv} < {_min_trend}",
+            )
+            return None
+
+        closes = list(snap.closes_1min or [])
+        highs = list(snap.highs_1min or [])
+        lows = list(snap.lows_1min or [])
+        _ema_p = int(getattr(cfg, "yosep_ema_period", 20))
+        _atr_p = int(getattr(cfg, "yosep_atr_period", 14))
+        _down_mult = float(getattr(cfg, "yosep_downtrend_block_atr", 0.8))
+        if len(closes) >= _ema_p and len(highs) >= _atr_p + 1 and len(lows) >= _atr_p + 1:
+            ema20 = calc_ema(closes, _ema_p)
+            atr14 = calc_atr(highs, lows, closes, _atr_p)
+            if ema20 is not None and atr14 is not None and atr14 > 0:
+                if snap.current_price < (ema20 - atr14 * _down_mult):
+                    ScannerLogger.rejected(
+                        snap.code, snap.name, "JDM_TREND_DOWN",
+                        f"하락 추세 강세 — 현재가 {snap.current_price:,} < EMA{_ema_p} {ema20:,.0f} - ATR{_atr_p}×{_down_mult:.1f}",
+                    )
+                    return None
 
     if _lite_mode:
         # ── OPENING 라이트 모드 (09:08~09:16, MA7만 사용) ──────────────────
@@ -2268,6 +2389,22 @@ class SmartScanner:
         if not (self.cfg.entry_start_time <= now <= self.cfg.entry_end_time):
             return
 
+        # ②-bis 요셉 시그널 추세 단계 갱신 (분 단위 1회)
+        if getattr(self.cfg, "yosep_trend_enabled", True):
+            from strategy.jang_dong_min import get_trend_status
+            trend_level = get_trend_status(
+                closes=list(snap.closes_1min or []),
+                highs=list(snap.highs_1min or []),
+                lows=list(snap.lows_1min or []),
+                volumes=list(snap.volumes_1min or []),
+                ema_period=int(getattr(self.cfg, "yosep_ema_period", 20)),
+                atr_period=int(getattr(self.cfg, "yosep_atr_period", 14)),
+                volume_lookback=int(getattr(self.cfg, "yosep_volume_lookback", 20)),
+            )
+            snap.trend_prev_level = int(getattr(snap, "trend_level", 0))
+            snap.trend_level = int(trend_level)
+            self.store.update_trend_level(snap.code, trend_level)
+
         enabled = set(getattr(self.cfg, "enabled_strategies", ("BREAKOUT", "JDM_ENTRY")) or ())
         order = tuple(getattr(self.cfg, "strategy_order", ("BREAKOUT", "JDM_ENTRY")) or ())
 
@@ -2287,6 +2424,8 @@ class SmartScanner:
                 continue
 
             if sig is not None:
+                sig.trend_level = int(getattr(snap, "trend_level", 0))
+                sig.trend_prev_level = int(getattr(snap, "trend_prev_level", 0))
                 self._emit(sig)
                 # 같은 분 다중 전략 동시 진입 방지: 우선순위 첫 통과 전략만 발행
                 return
@@ -2420,6 +2559,8 @@ class SmartScanner:
             # [NEW] 포지션 종목 현재가 실시간 반영 (손절/익절 정확도 개선)
             if self._order_mgr and code in self._order_mgr.positions and price > 0:
                 self._order_mgr.positions[code].current_price = price
+                if snap_now is not None and hasattr(self._order_mgr, "update_position_trend"):
+                    self._order_mgr.update_position_trend(code, int(getattr(snap_now, "trend_level", 0)))
 
             # watch_q.refresh — SetRealReg/Remove를 매 틱 호출하면 API 과부하
             # 30초 간격으로만 구독 목록을 갱신한다 (유니버스 감시 중단 중은 스킵)

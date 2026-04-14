@@ -392,6 +392,7 @@ class HeaderBar(QWidget):
     # 자동매매 ON/OFF 상태 변경 시 MainWindow 로 전달
     auto_trade_toggled = pyqtSignal(bool)   # True = 시작, False = 정지
     exit_requested = pyqtSignal()           # 프로그램 종료 요청
+    unlock_requested = pyqtSignal()         # 일일 손익 락 수동 해제 요청
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -434,6 +435,13 @@ class HeaderBar(QWidget):
         self._btn_exit.setFixedSize(75, 30)
         self._btn_exit.clicked.connect(self._on_exit_clicked)
 
+        # ── 일일 손익 락 해제 버튼 ─────────────────────────────────────
+        self._btn_unlock = QPushButton("🔓 락 해제")
+        self._btn_unlock.setObjectName("btn_unlock")
+        self._btn_unlock.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        self._btn_unlock.setFixedSize(85, 30)
+        self._btn_unlock.clicked.connect(self._on_unlock_clicked)
+
         lay.addWidget(self._lbl_title)
         lay.addStretch()
         lay.addWidget(self._divider())
@@ -446,6 +454,7 @@ class HeaderBar(QWidget):
         lay.addWidget(self._lbl_pnl)
         lay.addWidget(self._divider())
         lay.addWidget(self._btn_auto)
+        lay.addWidget(self._btn_unlock)
         lay.addWidget(self._btn_restart)
         lay.addWidget(self._btn_exit)
 
@@ -487,6 +496,10 @@ class HeaderBar(QWidget):
     def _on_exit_clicked(self) -> None:
         """프로그램 종료 버튼 클릭"""
         self.exit_requested.emit()
+
+    def _on_unlock_clicked(self) -> None:
+        """일일 손익 락 수동 해제 요청."""
+        self.unlock_requested.emit()
 
     def set_connected(self, account: str, mode: str) -> None:
         self._lbl_account.setText(f"계좌: {account}")
@@ -1460,6 +1473,9 @@ class MainWindow(QMainWindow):
         from scanner.smart_scanner import SmartScanner, SmartScannerConfig, SnapshotStore
         self._snap_store = SnapshotStore()
         self._scan_cfg   = SmartScannerConfig.from_adaptive("config/adaptive_params.json")
+        _yosep_preset = str(STRATEGY.get("yosep_preset", "") or "").strip().lower()
+        if _yosep_preset:
+            self._scan_cfg.apply_yosep_preset(_yosep_preset)
         self._scan_cfg.max_change_pct = float(_RISK.get("max_change_pct", 15.0))
         self._scan_cfg.signal_cooldown_sec = float(
             _RISK.get("signal_cooldown_sec", 45.0)
@@ -1526,6 +1542,7 @@ class MainWindow(QMainWindow):
         self._auto_trading: bool = False   # 기본값: 정지 상태
         self.header.auto_trade_toggled.connect(self._on_auto_trade_toggle)
         self.header.exit_requested.connect(self.close)
+        self.header.unlock_requested.connect(self._on_manual_unlock_requested)
 
         # 버튼 연결 확인 로그
         self.log_panel.append(
@@ -1615,6 +1632,7 @@ class MainWindow(QMainWindow):
         self._closed_today:       bool = False
         self._feedback_done_today: bool = False
         self._feedback_thread = None   # GC 방지용 참조
+        self._manual_unlock_active: bool = False  # True면 당일 손익락 자동 재발동을 일시 무시
 
         # ── 일일 손익 한도 락 ──────────────────────────────────────────────
         self._new_entry_locked:    bool = False  # True → 신규 매수 신호 차단
@@ -1902,6 +1920,7 @@ class MainWindow(QMainWindow):
             self._feedback_done_today = False
             self._new_entry_locked    = False
             self._daily_loss_cut_done = False
+            self._manual_unlock_active = False
 
         # 장 시간 중 일일 손익 한도 체크 (매 분 실행)
         self._check_daily_pnl_limits()
@@ -1920,6 +1939,10 @@ class MainWindow(QMainWindow):
         now = datetime.now().time()
         # 09:00~15:20 장 시간 중에만 체크
         if not (time(9, 0) <= now <= time(15, 20)):
+            return
+
+        # 사용자가 수동 해제한 당일에는 자동 재락을 건너뛴다.
+        if self._manual_unlock_active:
             return
 
         cfg = self._scan_cfg
@@ -2088,6 +2111,26 @@ class MainWindow(QMainWindow):
         self.log_panel.append(
             f"[상태] auto_trading={self._auto_trading} "
             f"SnapshotStore={len(self._snap_store)}종목"
+        )
+
+    @pyqtSlot()
+    def _on_manual_unlock_requested(self) -> None:
+        """
+        사용자 수동 개입으로 일일 손익 락을 해제한다.
+        - _new_entry_locked: 신규 매수 차단 플래그
+        - _daily_loss_cut_done: 손절 한도 1회 발동 플래그
+        """
+        prev_locked = self._new_entry_locked
+        prev_cut_done = self._daily_loss_cut_done
+        self._new_entry_locked = False
+        self._daily_loss_cut_done = False
+        self._manual_unlock_active = True
+        self.log_panel.append(
+            "🔓 [수동해제] 일일 손익 락 해제 완료 — 금일 자동 재락 일시 중단"
+        )
+        logger.warning(
+            "[PnlLock] 수동 해제: locked %s→False, loss_cut_done %s→False, manual_unlock_active=True",
+            prev_locked, prev_cut_done
         )
 
     @pyqtSlot(float)
@@ -2517,6 +2560,20 @@ class MainWindow(QMainWindow):
                         )
                         self.order_mgr.sell(code, pos.name, sell_qty, price=0)
                         continue
+
+            # ━━━ 요셉 시그널 추세 소멸 익절: Strong(3) → No Trend(0) ━━━
+            # 추세가 꺾일 때 이익을 잠그는 보조 청산. 손실 구간에서는 강제하지 않음.
+            if chg > 0 and self.order_mgr.should_exit_on_trend_decay(code):
+                self.log_panel.append(
+                    f"🟡 [추세소멸익절] {pos.name}({code}) Strong→No Trend 전환, 수익 {chg:+.2f}% — {sell_qty}주 청산"
+                )
+                self._audit.log_sell_decision(
+                    code,
+                    f"요셉 추세소멸익절 Strong→NoTrend (수익 {chg:+.2f}%)",
+                    pos.current_price,
+                )
+                self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                continue
 
             # ━━━ Time-cut: 설정값(time_cut_minutes) 경과 시 수익률 무관 전량 청산 (안전망) ━━━
             _time_cut_min = getattr(self._scan_cfg, "time_cut_minutes", 25)
