@@ -1439,6 +1439,8 @@ class MainWindow(QMainWindow):
             parent=self
         )
         self.order_mgr._audit = self._audit
+        # [800033] 매도가능수량 부족 에러 → 포지션 메모리 정리 콜백
+        self._kiwoom._on_order_msg_cb = self.order_mgr.on_order_msg
         self.order_mgr.order_sent.connect(
             lambda d: self.log_panel.append(
                 f"{d['side']} 주문 전송 — {d['name']}({d['code']}) "
@@ -2359,7 +2361,7 @@ class MainWindow(QMainWindow):
         - 트레일 스탑: 고점(peak_price) 대비 trail_pct% 하락 시 전량 매도
             · trail_activation_pct 이상 수익 달성 시 활성화
             · 수익 구간별 trail_pct 차등 (tier1/2/3)
-        - Time-cut: 40분 경과 → 수익률 무관 전량 강제 청산 (안전망)
+        - Time-cut: time_cut_minutes(기본 25분) 경과 → 수익률 무관 전량 강제 청산 (안전망)
         """
         import time as _time
         from datetime import datetime as _datetime
@@ -2516,11 +2518,12 @@ class MainWindow(QMainWindow):
                         self.order_mgr.sell(code, pos.name, sell_qty, price=0)
                         continue
 
-            # ━━━ Time-cut: 40분 경과 시 수익률 무관 전량 청산 (안전망) ━━━
+            # ━━━ Time-cut: 설정값(time_cut_minutes) 경과 시 수익률 무관 전량 청산 (안전망) ━━━
+            _time_cut_min = getattr(self._scan_cfg, "time_cut_minutes", 25)
             entry_time = getattr(pos, "entry_time", None)
             if entry_time:
                 elapsed_min = (now_dt - entry_time).total_seconds() / 60
-                if elapsed_min >= 40:
+                if elapsed_min >= _time_cut_min:
                     self.log_panel.append(
                         f"⏱️ [Time-cut] {pos.name}({code}) {elapsed_min:.0f}분 경과, 수익 {chg:+.2f}% — {sell_qty}주 강제 청산"
                     )

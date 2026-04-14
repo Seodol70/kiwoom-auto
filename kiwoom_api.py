@@ -230,6 +230,9 @@ class KiwoomManager:
         # TR 레이트 리미터 — 1초 4회 / 0.25초 간격 보장
         self._tr_limiter = TRRateLimiter()
 
+        # OnReceiveMsg 외부 콜백 — OrderManager가 [800033] 등 주문 에러를 처리하기 위해 사용
+        self._on_order_msg_cb: Optional[callable] = None
+
         self._connect_signals()
 
     # -----------------------------------------------------------------------
@@ -447,7 +450,10 @@ class KiwoomManager:
         self._set_input("비밀번호",    "")
         self._set_input("비밀번호입력매체구분", "00")
         self._set_input("조회구분",    "2")
-        self._comm_rq(TR_ACCOUNT, "balance", "2000")
+        ok = self._comm_rq(TR_ACCOUNT, "balance", "2000")
+        if not ok:
+            logger.warning("get_balance TR 차단됨 — 잔고 조회 생략")
+            return {"cash": 0, "stock_value": 0, "total": 0, "pnl": 0, "pnl_pct": 0.0}
 
         d = self._tr_data
         cash = safe_int(d.get("예수금"))
@@ -461,7 +467,7 @@ class KiwoomManager:
         if total == 0 or invest == 0:
             # holdings TR로 보완
             holdings = self.get_holdings()
-            invest = sum(h["avg_price"] * h["qty"] for h in holdings)
+            invest = sum(h.get("avg_price", 0) * h["qty"] for h in holdings)
             stock_value = sum(h["current_price"] * h["qty"] for h in holdings)
             total = cash + stock_value
 
@@ -490,7 +496,10 @@ class KiwoomManager:
         self._set_input("비밀번호입력매체구분", "00")
         self._set_input("시작일자", ds)
         self._set_input("종료일자", ds)
-        self._comm_rq(TR_DAILY_REALIZED, "daily_realized", "2002")
+        ok = self._comm_rq(TR_DAILY_REALIZED, "daily_realized", "2002")
+        if not ok:
+            logger.warning("opt10074 TR 차단됨 — 당일 실현손익 동기화 생략")
+            return None
         d = self._tr_data
         if not d:
             logger.warning("opt10074 응답 없음 — 당일 실현손익 동기화 생략")
@@ -592,7 +601,10 @@ class KiwoomManager:
         self._set_input("비밀번호",    "")
         self._set_input("비밀번호입력매체구분", "00")
         self._set_input("조회구분",    "1")
-        self._comm_rq(TR_HOLDINGS, "holdings", "2001")
+        ok = self._comm_rq(TR_HOLDINGS, "holdings", "2001")
+        if not ok:
+            logger.warning("get_holdings TR 차단됨 — 보유잔고 조회 생략")
+            return []
 
         return self._tr_data.get("rows", [])
 
@@ -679,7 +691,7 @@ class KiwoomManager:
     def _set_input(self, key: str, value: str) -> None:
         self._ocx.dynamicCall("SetInputValue(QString, QString)", key, value)
 
-    def _comm_rq(self, tr_code: str, rq_name: str, screen_no: str, prev_next: int = 0) -> None:
+    def _comm_rq(self, tr_code: str, rq_name: str, screen_no: str, prev_next: int = 0) -> bool:
         """
         TR 요청 후 응답 이벤트를 QEventLoop으로 대기 (Qt 이벤트 처리 유지).
 
@@ -689,20 +701,26 @@ class KiwoomManager:
         재진입(reentrant) 방지: QEventLoop.exec_() 중 다른 타이머 콜백이 TR을 다시
         호출하면 self._tr_loop를 덮어써서 교착 상태가 발생한다.
         _tr_busy 플래그로 중첩 호출을 차단한다.
+
+        반환값: True = 요청이 정상 실행됨, False = 재진입 차단 또는 CommRqData 실패
+        호출자는 False 반환 시 self._tr_data를 읽으면 안 됨 (stale 데이터 위험).
         """
         # ── 재진입 방지 ──────────────────────────────────────────────────────
+        # _tr_busy 확인 먼저 — 차단 시 _tr_data를 건드리지 않음
+        # (외부 호출의 exec_() 복귀 직전에 _tr_data를 초기화하면 레이스 발생)
         if self._tr_busy:
             logger.warning(
                 "[TR] 재진입 차단 — %s 요청 거부 (현재 '%s' 처리 중)",
                 rq_name, self._tr_current_rq,
             )
-            return
+            return False
+
+        # 새 요청 시작 전에만 초기화
+        self._tr_data = {}
+        self._tr_prev_next = ""
 
         # 레이트 리미터 — 호출 간격 / 초당 횟수 보장
         self._tr_limiter.acquire()
-
-        self._tr_data = {}
-        self._tr_prev_next = ""
         logger.debug("[CommRqData] tr=%s rq=%s prev_next=%d screen=%s", tr_code, rq_name, prev_next, screen_no)
 
         ret = self._ocx.dynamicCall(
@@ -711,7 +729,7 @@ class KiwoomManager:
         )
         if ret != ReturnCode.OK:
             logger.error("CommRqData 실패 — tr=%s ret=%d", tr_code, ret)
-            return
+            return False
 
         self._tr_busy = True
         self._tr_current_rq = rq_name
@@ -727,6 +745,7 @@ class KiwoomManager:
         finally:
             self._tr_busy = False
             self._tr_current_rq = ""
+        return True
 
     def _get_comm_data(self, tr_code: str, rq_name: str, index: int, field: str) -> str:
         return self._ocx.dynamicCall(
@@ -842,6 +861,11 @@ class KiwoomManager:
 
     def _on_receive_msg(self, _screen: str, rq_name: str, tr_code: str, msg: str) -> None:
         logger.info("[MSG] rq=%s tr=%s → %s", rq_name, tr_code, msg)
+        if self._on_order_msg_cb:
+            try:
+                self._on_order_msg_cb(rq_name, msg)
+            except Exception as _e:
+                logger.debug("[MSG 콜백 오류] %s", _e)
 
     def _on_receive_chejan_data(self, gubun: str, item_cnt: int, fid_list: str) -> None:
         """체결/잔고 이벤트 — 필요 시 확장"""
@@ -1093,9 +1117,10 @@ class MockKiwoomManager:
     def _set_input(self, key: str, value: str) -> None:
         pass
 
-    def _comm_rq(self, tr_code: str, rq_name: str, screen_no: str, prev_next: int = 0) -> None:
+    def _comm_rq(self, tr_code: str, rq_name: str, screen_no: str, prev_next: int = 0) -> bool:
         self._tr_prev_next = ""
         self._tr_data: dict = {"rows": []}
+        return True
 
     def get_stock_info(self, code: str) -> dict:
         return {"name": "Mock종목", "current_price": 0, "change_pct": 0.0}

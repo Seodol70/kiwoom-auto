@@ -192,9 +192,17 @@ class OrderManager(QObject):
         # 분할익절 체결 대기 — 이 코드의 다음 sell 체결은 is_partial=True 로 기록
         self._partial_pending_codes: set[str] = set()
 
+        # FID 911(체결량)은 주문 내 누적 체결량으로 전달됨 → 증분 계산을 위해 이전값 추적
+        # {order_no: last_cumulative_qty}
+        self._order_fill_cumulative: dict[str, int] = {}
+
         # [NEW] 당일 손절 블랙리스트 — 손절 체결 종목은 당일 재매수 차단 (2026-04-08)
         # 익절·Time-cut·수동 매도는 포함하지 않음 → 재진입 허용
         self._stop_loss_today: set[str] = set()
+
+        # 강제 매도(Hard Stop / Time-cut / 청산) 발령 중인 종목 추적
+        # → 체결 전까지 중복 force_exit 발령 차단 (무한루프 방지)
+        self._force_sell_issued: set[str] = set()
 
         # 포지션 실시간 현재가 구독 콜백 (SmartScanner에서 주입)
         self.on_position_opened: Optional[Callable[[str], None]] = None
@@ -204,6 +212,44 @@ class OrderManager(QObject):
         self._audit = None
 
         self._connect_chejan()
+
+    # -----------------------------------------------------------------------
+    # 주문 메시지 콜백 (OnReceiveMsg → kiwoom_api → 여기)
+    # -----------------------------------------------------------------------
+
+    def on_order_msg(self, rq_name: str, msg: str) -> None:
+        """
+        키움 OnReceiveMsg 콜백 — 주문 수신 결과 처리.
+        [800033] 매도가능수량 부족: 포지션이 서버에 없음 → 로컬 메모리 정리.
+        """
+        if "800033" not in msg:
+            return
+
+        # rq_name 형식: "매도_XXXXXX"
+        if not rq_name.startswith("매도_"):
+            return
+
+        code = rq_name[len("매도_"):]
+        logger.warning(
+            "[800033] %s 매도가능수량 부족 — 포지션 메모리 정리 (서버에 해당 수량 없음)",
+            code,
+        )
+
+        # 강제 매도 발령 해제 → 재시도 허용하지 않음 (포지션 없으니)
+        self._force_sell_issued.discard(code)
+        self._pending.discard(code)
+        self._pending_sell_time.pop(code, None)
+        self._failed_sells.pop(code, None)
+
+        # 로컬 포지션 제거 — 서버에 없는 포지션이므로
+        pos = self.positions.pop(code, None)
+        if pos is not None:
+            logger.warning(
+                "[800033] %s 포지션 메모리 삭제 — qty=%d (FID911 오버카운트 등 원인)",
+                code, pos.qty,
+            )
+            if self.on_position_closed:
+                self.on_position_closed(code)
 
     # -----------------------------------------------------------------------
     # 잔고 동기화
@@ -219,12 +265,28 @@ class OrderManager(QObject):
             balance = self._kiwoom.get_balance()
             server_cash = balance.get("cash", 0)
 
+            # TR이 차단된 경우(재진입 방지) balance가 빈 dict → 잔고 갱신 스킵
+            if not balance:
+                import logging as _lg
+                _lg.getLogger(__name__).debug("sync_balance: TR 처리 중 — 잔고 동기화 스킵")
+                return self.cash
+
             holdings = self._kiwoom.get_holdings()
+
+            # 홀딩 조회도 차단된 경우 — 포지션을 빈 목록으로 덮어쓰지 않음
+            if not holdings and self.positions:
+                import logging as _lg
+                _lg.getLogger(__name__).debug("sync_balance: TR 처리 중 — 포지션 동기화 스킵")
+                # 예수금만 최신화
+                invested = sum(p.avg_price * p.qty for p in self.positions.values())
+                self.cash = max(0, server_cash - invested)
+                return self.cash
+
             # opw00018 모의투자 서버는 매입가 필드를 반환하지 않음 → 기존 메모리값 보존
             new_positions: dict[str, Position] = {}
             for h in holdings:
                 code = h["code"]
-                avg = h["avg_price"]
+                avg = h.get("avg_price", 0)
                 if avg == 0 and code in self.positions:
                     avg = self.positions[code].avg_price
                 old = self.positions.get(code)
@@ -590,6 +652,18 @@ class OrderManager(QObject):
         Returns:
             주문번호 (실패 시 "0")
         """
+        # 이미 강제 매도 발령 중 → 체결 대기 (중복 발령 차단)
+        if code in self._force_sell_issued:
+            logger.debug("[force_exit] %s 이미 발령 중 — 중복 스킵", code)
+            return "0"
+
+        # 포지션 실제 수량 재확인 — [800033] 이후 유령 포지션 방지
+        pos = self.positions.get(code)
+        if pos is None or pos.qty <= 0:
+            logger.info("[force_exit] %s 포지션 없음 — 스킵 (이미 청산됨)", code)
+            self._force_sell_issued.discard(code)
+            return "0"
+
         try:
             # _pending 체크 없이 바로 주문 시도
             order_id = self._send(OrderType.SELL, code, name, qty, price=0)
@@ -600,6 +674,7 @@ class OrderManager(QObject):
                 )
                 # pending에 수동으로 추가 (체결 콜백 대기)
                 self._pending.add(code)
+                self._force_sell_issued.add(code)
                 return order_id
             else:
                 logger.error("[force_exit] %s(%s) 주문 실패 — 사유: %s", name, code, reason)
@@ -614,6 +689,13 @@ class OrderManager(QObject):
         now = datetime.now()
 
         for code, info in list(self._failed_sells.items()):
+            # 포지션이 이미 청산됐으면 재시도 불필요 — 메모리에서 제거
+            pos = self.positions.get(code)
+            if pos is None or pos.qty <= 0:
+                logger.info("[손절 재주문 취소] %s 포지션 없음 — 재시도 목록에서 제거", code)
+                del self._failed_sells[code]
+                continue
+
             elapsed = (now - info["last_time"]).total_seconds()
 
             # 10초 경과 → 재주문
@@ -628,12 +710,13 @@ class OrderManager(QObject):
                     del self._failed_sells[code]
                     continue
 
+                sell_qty = pos.qty  # 현재 실제 보유 수량으로 재확인
                 logger.info(
                     "[손절 재주문] %s %d주 — %d차 시도",
-                    code, info["qty"], attempt
+                    code, sell_qty, attempt
                 )
                 # 종목명이 없으므로 코드로만 매도 시도
-                ret = self._send(OrderType.SELL, code, code, info["qty"], price=0)
+                ret = self._send(OrderType.SELL, code, code, sell_qty, price=0)
                 if ret and ret != "0":
                     del self._failed_sells[code]  # 성공 → 제거
                 else:
@@ -767,16 +850,21 @@ class OrderManager(QObject):
             logger.error(msg)
             self.order_failed.emit(msg)
             # [NEW] 매도 주문 실패 시 미체결 추적 (2026-04-04)
+            # 포지션이 없거나 수량이 0이면 추적 불필요 (이미 청산됨)
             if order_type == OrderType.SELL:
-                self._failed_sells[code] = {
-                    "qty": qty,
-                    "attempts": 0,
-                    "last_time": datetime.now(),
-                }
-                logger.warning(
-                    "[미체결 추적] %s(%s) %d주 매도 — 10초 후 재주문 시도",
-                    name, code, qty
-                )
+                _pos = self.positions.get(code)
+                if _pos and _pos.qty > 0:
+                    self._failed_sells[code] = {
+                        "qty": _pos.qty,  # 실제 보유 수량 기준 (overcounting 방지)
+                        "attempts": 0,
+                        "last_time": datetime.now(),
+                    }
+                    logger.warning(
+                        "[미체결 추적] %s(%s) %d주 매도 — 10초 후 재주문 시도",
+                        name, code, _pos.qty
+                    )
+                else:
+                    logger.info("[미체결 추적 스킵] %s 포지션 없음 — 재시도 불필요", code)
             return ""
 
         self._pending.add(code)
@@ -837,11 +925,16 @@ class OrderManager(QObject):
         name        = cj(302)
         _raw_qty    = cj(911)
         _raw_price  = cj(910)
-        filled_qty  = abs(int(_raw_qty   or 0))
+        # FID 911 = 주문 내 누적 체결량 (이번 이벤트 단독 수량이 아님)
+        _cum_qty    = abs(int(_raw_qty   or 0))
         filled_price= abs(int(_raw_price or 0))
         order_no    = cj(9203)
-        logger.info("체결원시 — %s FID910(체결가)=%r FID911(체결량)=%r → price=%d qty=%d",
-                    name, _raw_price, _raw_qty, filled_price, filled_qty)
+        # 증분 체결량 = 누적 - 이전 누적
+        _prev_cum   = self._order_fill_cumulative.get(order_no, 0)
+        filled_qty  = max(0, _cum_qty - _prev_cum)
+        self._order_fill_cumulative[order_no] = _cum_qty
+        logger.info("체결원시 — %s FID910(체결가)=%r FID911(누적체결량)=%r 이전=%d → 증분=%d price=%d",
+                    name, _raw_price, _raw_qty, _prev_cum, filled_qty, filled_price)
         # FID 905 주문구분: "+매수"/"+매도" 문자열로 반환됨 (int 변환 불가)
         _ot_str = cj(905)
         if "매수" in _ot_str:
@@ -875,6 +968,8 @@ class OrderManager(QObject):
                 rem = self._app_pending_buys[code] - filled_qty
                 if rem <= 0:
                     del self._app_pending_buys[code]
+                    # 주문 완전 체결 → 누적 체결량 추적 정리
+                    self._order_fill_cumulative.pop(order_no, None)
                 else:
                     self._app_pending_buys[code] = rem
 
@@ -958,6 +1053,8 @@ class OrderManager(QObject):
                     if self.on_position_closed:
                         self.on_position_closed(code)
                     del self.positions[code]
+                    # 강제 매도 발령 해제 (체결 완료)
+                    self._force_sell_issued.discard(code)
                     # 매도 체결 완료 → 대기 중인 매수 신호 실행
                     if self._queued_signal is not None:
                         queued = self._queued_signal

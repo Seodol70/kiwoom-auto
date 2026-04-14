@@ -154,10 +154,10 @@ class SmartScannerConfig:
     jdm_ma_long:          int   = 15         # 최적화됨: 20→15
     jdm_rsi_low:          float = 35.0       # 레거시(다른 로직 참고용). 진입은 jdm_rsi_entry_min 사용
     jdm_rsi_high:         float = 70.0       # RSI 상한(과열 차단) — 과매수 구간 진입 금지
-    jdm_rsi_entry_min:    float = 60.0       # JDM 진입 RSI 하한 — 횡보·무기력 구간 배제
+    jdm_rsi_entry_min:    float = 52.0       # JDM 진입 RSI 하한 — 2026-04-13: 60→52 (상승 시작점 타점)
     jdm_min_ma_spread_abs: int = 30          # [deprecated] MA 이격(원) — 레거시 호환성 유지
     jdm_ma_spread_pct:    float = 0.3        # MA 이격 비율(%) 하한 — 골든크로스 직후 확인
-    jdm_ma_spread_max_pct: float = 2.5      # MA 이격 비율(%) 상한 — 초과 시 이미 과열 (고점 방지)
+    jdm_ma_spread_max_pct: float = 3.5      # MA 이격 비율(%) 상한 — 2026-04-13: 2.5→3.5 (골든크로스 직후 허용 범위 확장)
     jdm_take_profit_pct:  float = 3.0        # 익절 목표 (최적화됨: 4.0%→3.0%)
     jdm_stop_loss_pct:    float = -1.2       # 손절 기준 — config RISK.stop_loss_pct 와 동기화 (2026-04-07)
     # [NEW] 2026-04-03 수급 절대치 필터 — 소외주 거르기 (2026-04-04 강화: 대장주 집중)
@@ -192,7 +192,7 @@ class SmartScannerConfig:
     max_disparity_pct:    float = 5.0               # MA20 이격도 상한 (%)
     # [NEW] OR 전략 + 공격형 필터
     prev_close_min_ratio: float = 0.98              # 조건A: V자반등 최소 비율 (시가 대비 -2% 이내)
-    entry_open_surge_max: float = 3.5              # 2026-04-08: 2.0% → 3.5% (breakout_ratio 완화에 맞춰 상향)
+    entry_open_surge_max: float = 4.0              # 2026-04-13: 3.5→4.0% (손절 데이터 분석 후 재조정 — 4%+ 진입 손절 집중)
     vi_approach_chg_pct:  float = 7.0               # 조건B: VI 직전 등락률 기준 (%)
     volume_1min_surge_mult: float = 1.5             # 최근 1분 거래량 급증 배수 (직전 10분 평균 대비) — 2026-04-03 재강화: 1.1→1.5배(150%)
     volume_surge_lookback: int = 10                 # 직전 N분 평균 계산 구간
@@ -215,8 +215,8 @@ class SmartScannerConfig:
     slippage_block_pct:      float = 3.0   # 직전 1분봉 종가 대비 현재 1분봉 상승 차단 상한 (%)
     ema_disp_short:          int   = 10    # EMA 이격도 계산 단기 기간
     ema_disp_long:           int   = 20    # EMA 이격도 계산 장기 기간
-    ema_disp_max_pct:        float = 3.0   # EMA10/EMA20 이격 상한 (%) — 초과 시 추격매수 차단
-    price_ema_disp_max_pct:  float = 3.0   # 현재가/EMA10 이격 상한 (%) — 초과 시 추격매수 차단
+    ema_disp_max_pct:        float = 4.5   # EMA10/EMA20 이격 상한 (%) — 2026-04-13: 3.0→4.5 (RSI 52 구간 EMA 이격 허용)
+    price_ema_disp_max_pct:  float = 4.0   # 현재가/EMA10 이격 상한 (%) — 2026-04-13: 3.0→4.0 (단기 급등 기준 완화)
     # [NEW] 시간대별 매수 조건 차등화 (2026-04-08)
     # 구간 경계: OPENING(09:05~09:30) / MORNING(09:30~11:00) / MIDDAY(11:00~13:00) / AFTERNOON(13:00~14:30)
     # entry_start_time(09:05), ma_alignment_time(09:30), entry_end_time(14:30) 은 기존 파라미터 재활용
@@ -226,34 +226,36 @@ class SmartScannerConfig:
     max_change_pct_opening:   float = 20.0   # 09:05~09:30 장초반
     max_change_pct_morning:   float = 15.0   # 09:30~11:00 핵심 오전
     max_change_pct_midday:    float = 12.0   # 11:00~13:00 점심
-    max_change_pct_afternoon: float = 8.0    # 13:00~14:30 오후 고점 차단
+    max_change_pct_afternoon: float = 10.0   # 13:00~14:30 오후 — 2026-04-13: 8→10% (오후 종목 허용 범위 확장)
     # 구간별 체결강도 하한 (%)
     min_chejan_strength_opening:   float = 110.0
     min_chejan_strength_morning:   float = 120.0
     min_chejan_strength_midday:    float = 130.0
-    min_chejan_strength_afternoon: float = 140.0
+    min_chejan_strength_afternoon: float = 130.0  # 2026-04-13: 140→130% (MIDDAY 수준으로 완화)
     # 구간별 거래량 급증 배수 (직전 N분 평균 대비)
     volume_surge_mult_opening:   float = 1.2
     volume_surge_mult_morning:   float = 1.5
     volume_surge_mult_midday:    float = 2.0
-    volume_surge_mult_afternoon: float = 2.5
+    volume_surge_mult_afternoon: float = 2.0   # 2026-04-13: 2.5→2.0 (MIDDAY 수준으로 완화)
     # 구간별 RSI 진입 하한
-    jdm_rsi_entry_min_opening:   float = 55.0
-    jdm_rsi_entry_min_morning:   float = 60.0
-    jdm_rsi_entry_min_midday:    float = 63.0
-    jdm_rsi_entry_min_afternoon: float = 65.0
+    jdm_rsi_entry_min_opening:   float = 50.0  # 2026-04-13: 55→50 (장초반 빠른 포착)
+    jdm_rsi_entry_min_morning:   float = 52.0  # 2026-04-13: 60→52 (핵심 오전 타점 앞당김)
+    jdm_rsi_entry_min_midday:    float = 55.0  # 2026-04-13: 63→55 (점심 기준 동기화)
+    jdm_rsi_entry_min_afternoon: float = 58.0  # 2026-04-13: 65→58 (오후 완화, 보수적 유지)
     # [P2] 구간별 익절 목표 (%) — (레거시, 트레일 스탑으로 대체)
     tp_pct_opening:   float = 2.0
     tp_pct_morning:   float = 2.5
     tp_pct_midday:    float = 3.0
     tp_pct_afternoon: float = 3.5
     # [Trail] 고점 추적 트레일링 스탑 파라미터
-    trail_activation_pct: float = 0.5   # 트레일 시작 최소 이익(%) — 이 이상 수익 달성 시 peak 추적 시작
-    trail_pct_tier1:      float = 1.0   # 수익 < tier1_max 구간 트레일 폭 (%)
+    trail_activation_pct: float = 1.0   # 트레일 시작 최소 이익(%) — 2026-04-13: 0.57→1.0 (소폭 수익 구간 조기 청산 방지)
+    trail_pct_tier1:      float = 1.5   # 수익 < tier1_max 구간 트레일 폭 (%) — 2026-04-13: 1.1→1.5
     trail_tier1_max:      float = 1.5   # tier1/tier2 경계 (%)
     trail_pct_tier2:      float = 1.5   # 수익 tier1_max ~ tier2_max 구간
     trail_tier2_max:      float = 3.0   # tier2/tier3 경계 (%)
     trail_pct_tier3:      float = 2.0   # 수익 tier2_max 이상 구간 (크게 올랐을 때 여유)
+    # [NEW] 보유 시간 상한 (타임컷)
+    time_cut_minutes:     int   = 25   # 2026-04-13: 40→25 (타임컷 단축 — 추세 꺾인 종목 조기 청산)
     # [NEW] 전략 실험 옵션
     # 활성 전략 목록: "BREAKOUT", "JDM_ENTRY" 중 선택
     enabled_strategies: tuple[str, ...] = ("BREAKOUT", "JDM_ENTRY")
@@ -2390,7 +2392,10 @@ class SmartScanner:
             low   = safe_int(fid(18))
             open_ = safe_int(fid(16))
             pct   = safe_float(fid(12))
-            strength = safe_float(fid(20))    # [NEW] FID 20: 체결강도
+            strength_raw = safe_float(fid(20))    # [NEW] FID 20: 체결강도
+            # FID 20은 일부 상황에서 실제값의 100배로 반환됨 (e.g., 91818 → 918.18%)
+            # 10000 이상이면 100으로 나눠서 정규화
+            strength = strength_raw / 100.0 if strength_raw >= 10000.0 else strength_raw
 
             if price <= 0:
                 return   # 유효하지 않은 체결 데이터
@@ -2846,9 +2851,17 @@ class SmartScanner:
         """
         opt10059를 QTimer.singleShot 체인으로 1종목씩 비동기 처리한다.
         350ms 간격 → 최대 30종목 × 0.35s ≈ 10.5초 (TR 레이트 리미터 내).
+
+        다른 TR(잔고·캔들·opt10030)이 처리 중이면 해당 종목을 건너뛴다.
         """
         if idx >= len(codes):
             logger.info("[수급갱신] 완료 — %d종목 처리", len(codes))
+            return
+
+        # 다른 고우선순위 TR이 처리 중이면 이 종목 스킵 후 다음으로
+        if getattr(self._kiwoom, "_tr_busy", False):
+            logger.debug("[수급갱신] TR 처리 중 — %s 스킵", codes[idx])
+            QTimer.singleShot(500, lambda: self._refresh_investor_data_async(codes, idx + 1))
             return
 
         code = codes[idx]
