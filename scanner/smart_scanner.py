@@ -199,7 +199,10 @@ class SmartScannerConfig:
     ma_alignment_time:    dtime = dtime(9, 30, 0)  # 이 시각 이후엔 MA 정배열 확인
     # [NEW] 일봉 정배열 + 피봇 R2 설정 (2026-04-03)
     pivot_r2_enabled:     bool = True               # 피봇 R2 돌파 조건 활성화
-    daily_alignment_enabled: bool = True            # 일봉 정배열 조건 활성화
+    daily_alignment_enabled: bool = True            # 일봉 정배열 조건 활성화 (5MA>10MA>20MA)
+    daily_ma20_filter_enabled: bool = True          # 일봉 20MA 가격 필터 (현재가 ≥ 20MA 강제)
+    daily_near_high_threshold_pct: float = 3.0      # 신고가 근처 판정 (25일 최고가 대비 %)
+    daily_near_high_tp_pct: float = 5.0             # 신고가 근처 종목 익절 목표 (기본보다 높게)
     daily_candle_refresh_min: int = 5               # 일봉 데이터 갱신 주기(분)
     # [NEW] 지수 등락률 기반 진입 차단 (2026-04-07)
     # index_block_pct: 코스피/코스닥 중 하나라도 이 값 이하면 신규 진입 신호 차단
@@ -231,7 +234,7 @@ class SmartScannerConfig:
     min_chejan_strength_opening:   float = 110.0
     min_chejan_strength_morning:   float = 120.0
     min_chejan_strength_midday:    float = 130.0
-    min_chejan_strength_afternoon: float = 130.0  # 2026-04-13: 140→130% (MIDDAY 수준으로 완화)
+    min_chejan_strength_afternoon: float = 150.0  # 2026-04-14: 130→150% (오후 BREAKOUT 전패 — 강화)
     # 구간별 거래량 급증 배수 (직전 N분 평균 대비)
     volume_surge_mult_opening:   float = 1.2
     volume_surge_mult_morning:   float = 1.5
@@ -261,6 +264,8 @@ class SmartScannerConfig:
     enabled_strategies: tuple[str, ...] = ("BREAKOUT", "JDM_ENTRY")
     # 평가/우선순위 (앞선 전략이 먼저 emit되면 같은 분의 후속 전략 평가는 중단)
     strategy_order: tuple[str, ...] = ("BREAKOUT", "JDM_ENTRY")
+    # 분당 최대 신호 발행 수 — 동시 다발 진입 방지 (1분에 최대 N종목)
+    max_entries_per_minute: int = 1
     # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
     yosep_trend_enabled: bool = True
     yosep_ema_period: int = 20
@@ -281,6 +286,22 @@ class SmartScannerConfig:
     partial_profit_enabled: bool  = True    # 분할 익절 활성화 여부
     partial_profit_pct:     float = 2.0     # 1차 분할 익절 트리거 수익률 (%)
     partial_sell_ratio:     float = 0.30    # 1차 분할 매도 비율 (30%)
+
+    # ── 종가매매(EOD) 모드 ────────────────────────────────────────────────────
+    # overnight_mode_enabled: True 시 14:40~14:55 EOD 진입 신호 활성화,
+    #   당일 15:19 강제청산에서 eod_trade 포지션 제외, 익일 09:00 갭 체크 후 관리.
+    overnight_mode_enabled:      bool  = False          # 종가매매 모드 활성화
+    eod_entry_start:             dtime = dtime(14, 40, 0)  # EOD 진입 시작 시각
+    eod_entry_end:               dtime = dtime(14, 55, 0)  # EOD 진입 종료 시각
+    eod_near_high_threshold_pct: float = 3.0            # 25일 신고가 근처 판정 (%)
+    eod_change_pct_min:          float = 2.0            # 당일 등락률 최소 (%) — 강세 확인
+    eod_change_pct_max:          float = 10.0           # 당일 등락률 최대 (%) — 과열 제외
+    eod_strength_min:            float = 115.0          # 체결강도 하한 (%)
+    eod_volume_ratio_min:        float = 1.5            # 전일 평균 대비 거래량 배수
+    eod_gap_up_exit_pct:         float = 2.0            # 익일 갭 상승 즉시 익절 기준 (%)
+    eod_gap_down_exit_pct:       float = -1.5           # 익일 갭 하락 즉시 손절 기준 (%)
+    eod_timecut_minutes:         int   = 30             # 익일 09:00 이후 타임컷 (분)
+    eod_timecut_min_pct:         float = 1.0            # 익일 타임컷 발동 전 최소 수익률 (%)
 
     # ── 본절가 스탑 (Breakeven Stop) ──────────────────────────────────────────
     # 분할 익절 완료 후 주가가 평단가 이하로 내려오면 잔여 수량 전량 즉시 청산.
@@ -566,6 +587,11 @@ class ScanSignal:
     trend_level:      int = 0
     trend_prev_level: int = 0
     generated_at:     datetime = field(default_factory=datetime.now)
+    # 일봉 맥락 — check_jdm_entry / _build_jdm_signal 에서 채워짐
+    near_daily_high:  bool  = False   # True → 25일 신고가 근처 (매물대 없음) → TP 상향
+    daily_ma20:       float = 0.0     # 일봉 20MA 값 (로그·감사용)
+    # 종가매매(EOD) 플래그 — overnight_mode_enabled 시 14:40~14:55 발생 신호에 설정
+    eod_trade:        bool  = False   # True → 당일 청산 제외, 익일 갭 체크 후 관리
 
 
 # ---------------------------------------------------------------------------
@@ -1813,6 +1839,106 @@ def check_opening_surge(
     )
 
 
+def check_eod_entry(
+    snap: "StockSnapshot",
+    cfg:  SmartScannerConfig,
+) -> Optional[str]:
+    """
+    종가매매(EOD) 진입 신호 판단.
+
+    진입 조건:
+      1. overnight_mode_enabled = True
+      2. 현재 시각이 eod_entry_start ~ eod_entry_end (기본 14:40~14:55)
+      3. 일봉 20MA 상방 (현재가 ≥ daily_ma20)
+      4. 25일 신고가 근처 (current_price ≥ high_25d × (1 - threshold%))
+      5. 일봉 정배열 (MA5 > MA10 > MA20)
+      6. 당일 등락률 eod_change_pct_min ~ eod_change_pct_max (기본 +2% ~ +10%)
+      7. 체결강도 ≥ eod_strength_min (기본 115%)
+      8. 거래량 ≥ 전일 평균 × eod_volume_ratio_min (기본 1.5배)
+
+    Returns:
+        신호 이유 문자열 (통과) 또는 None (차단)
+    """
+    if not getattr(cfg, "overnight_mode_enabled", False):
+        return None
+
+    now = datetime.now().time()
+    _start = getattr(cfg, "eod_entry_start", dtime(14, 40, 0))
+    _end   = getattr(cfg, "eod_entry_end",   dtime(14, 55, 0))
+    if not (_start <= now < _end):
+        return None
+
+    from strategy.jang_dong_min import get_daily_context, check_daily_alignment
+
+    # ① 일봉 20MA 상방 + 신고가 근처
+    _near_thr = float(getattr(cfg, "eod_near_high_threshold_pct", 3.0))
+    _dctx = get_daily_context(snap.daily_closes, snap.current_price, _near_thr)
+
+    if not _dctx["above_ma20"] and _dctx["daily_ma20"] > 0:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "EOD_MA20",
+            f"일봉 20MA 하방 — 현재가 {snap.current_price:,} < 20MA {_dctx['daily_ma20']:,.0f}",
+        )
+        return None
+
+    if not _dctx["near_high"]:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "EOD_NEAR_HIGH",
+            f"25일 신고가 근처 아님 — 현재가 {snap.current_price:,}, "
+            f"25일고가 {_dctx['high_25d']:,.0f} (기준 -{_near_thr:.1f}%)",
+        )
+        return None
+
+    # ② 일봉 정배열
+    if not check_daily_alignment(snap.daily_closes):
+        ScannerLogger.rejected(
+            snap.code, snap.name, "EOD_ALIGN",
+            f"일봉 정배열 미충족 (5MA > 10MA > 20MA)",
+        )
+        return None
+
+    # ③ 당일 등락률
+    _chg_min = float(getattr(cfg, "eod_change_pct_min", 2.0))
+    _chg_max = float(getattr(cfg, "eod_change_pct_max", 10.0))
+    chg = snap.change_pct
+    if not (_chg_min <= chg <= _chg_max):
+        ScannerLogger.rejected(
+            snap.code, snap.name, "EOD_CHANGE",
+            f"등락률 {chg:+.2f}% 범위 밖 (기준 +{_chg_min:.1f}% ~ +{_chg_max:.1f}%)",
+        )
+        return None
+
+    # ④ 체결강도
+    _str_min = float(getattr(cfg, "eod_strength_min", 115.0))
+    if snap.chejan_strength < _str_min:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "EOD_STRENGTH",
+            f"체결강도 {snap.chejan_strength:.1f}% < 기준 {_str_min:.0f}%",
+        )
+        return None
+
+    # ⑤ 거래량 (당일 1분봉 평균 대비 배수 — 최근 10분 기준)
+    _vol_ratio = float(getattr(cfg, "eod_volume_ratio_min", 1.5))
+    _vols = snap.volumes_1min
+    if _vols and len(_vols) >= 10:
+        _avg_vol_1min = sum(_vols[-10:]) / 10.0
+        _cur_vol_1min = _vols[-1] if _vols else 0
+        if _avg_vol_1min > 0 and _cur_vol_1min < _avg_vol_1min * _vol_ratio:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "EOD_VOLUME",
+                f"최근 1분봉 거래량 {_cur_vol_1min:,} < 10분평균 {_avg_vol_1min:,.0f} × {_vol_ratio:.1f}배",
+            )
+            return None
+
+    reason = (
+        f"[EOD] 종가매매 진입 — 등락률 {chg:+.2f}% | 체결강도 {snap.chejan_strength:.1f}% "
+        f"| 25일신고가 {_dctx['high_25d']:,.0f}원 근처 | 일봉정배열↑ "
+        f"| 20MA {_dctx['daily_ma20']:,.0f}원 상방"
+    )
+    ScannerLogger.passed(snap.code, snap.name, "EOD_ENTRY", reason)
+    return reason
+
+
 def check_jdm_entry(
     snap: StockSnapshot,
     cfg:  SmartScannerConfig,
@@ -2131,8 +2257,22 @@ def check_jdm_entry(
             )
             return None
 
+    # [NEW] 일봉 20MA 가격 필터 — 현재가가 일봉 20일선 아래면 차단 (가짜 신호 여과)
+    from strategy.jang_dong_min import get_daily_context as _get_daily_ctx
+    _near_high_thr = float(getattr(cfg, "daily_near_high_threshold_pct", 3.0))
+    _daily_ctx = _get_daily_ctx(snap.daily_closes, snap.current_price, _near_high_thr)
+    if getattr(cfg, "daily_ma20_filter_enabled", True):
+        if not _daily_ctx["above_ma20"] and _daily_ctx["daily_ma20"] > 0:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "JDM_DAILY_MA20",
+                f"일봉 20MA 하방 — 현재가 {snap.current_price:,} < 20MA {_daily_ctx['daily_ma20']:,.0f}",
+            )
+            return None
+
     mode_tag = "JDM_LITE" if _lite_mode else "JDM"
-    reason = f"[{_slot}][{mode_tag}] {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} | {candle_reason}"
+    # 신고가 근처 정보를 reason에 포함 (ScanSignal 필드는 _build_jdm_signal에서 채움)
+    _near_tag = " | 📈신고가근처(TP↑)" if _daily_ctx["near_high"] else ""
+    reason = f"[{_slot}][{mode_tag}] {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} | {candle_reason}{_near_tag}"
     ScannerLogger.passed(snap.code, snap.name, mode_tag, reason)
     return reason
 
@@ -2470,9 +2610,15 @@ class SmartScanner:
 
         reason = " | ".join(r for r in [r_ema20, r_disp, r_jdm] if r)
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+        # 일봉 맥락 — TP 상향 여부 판단
+        from strategy.jang_dong_min import get_daily_context as _gdc
+        _dctx = _gdc(snap.daily_closes, snap.current_price,
+                     float(getattr(self.cfg, "daily_near_high_threshold_pct", 3.0)))
         return ScanSignal(
             snap.code, snap.name, "JDM_ENTRY", snap.current_price, reason,
             entry_candle_low=candle_low,
+            near_daily_high=_dctx["near_high"],
+            daily_ma20=_dctx["daily_ma20"],
         )
 
     # -----------------------------------------------------------------------

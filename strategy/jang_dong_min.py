@@ -409,3 +409,43 @@ def check_daily_alignment(daily_closes: list[float]) -> bool:
     ma20 = sum(daily_closes[:20]) / 20
 
     return ma5 > ma10 > ma20
+
+
+def get_daily_context(
+    daily_closes: list[float],
+    current_price: float,
+    near_high_threshold_pct: float = 3.0,
+) -> dict:
+    """
+    일봉 데이터 기반 매매 맥락 정보를 반환한다.
+
+    Args:
+        daily_closes:            최신순 일봉 종가 리스트 (최대 25개)
+        current_price:           현재 분봉 현재가
+        near_high_threshold_pct: 신고가 근처 판정 기준 (%) — 25일 최고가 대비 이내
+
+    Returns:
+        dict:
+            above_ma20  (bool)  — 현재가 ≥ 일봉 20MA  → 가짜 신호 여과 기준
+            near_high   (bool)  — 25일 신고가 근처(overhead 매물대 없음)
+            daily_ma20  (float) — 일봉 20MA 값 (0 = 데이터 부족)
+            high_25d    (float) — 최근 25일 최고 종가 (0 = 데이터 부족)
+    """
+    result = {"above_ma20": True, "near_high": False, "daily_ma20": 0.0, "high_25d": 0.0}
+
+    if len(daily_closes) < 20 or current_price <= 0:
+        # 데이터 부족 → 필터 통과 (패스 fail-open)
+        return result
+
+    daily_ma20 = sum(daily_closes[:20]) / 20
+    result["daily_ma20"] = daily_ma20
+    result["above_ma20"] = current_price >= daily_ma20
+
+    # 신고가 근처: 최근 25일 최고가 대비 near_high_threshold_pct 이내
+    n = min(25, len(daily_closes))
+    high_25d = max(daily_closes[:n])
+    result["high_25d"] = high_25d
+    if high_25d > 0:
+        result["near_high"] = current_price >= high_25d * (1.0 - near_high_threshold_pct / 100.0)
+
+    return result

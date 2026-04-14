@@ -93,6 +93,11 @@ class Position:
     qty_partial_sold: int  = 0            # 1차에 매도한 수량
     trend_level: int = 0                  # 요셉 시그널 현재 추세 단계(0~3)
     trend_prev_level: int = 0             # 직전 추세 단계(Strong→No Trend 감시)
+    near_daily_high: bool = False         # 진입 시 25일 신고가 근처 → TP 상향 적용
+    custom_tp_pct:   float = 0.0          # 종목별 익절 목표 (0 = 전역 설정값 사용)
+    # 종가매매(EOD) 플래그
+    eod_trade:       bool = False         # True → 당일 15:19 강제청산 제외, 익일 관리
+    overnight_held:  bool = False         # True → 익일 장 시작 후 갭 체크 관리 중
 
     @property
     def pnl(self) -> int:
@@ -175,6 +180,8 @@ class OrderManager(QObject):
         self._app_pending_buys: dict[str, int] = {}       # code -> 남은 앱 매수 주문 수량 (부분체결 추적)
         self._pending_candle_stop: dict[str, int] = {}    # code -> 진입 캔들 저가 (체결 시 Position에 반영)
         self._pending_trend: dict[str, tuple[int, int]] = {}  # code -> (trend_level, trend_prev_level)
+        self._pending_near_high: dict[str, tuple[bool, float]] = {}  # code -> (near_daily_high, custom_tp_pct)
+        self._pending_eod: dict[str, bool] = {}                      # code -> eod_trade flag
         self._pnl_date: date = date.today()
         # 당일 실현손익 = 파일에서 복구한 이전 세션 합 + 이번 세션 매도 체결 합
         self.daily_realized_pnl: int = 0
@@ -462,6 +469,10 @@ class OrderManager(QObject):
             int(getattr(signal, "trend_level", 0) or 0),
             int(getattr(signal, "trend_prev_level", 0) or 0),
         )
+        _near_high = bool(getattr(signal, "near_daily_high", False))
+        _ctp = float(getattr(signal, "custom_tp_pct", 0.0))
+        self._pending_near_high[code] = (_near_high, _ctp)
+        self._pending_eod[code] = bool(getattr(signal, "eod_trade", False))
 
         self.buy(code, name, qty, price=0)  # 시장가 매수
 
@@ -994,6 +1005,8 @@ class OrderManager(QObject):
             self._pending_buy_time.pop(code, None)
             self._pending_buy_info.pop(code, None)
             trend_level, trend_prev_level = self._pending_trend.pop(code, (0, 0))
+            _near_high, _ctp = self._pending_near_high.pop(code, (False, 0.0))
+            _eod_trade = self._pending_eod.pop(code, False)
             if is_app_buy:
                 rem = self._app_pending_buys[code] - filled_qty
                 if rem <= 0:
@@ -1029,7 +1042,16 @@ class OrderManager(QObject):
                     candle_stop_price=candle_stop,
                     trend_level=int(trend_level),
                     trend_prev_level=int(trend_prev_level),
+                    near_daily_high=_near_high,
+                    custom_tp_pct=_ctp,
+                    eod_trade=_eod_trade,
                 )
+                if _near_high:
+                    logger.info("[신고가근처] %s(%s) — 일봉 신고가 근처 진입, TP 상향 적용 (custom_tp=%.1f%%)",
+                                name, code, _ctp)
+                if _eod_trade:
+                    logger.info("[EOD] %s(%s) — 종가매매 진입, 당일 강제청산 제외 / 익일 갭 체크 관리",
+                                name, code)
             self.cash -= filled_qty * filled_price
             self._today_fill_log.append({
                 "ts": datetime.now().strftime("%H:%M:%S"),

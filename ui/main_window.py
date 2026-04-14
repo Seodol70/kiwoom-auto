@@ -92,6 +92,10 @@ class ScannerWorker(QObject):
         # BREAKOUT watch-and-confirm: 즉시 매수 대신 N분 관찰 후 진입
         # code → {"first_time": float(monotonic), "first_price": int}
         self._breakout_pending: dict[str, dict] = {}
+        # 분당 신호 발행 제한 — 같은 분에 너무 많은 종목 동시 진입 방지
+        self._entry_minute: int   = -1   # 마지막 신호 발행 분(minute)
+        self._entry_count:  int   = 0    # 해당 분에 발행한 신호 수
+        self._entry_per_min: int  = int(getattr(cfg, "max_entries_per_minute", 1))
         # UI 갱신 쓰로틀 — QTableWidget 재렌더링을 3초 간격으로 제한
         self._last_ui_rows: list = []
         self._last_ui_emit: float = 0.0
@@ -103,7 +107,7 @@ class ScannerWorker(QObject):
         _log = _logging.getLogger("ScannerWorker")
         from scanner.smart_scanner import (
             check_breakout, check_jdm_entry, check_breakout_gate,
-            check_pre_surge, check_opening_surge,
+            check_pre_surge, check_opening_surge, check_eod_entry,
             is_pure_equity_name, _resolve_time_slot, _get_slot_value,
         )
         self._running = True
@@ -178,21 +182,47 @@ class ScannerWorker(QObject):
                         reason   = None
 
                         # ── 슬롯별 신호 라우팅 ────────────────────────────────
-                        if _slot == "PRE":
+                        # EOD 종가매매 창(14:40~14:55) — overnight_mode_enabled 시 우선 체크
+                        _eod_start = getattr(self._cfg, "eod_entry_start", None)
+                        _eod_end   = getattr(self._cfg, "eod_entry_end", None)
+                        _is_eod_window = (
+                            getattr(self._cfg, "overnight_mode_enabled", False)
+                            and _eod_start is not None and _eod_end is not None
+                            and _eod_start <= _now_t < _eod_end
+                        )
+
+                        if _is_eod_window:
+                            # 14:40~14:55: EOD 전용 신호만 판단 (기존 JDM/BREAKOUT 차단)
+                            reason = check_eod_entry(snap, self._cfg)
+                            if reason:
+                                sig_type = "EOD_ENTRY"
+
+                        elif _slot == "PRE":
                             # 08:00~09:00 시간외: PRE_SURGE만 판단
                             reason = check_pre_surge(snap, self._cfg)
                             if reason:
                                 sig_type = "PRE_SURGE"
 
                         elif _slot == "OPENING" and len(snap.closes_1min) < (self._cfg.jdm_ma_short + 1):
-                            # 09:00~09:08 (캔들 < 8): OPENING_SURGE만 판단
-                            reason = check_opening_surge(snap, self._cfg)
-                            if reason:
-                                sig_type = "OPENING_SURGE"
+                            # 09:00~09:08 (캔들 < 8): OPENING_SURGE — 비활성화 (추세 판단 불가, 손절 집중)
+                            # 캔들이 충분히 쌓일 때까지 대기 → JDM_ENTRY LITE 모드로 진입
+                            pass
 
                         else:
                             # OPENING(캔들 8+) / MORNING / MIDDAY / AFTERNOON:
                             # BREAKOUT → JDM_ENTRY(LITE 포함) 순으로 판단
+
+                            # ── 일봉 20MA 공통 게이트 (BREAKOUT/JDM 모두 적용) ──
+                            if getattr(self._cfg, "daily_ma20_filter_enabled", True):
+                                from strategy.jang_dong_min import get_daily_context as _gdc_gate
+                                _dg = _gdc_gate(snap.daily_closes, snap.current_price)
+                                if not _dg["above_ma20"] and _dg["daily_ma20"] > 0:
+                                    from scanner.smart_scanner import ScannerLogger as _SL
+                                    _SL.rejected(code, snap.name, "DAILY_MA20",
+                                                 f"일봉 20MA 하방 — 현재가 {snap.current_price:,} "
+                                                 f"< 20MA {_dg['daily_ma20']:,.0f}")
+                                    self._signal_prev_active[code] = False
+                                    continue
 
                             # ── BREAKOUT: 즉시매수 대신 N분 watch-and-confirm ──
                             breakout_reason = check_breakout(
@@ -288,20 +318,41 @@ class ScannerWorker(QObject):
                         cooldown_ok = (last_emit is None) or (
                             _tnow - last_emit >= _eff_cool
                         )
-                        if now_active and rising_edge and cooldown_ok:
+                        # 분당 신호 발행 수 갱신
+                        _cur_min = datetime.now().minute
+                        if _cur_min != self._entry_minute:
+                            self._entry_minute = _cur_min
+                            self._entry_count  = 0
+
+                        _per_min_ok = (self._entry_count < self._entry_per_min)
+
+                        if now_active and rising_edge and cooldown_ok and _per_min_ok:
                             _log.info(
                                 "[ScannerWorker] 신호 발생: %s(%s) [%s] %s",
                                 snap.name, code, sig_type, reason,
                             )
                             from scanner.smart_scanner import ScanSignal
+                            from strategy.jang_dong_min import get_daily_context as _gdc
+                            _near_thr = float(getattr(self._cfg, "daily_near_high_threshold_pct", 3.0))
+                            _dctx = _gdc(snap.daily_closes, snap.current_price, _near_thr)
+                            _is_eod_sig = (sig_type == "EOD_ENTRY")
                             _sig = ScanSignal(snap.code, snap.name, sig_type,
-                                              snap.current_price, reason)
+                                              snap.current_price, reason,
+                                              near_daily_high=_dctx["near_high"],
+                                              daily_ma20=_dctx["daily_ma20"],
+                                              eod_trade=_is_eod_sig)
                             _audit = getattr(self, "_audit", None)
                             if _audit is not None:
                                 _audit.log_signal(_sig, snap, self._cfg)
                             self.signal_detected.emit(_sig)
                             signal_cnt += 1
+                            self._entry_count += 1
                             self._signal_last_emit_mono[code] = _tnow
+                        elif now_active and rising_edge and cooldown_ok and not _per_min_ok:
+                            _log.info(
+                                "[분당제한] %s(%s) [%s] 스킵 — 이번 분 %d/%d건 발행됨",
+                                snap.name, code, sig_type, self._entry_count, self._entry_per_min,
+                            )
                         elif now_active and rising_edge and not cooldown_ok:
                             _log.debug(
                                 "[신호스킵] %s — 쿨다운 %.1fs 미경과 (eff=%.1fs)",
@@ -390,9 +441,10 @@ class HeaderBar(QWidget):
     """상단 상태 바 — Safety Switch 포함"""
 
     # 자동매매 ON/OFF 상태 변경 시 MainWindow 로 전달
-    auto_trade_toggled = pyqtSignal(bool)   # True = 시작, False = 정지
-    exit_requested = pyqtSignal()           # 프로그램 종료 요청
-    unlock_requested = pyqtSignal()         # 일일 손익 락 수동 해제 요청
+    auto_trade_toggled = pyqtSignal(bool)      # True = 시작, False = 정지
+    exit_requested = pyqtSignal()              # 프로그램 종료 요청
+    unlock_requested = pyqtSignal()            # 일일 손익 락 수동 해제 요청
+    overnight_mode_toggled = pyqtSignal(bool)  # True = 야간보유 ON, False = OFF
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -442,6 +494,19 @@ class HeaderBar(QWidget):
         self._btn_unlock.setFixedSize(85, 30)
         self._btn_unlock.clicked.connect(self._on_unlock_clicked)
 
+        # ── 야간보유 모드 토글 버튼 ────────────────────────────────────
+        self._btn_overnight = QPushButton("🌙 야간보유 OFF")
+        self._btn_overnight.setObjectName("btn_overnight_off")
+        self._btn_overnight.setCheckable(True)
+        self._btn_overnight.setChecked(False)
+        self._btn_overnight.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        self._btn_overnight.setFixedSize(120, 30)
+        self._btn_overnight.setToolTip(
+            "야간보유 모드: ON 시 14:40~14:55에 EOD 신호 발생, 당일 15:19 강제청산 제외\n"
+            "익일 09:00 갭 체크 후 자동 관리 (갭상승 +2% 익절 / 갭하락 -1.5% 손절 / 09:30 타임컷)"
+        )
+        self._btn_overnight.clicked.connect(self._on_overnight_clicked)
+
         lay.addWidget(self._lbl_title)
         lay.addStretch()
         lay.addWidget(self._divider())
@@ -453,6 +518,7 @@ class HeaderBar(QWidget):
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_pnl)
         lay.addWidget(self._divider())
+        lay.addWidget(self._btn_overnight)
         lay.addWidget(self._btn_auto)
         lay.addWidget(self._btn_unlock)
         lay.addWidget(self._btn_restart)
@@ -480,6 +546,17 @@ class HeaderBar(QWidget):
         self._btn_auto.style().unpolish(self._btn_auto)
         self._btn_auto.style().polish(self._btn_auto)
         self.auto_trade_toggled.emit(checked)
+
+    def _on_overnight_clicked(self, checked: bool) -> None:
+        if checked:
+            self._btn_overnight.setText("🌙 야간보유 ON")
+            self._btn_overnight.setObjectName("btn_overnight_on")
+        else:
+            self._btn_overnight.setText("🌙 야간보유 OFF")
+            self._btn_overnight.setObjectName("btn_overnight_off")
+        self._btn_overnight.style().unpolish(self._btn_overnight)
+        self._btn_overnight.style().polish(self._btn_overnight)
+        self.overnight_mode_toggled.emit(checked)
 
     def _on_restart_clicked(self) -> None:
         """프로그램 재시작 버튼 클릭 — 소스 변경사항 반영"""
@@ -1543,6 +1620,7 @@ class MainWindow(QMainWindow):
         self.header.auto_trade_toggled.connect(self._on_auto_trade_toggle)
         self.header.exit_requested.connect(self.close)
         self.header.unlock_requested.connect(self._on_manual_unlock_requested)
+        self.header.overnight_mode_toggled.connect(self._on_overnight_mode_toggle)
 
         # 버튼 연결 확인 로그
         self.log_panel.append(
@@ -1878,6 +1956,25 @@ class MainWindow(QMainWindow):
         from datetime import datetime, time
         now = datetime.now().time()
 
+        # EOD 갭 체크 — eod_trade 포지션이 있으면 overnight_mode 버튼 무관하게 09:00~09:29 내 1회 실행
+        # (1분 타이머 어긋남 방지: 09:00~09:01 창 대신 09:00~09:29 넓게 잡고 플래그로 1회 보장)
+        _has_eod = any(getattr(p, "eod_trade", False)
+                       for p in self.order_mgr.positions.values())
+        if (_has_eod
+                and not getattr(self, "_eod_gap_checked_today", False)
+                and time(9, 0) <= now < time(9, 30)
+                and datetime.now().weekday() < 5):
+            self._eod_gap_checked_today = True
+            self._check_overnight_gap()
+
+        # EOD 타임컷 — overnight_held=True 포지션이 있으면 실행 (overnight_mode 버튼 무관)
+        _has_overnight_held = any(getattr(p, "overnight_held", False)
+                                  for p in self.order_mgr.positions.values())
+        if (_has_overnight_held
+                and time(9, 30) <= now < time(9, 31)
+                and datetime.now().weekday() < 5):
+            self._check_overnight_timecut()
+
         # 08:00 자동 시작 (평일만) — 시간외 PRE_SURGE 신호 포착 포함
         if time(8, 0) <= now < time(8, 1) and not self._opened_today:
             if datetime.now().weekday() < 5:  # 월~금
@@ -1895,8 +1992,13 @@ class MainWindow(QMainWindow):
         elif time(15, 20) <= now < time(15, 21) and not self._closed_today:
             if datetime.now().weekday() < 5:
                 if self.order_mgr.positions:
-                    self.log_panel.append("🔴 [15:20 강제청산] 모든 포지션 전량 매도...")
+                    self.log_panel.append("🔴 [15:20 강제청산] 모든 포지션 전량 매도 (EOD 제외)...")
                     for code, pos in list(self.order_mgr.positions.items()):
+                        if getattr(pos, "eod_trade", False):
+                            self.log_panel.append(
+                                f"🌙 [EOD유지] {pos.name}({code}) — 익일 관리 포지션, 15:20 청산 제외"
+                            )
+                            continue
                         if pos.qty > 0:
                             self.order_mgr.force_exit(code, pos.name, pos.qty, reason="Day Close 15:20")
                             self.log_panel.append(f"  └─ {pos.name}({code}) {pos.qty}주 매도 주문")
@@ -1915,12 +2017,13 @@ class MainWindow(QMainWindow):
 
         # 자정 이후 플래그 리셋 (다음 날 준비)
         elif now.hour == 0 and now.minute == 0:
-            self._opened_today        = False
-            self._closed_today        = False
-            self._feedback_done_today = False
-            self._new_entry_locked    = False
-            self._daily_loss_cut_done = False
-            self._manual_unlock_active = False
+            self._opened_today          = False
+            self._closed_today          = False
+            self._feedback_done_today   = False
+            self._new_entry_locked      = False
+            self._daily_loss_cut_done   = False
+            self._manual_unlock_active  = False
+            self._eod_gap_checked_today = False   # EOD 갭 체크 플래그 리셋
 
         # 장 시간 중 일일 손익 한도 체크 (매 분 실행)
         self._check_daily_pnl_limits()
@@ -2036,6 +2139,92 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _check_overnight_gap(self) -> None:
+        """
+        EOD 포지션 익일 09:00 갭 체크.
+
+        - 갭 상승 ≥ eod_gap_up_exit_pct(+2%): 즉시 시장가 익절
+        - 갭 하락 ≤ eod_gap_down_exit_pct(-1.5%): 즉시 시장가 손절
+        - 보합: overnight_held = True 로 전환 → 트레일 스탑 / 타임컷으로 관리
+        """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+        _gap_up  = float(getattr(self._scan_cfg, "eod_gap_up_exit_pct",   2.0))
+        _gap_dn  = float(getattr(self._scan_cfg, "eod_gap_down_exit_pct", -1.5))
+
+        eod_positions = [
+            (code, pos) for code, pos in list(self.order_mgr.positions.items())
+            if getattr(pos, "eod_trade", False)
+        ]
+        if not eod_positions:
+            return
+
+        self.log_panel.append(f"🌅 [EOD갭체크] {len(eod_positions)}개 오버나잇 포지션 갭 확인...")
+
+        for code, pos in eod_positions:
+            if pos.avg_price <= 0:
+                continue
+            chg = float(pos.price_change_pct_vs_avg)
+
+            if chg >= _gap_up:
+                # 갭 상승 → 즉시 익절
+                self.log_panel.append(
+                    f"🟢 [EOD갭익절] {pos.name}({code}) 갭 상승 {chg:+.2f}% ≥ {_gap_up:.1f}% — "
+                    f"{pos.qty}주 즉시 시장가 매도"
+                )
+                self._audit.log_sell_decision(
+                    code, f"EOD 갭익절 {chg:+.2f}% (기준 +{_gap_up:.1f}%)", pos.current_price
+                )
+                self.order_mgr.force_exit(code, pos.name, pos.qty, reason=f"EOD 갭익절 {chg:+.2f}%")
+                _logger.info("[EOD갭익절] %s(%s) %+.2f%%", pos.name, code, chg)
+
+            elif chg <= _gap_dn:
+                # 갭 하락 → 즉시 손절
+                self.log_panel.append(
+                    f"🔴 [EOD갭손절] {pos.name}({code}) 갭 하락 {chg:+.2f}% ≤ {_gap_dn:.1f}% — "
+                    f"{pos.qty}주 즉시 시장가 매도"
+                )
+                self._audit.log_sell_decision(
+                    code, f"EOD 갭손절 {chg:+.2f}% (기준 {_gap_dn:.1f}%)", pos.current_price
+                )
+                self.order_mgr.mark_stop_loss(code)
+                self.order_mgr.force_exit(code, pos.name, pos.qty, reason=f"EOD 갭손절 {chg:+.2f}%")
+                _logger.info("[EOD갭손절] %s(%s) %+.2f%%", pos.name, code, chg)
+
+            else:
+                # 보합 → overnight_held = True 전환, 이후 _auto_sell_by_pnl 에서 트레일 스탑으로 관리
+                pos.overnight_held = True
+                self.log_panel.append(
+                    f"⏳ [EOD보합] {pos.name}({code}) 갭 {chg:+.2f}% — "
+                    f"트레일 스탑 모드로 전환 (타임컷 09:30)"
+                )
+                _logger.info("[EOD보합] %s(%s) %+.2f%% → 트레일 스탑 관리", pos.name, code, chg)
+
+    def _check_overnight_timecut(self) -> None:
+        """
+        EOD 포지션 익일 09:30 타임컷.
+        overnight_held = True 이고 수익률 eod_timecut_min_pct 미달이면 강제 청산.
+        """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+        _min_pct = float(getattr(self._scan_cfg, "eod_timecut_min_pct", 1.0))
+
+        for code, pos in list(self.order_mgr.positions.items()):
+            if not getattr(pos, "overnight_held", False):
+                continue
+            chg = float(pos.price_change_pct_vs_avg)
+            if chg < _min_pct:
+                self.log_panel.append(
+                    f"⏱️ [EOD타임컷] {pos.name}({code}) 09:30 수익 {chg:+.2f}% < {_min_pct:.1f}% — "
+                    f"{pos.qty}주 강제 청산"
+                )
+                self._audit.log_sell_decision(
+                    code, f"EOD 타임컷 09:30 수익 {chg:+.2f}% (기준 {_min_pct:.1f}%)", pos.current_price
+                )
+                self.order_mgr.force_exit(code, pos.name, pos.qty,
+                                          reason=f"EOD 타임컷 09:30 ({chg:+.2f}%)")
+                _logger.info("[EOD타임컷] %s(%s) %+.2f%%", pos.name, code, chg)
+
     def _liquidate_all_positions(self) -> None:
         """오늘 이 앱에서 매수한 수량만 강제 청산 (장 종료 1분 전 15:19). 기존 보유·HTS 매수분은 제외."""
         from datetime import date as _date
@@ -2057,6 +2246,12 @@ class MainWindow(QMainWindow):
 
             targets = []
             for code, pos in positions:
+                # 종가매매(EOD) 포지션은 당일 강제청산 제외 — 익일 갭 체크로 관리
+                if getattr(pos, "eod_trade", False):
+                    self.log_panel.append(
+                        f"🌙 [EOD유지] {pos.name}({code}) — 종가매매 포지션, 당일 청산 제외"
+                    )
+                    continue
                 q = getattr(pos, "qty_buy_today_app", 0) or 0
                 # qty_buy_today_app가 0이더라도 opened_by_app이면 청산 대상
                 if q <= 0 and not getattr(pos, "opened_by_app", False):
@@ -2112,6 +2307,22 @@ class MainWindow(QMainWindow):
             f"[상태] auto_trading={self._auto_trading} "
             f"SnapshotStore={len(self._snap_store)}종목"
         )
+
+    @pyqtSlot(bool)
+    def _on_overnight_mode_toggle(self, enabled: bool) -> None:
+        """야간보유 모드 토글 — SmartScannerConfig.overnight_mode_enabled 실시간 반영"""
+        self._scan_cfg.overnight_mode_enabled = enabled
+        state = "ON" if enabled else "OFF"
+        icon  = "🌙" if enabled else "☀️"
+        self.log_panel.append(
+            f"{icon} 야간보유 모드 {state} "
+            f"({'14:40~14:55 EOD 신호 활성화 / 당일 청산 제외' if enabled else '종가매매 신호 비활성화'})"
+        )
+        if enabled:
+            self.log_panel.append(
+                "  └─ 갭 상승 +2% 즉시 익절 / 갭 하락 -1.5% 즉시 손절 / 09:30 타임컷 적용"
+            )
+        logger.info("[overnight_mode] %s", state)
 
     @pyqtSlot()
     def _on_manual_unlock_requested(self) -> None:
@@ -2463,7 +2674,12 @@ class MainWindow(QMainWindow):
                 continue
 
             # ━━━ 캔들 저가 손절 (진입 캔들 저점 이탈) ━━━
-            if pos.candle_stop_price > 0 and pos.current_price <= pos.candle_stop_price:
+            # EOD 포지션은 갭 체크(09:00) 이전까지 캔들손절 제외 — 종가 부근 저가 기반 손절가는 너무 타이트
+            _is_eod_pre_gap = (getattr(pos, "eod_trade", False)
+                               and not getattr(pos, "overnight_held", False))
+            if _is_eod_pre_gap:
+                pass  # 갭 체크 이전 EOD 포지션 — 캔들손절 스킵
+            elif pos.candle_stop_price > 0 and pos.current_price <= pos.candle_stop_price:
                 self.log_panel.append(
                     f"🔴 [캔들손절] {pos.name}({code}) 현재가 {pos.current_price:,} ≤ "
                     f"손절가 {pos.candle_stop_price:,}원 — {sell_qty}주 매도"
@@ -2491,26 +2707,44 @@ class MainWindow(QMainWindow):
                 continue
 
             # ━━━ [분할 익절] 목표 수익률 도달 시 일부 매도 ━━━
-            if (self._scan_cfg.partial_profit_enabled
-                    and not pos.partial_sold
-                    and pos.avg_price > 0
-                    and chg >= self._scan_cfg.partial_profit_pct):
-                _p_qty = self.order_mgr.partial_exit(
-                    code, pos.name,
-                    sell_ratio=self._scan_cfg.partial_sell_ratio,
-                    reason=f"분할익절 +{chg:.2f}% 달성",
-                )
-                if _p_qty > 0:
-                    self.log_panel.append(
-                        f"✂️ [분할익절] {pos.name}({code}) +{chg:.2f}% — "
-                        f"{_p_qty}주 ({self._scan_cfg.partial_sell_ratio*100:.0f}%) 매도"
+            # EOD 포지션은 갭 체크(overnight_held=True) 이전까지 분할익절 제외 — 오버나이트 계획 유지
+            _eod_pre_gap = (getattr(pos, "eod_trade", False)
+                            and not getattr(pos, "overnight_held", False))
+            if not _eod_pre_gap:
+                # 신고가 근처 진입 종목의 TP 부스트 — 진입 슬롯에 따라 차등 적용
+                # MORNING(09:30~11:00): +5%   MIDDAY(11:00~13:00): +3.5%   AFTERNOON(13:00~): 미적용
+                _partial_pct = self._scan_cfg.partial_profit_pct
+                if getattr(pos, "near_daily_high", False):
+                    _entry_t = getattr(pos, "entry_time", None)
+                    _entry_h = _entry_t.hour * 60 + _entry_t.minute if _entry_t else 0
+                    if _entry_h < 11 * 60:        # OPENING / MORNING (09:00~11:00)
+                        _near_high_tp = float(getattr(self._scan_cfg, "daily_near_high_tp_pct", 5.0))
+                    elif _entry_h < 13 * 60:      # MIDDAY (11:00~13:00) — 절충
+                        _near_high_tp = float(getattr(self._scan_cfg, "daily_near_high_tp_pct", 5.0)) * 0.7
+                    else:                         # AFTERNOON (13:00~) — 타임컷 25분에 묶여 부스트 역효과
+                        _near_high_tp = 0.0
+                    if _near_high_tp > 0:
+                        _partial_pct = max(_partial_pct, _near_high_tp)
+                if (self._scan_cfg.partial_profit_enabled
+                        and not pos.partial_sold
+                        and pos.avg_price > 0
+                        and chg >= _partial_pct):
+                    _p_qty = self.order_mgr.partial_exit(
+                        code, pos.name,
+                        sell_ratio=self._scan_cfg.partial_sell_ratio,
+                        reason=f"분할익절 +{chg:.2f}% 달성",
                     )
-                    self._audit.log_sell_decision(
-                        code,
-                        f"분할익절 +{chg:.2f}% (기준 {self._scan_cfg.partial_profit_pct:.1f}%)",
-                        pos.current_price,
-                    )
-                    continue  # 이번 사이클 trail 스킵, 다음 사이클부터 trail 정상 적용
+                    if _p_qty > 0:
+                        self.log_panel.append(
+                            f"✂️ [분할익절] {pos.name}({code}) +{chg:.2f}% — "
+                            f"{_p_qty}주 ({self._scan_cfg.partial_sell_ratio*100:.0f}%) 매도"
+                        )
+                        self._audit.log_sell_decision(
+                            code,
+                            f"분할익절 +{chg:.2f}% (기준 {self._scan_cfg.partial_profit_pct:.1f}%)",
+                            pos.current_price,
+                        )
+                        continue  # 이번 사이클 trail 스킵, 다음 사이클부터 trail 정상 적용
 
             # ━━━ 본절가 스탑: 분할 익절 후 평단 이탈 시 잔여 전량 청산 ━━━
             if (self._scan_cfg.breakeven_stop_enabled
@@ -2536,8 +2770,20 @@ class MainWindow(QMainWindow):
             # ━━━ 트레일 스탑: 고점 대비 하락 시 전량 청산 ━━━
             if pos.peak_price > 0:
                 _peak_chg = (pos.peak_price - pos.avg_price) / pos.avg_price * 100
+                # 신고가 근처 진입 종목의 트레일 활성화 기준도 슬롯별 차등 적용
+                _trail_activation = self._scan_cfg.trail_activation_pct
+                if getattr(pos, "near_daily_high", False):
+                    _entry_t = getattr(pos, "entry_time", None)
+                    _entry_h = _entry_t.hour * 60 + _entry_t.minute if _entry_t else 0
+                    if _entry_h < 11 * 60:       # MORNING: 트레일 활성화 2.5%
+                        _trail_activation = max(_trail_activation,
+                                               float(getattr(self._scan_cfg, "daily_near_high_tp_pct", 5.0)) * 0.5)
+                    elif _entry_h < 13 * 60:     # MIDDAY: 1.75%
+                        _trail_activation = max(_trail_activation,
+                                               float(getattr(self._scan_cfg, "daily_near_high_tp_pct", 5.0)) * 0.35)
+                    # AFTERNOON: 기본값 유지 (1.0%)
                 # peak가 activation 이상인 경우에만 트레일 발동
-                if _peak_chg >= self._scan_cfg.trail_activation_pct:
+                if _peak_chg >= _trail_activation:
                     cfg = self._scan_cfg
                     if _peak_chg < cfg.trail_tier1_max:
                         _trail_pct = cfg.trail_pct_tier1
@@ -2576,6 +2822,9 @@ class MainWindow(QMainWindow):
                 continue
 
             # ━━━ Time-cut: 설정값(time_cut_minutes) 경과 시 수익률 무관 전량 청산 (안전망) ━━━
+            # EOD 포지션은 타임컷 제외 — _check_overnight_gap / _check_overnight_timecut 에서 관리
+            if getattr(pos, "eod_trade", False):
+                continue
             _time_cut_min = getattr(self._scan_cfg, "time_cut_minutes", 25)
             entry_time = getattr(pos, "entry_time", None)
             if entry_time:
@@ -2730,6 +2979,25 @@ QPushButton#btn_auto_on {
     font-weight: bold;
 }
 QPushButton#btn_auto_on:hover { background: #c3f5be; }
+
+/* ─── 야간보유 모드 버튼 ─────────────────────────────── */
+QPushButton#btn_overnight_off {
+    background: #313244;
+    color: #a6adc8;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+QPushButton#btn_overnight_off:hover { background: #45475a; }
+QPushButton#btn_overnight_on {
+    background: #313350;
+    color: #cba6f7;
+    border: 1px solid #7c6fcd;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-weight: bold;
+}
+QPushButton#btn_overnight_on:hover { background: #3d3665; }
 
 /* ─── 재시작 버튼 ──────────────────────────────────────── */
 QPushButton#btn_restart {
