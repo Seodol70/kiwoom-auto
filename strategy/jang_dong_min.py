@@ -454,6 +454,7 @@ def get_daily_context(
         "near_high": False,
         "daily_ma20": 0.0, "daily_ma60": 0.0,
         "high_25d": 0.0,
+        "ma20_slope_up": True,   # 일봉 20MA 우상향 여부 (데이터 부족 시 fail-open)
     }
 
     if len(daily_closes) < 20 or current_price <= 0:
@@ -463,6 +464,13 @@ def get_daily_context(
     daily_ma20 = sum(daily_closes[:20]) / 20
     result["daily_ma20"] = daily_ma20
     result["above_ma20"] = current_price >= daily_ma20
+
+    # MA20 기울기: 3거래일 전 MA20 대비 현재 MA20이 우상향인지 확인
+    # daily_closes는 최신순 정렬 → [0]=오늘, [3]=3거래일 전
+    if len(daily_closes) >= 23:   # MA20(20개) + 3일 오프셋 = 23개 필요
+        ma20_3d_ago = sum(daily_closes[3:23]) / 20
+        result["ma20_slope_up"] = daily_ma20 > ma20_3d_ago
+    # 23개 미만이면 fail-open(True) 유지
 
     # MA60 — 데이터가 60개 이상일 때만 계산, 부족하면 fail-open
     if len(daily_closes) >= 60:

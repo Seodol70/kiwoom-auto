@@ -224,6 +224,7 @@ class SmartScannerConfig:
     daily_alignment_enabled: bool = True            # 일봉 정배열 조건 활성화 (5MA>10MA>20MA)
     daily_ma20_filter_enabled: bool = True          # 일봉 20MA 가격 필터 (현재가 ≥ 20MA 강제)
     daily_ma60_filter_enabled: bool = True          # 일봉 60MA 가격 필터 (현재가 ≥ 60MA — 중기 하락 추세 차단)
+    daily_ma20_slope_enabled:  bool = True          # 일봉 20MA 우상향 필터 (추세추종형 — 3일 기울기 양수)
     daily_near_high_threshold_pct: float = 3.0      # 신고가 근처 판정 (25일 최고가 대비 %)
     daily_near_high_tp_pct: float = 5.0             # 신고가 근처 종목 익절 목표 (기본보다 높게)
     daily_candle_refresh_min: int = 5               # 일봉 데이터 갱신 주기(분)
@@ -2561,6 +2562,15 @@ def check_jdm_entry(
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM_DAILY_MA20",
                 f"일봉 20MA 하방 — 현재가 {snap.current_price:,} < 20MA {_daily_ctx['daily_ma20']:,.0f}",
+            )
+            return None
+
+    # [추세추종] 일봉 20MA 우상향 필터 — 3일 기울기 음수면 하락 추세로 판단, 진입 차단
+    if getattr(cfg, "daily_ma20_slope_enabled", True):
+        if not _daily_ctx.get("ma20_slope_up", True):
+            ScannerLogger.rejected(
+                snap.code, snap.name, "JDM_MA20_SLOPE",
+                f"일봉 20MA 기울기 하락 — 추세추종 진입 차단 (3일 기울기 음수, 20MA={_daily_ctx['daily_ma20']:,.0f})",
             )
             return None
 

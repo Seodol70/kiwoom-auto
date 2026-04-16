@@ -2389,6 +2389,8 @@ class MainWindow(QMainWindow):
         # 10:30 이후 Phase 1 트레일 체크 (매 분) — 고점 대비 1% 하락 시 청산
         elif time(10, 31) <= now < time(15, 15) and datetime.now().weekday() < 5:
             self._liquidate_phase1_positions(forced=False)
+            # [추세추종] EMA(20) 하향 돌파 포지션 청산 — 매 분 체크
+            self._check_ema_exit_positions()
             # 14:40 야간보유 자동 ON — 종가매매 창 1분 전, 1회만
             if (time(14, 40) <= now < time(14, 41)
                     and not getattr(self, "_eod_auto_enabled_today", False)):
@@ -2747,6 +2749,64 @@ class MainWindow(QMainWindow):
             _logger.exception("[_liquidate_all_positions] 예외")
         finally:
             self._liquidate_in_progress = False
+
+    def _check_ema_exit_positions(self) -> None:
+        """
+        [추세추종] 1분봉 EMA(20) 하향 돌파 청산 — 매 분 호출.
+
+        보유 포지션의 현재가가 1분봉 EMA(20) 아래로 내려가면 추세 소멸로 판단해
+        시장가 청산한다. Phase1(opening_scalp) 및 EOD 포지션은 각자 별도 로직으로
+        관리하므로 여기서는 제외.
+
+        조건:
+          - opened_by_app=True (앱 매수 포지션)
+          - entry_phase != 1 (Phase1은 별도 트레일로 관리)
+          - eod_trade=False (EOD 포지션 제외)
+          - closes_1min 길이 ≥ 20
+          - current_price < EMA(20) of closes_1min
+        """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+        from strategy.jang_dong_min import calc_ema as _calc_ema
+
+        for code, pos in list(self.order_mgr.positions.items()):
+            # Phase1·EOD·비앱 포지션 제외
+            if not getattr(pos, "opened_by_app", False):
+                continue
+            if getattr(pos, "entry_phase", 0) == 1:
+                continue
+            if getattr(pos, "eod_trade", False):
+                continue
+
+            snap = self._snap_store.get_snapshot(code)
+            if snap is None:
+                continue
+
+            closes = list(getattr(snap, "closes_1min", []) or [])
+            if len(closes) < 20:
+                continue
+
+            ema20 = _calc_ema(closes, 20)
+            if ema20 is None or ema20 <= 0:
+                continue
+
+            cur = pos.current_price or snap.current_price
+            if cur <= 0:
+                continue
+
+            if cur < ema20:
+                msg = (
+                    f"📉 [EMA청산] {pos.name}({code}) "
+                    f"현재가 {cur:,} < EMA20 {ema20:,.0f} — 추세 소멸 청산"
+                )
+                self.log_panel.append(msg)
+                _logger.info("[EMA청산] %s(%s) cur=%s ema20=%.0f", pos.name, code, cur, ema20)
+                try:
+                    self._audit.log_sell_decision(code, "EMA20 하향 돌파 — 추세 소멸", cur)
+                    self.order_mgr.sell(code, pos.name, pos.qty, price=0)
+                except Exception as e:
+                    self.log_panel.append(f"  ⚠️ {pos.name}({code}) EMA 청산 실패: {e}")
+                    _logger.exception("[EMA청산 실패] %s", code)
 
     @pyqtSlot(bool)
     def _on_auto_trade_toggle(self, enabled: bool) -> None:
