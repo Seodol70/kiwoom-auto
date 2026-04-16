@@ -44,6 +44,7 @@ from PyQt5.QtWidgets import (
     QLabel, QPushButton, QTableWidget, QTableWidgetItem,
     QTextEdit, QSplitter, QFrame, QHeaderView,
     QSizePolicy, QProgressBar, QDoubleSpinBox, QSpinBox,
+    QDialog, QDialogButtonBox, QComboBox,
 )
 
 import sys
@@ -92,6 +93,8 @@ class ScannerWorker(QObject):
         # BREAKOUT watch-and-confirm: 즉시 매수 대신 N분 관찰 후 진입
         # code → {"first_time": float(monotonic), "first_price": int}
         self._breakout_pending: dict[str, dict] = {}
+        # Phase 1 아침 초단타 — PRE_SURGE 후보 코드 집합 (OPENING 슬롯 OPENING_SCALP 라우팅용)
+        self._pre_surge_candidates: set[str] = set()
         # 분당 신호 발행 제한 — 같은 분에 너무 많은 종목 동시 진입 방지
         self._entry_minute: int   = -1   # 마지막 신호 발행 분(minute)
         self._entry_count:  int   = 0    # 해당 분에 발행한 신호 수
@@ -107,7 +110,7 @@ class ScannerWorker(QObject):
         _log = _logging.getLogger("ScannerWorker")
         from scanner.smart_scanner import (
             check_breakout, check_jdm_entry, check_breakout_gate,
-            check_pre_surge, check_opening_surge, check_eod_entry,
+            check_pre_surge, check_opening_scalp, check_opening_surge, check_eod_entry,
             is_pure_equity_name, _resolve_time_slot, _get_slot_value,
         )
         self._running = True
@@ -115,8 +118,18 @@ class ScannerWorker(QObject):
         _log.info("[ScannerWorker] run() 진입")
 
         _empty_logged = False
+        _heartbeat_last: float = 0.0
+        _HEARTBEAT_INTERVAL: float = 60.0  # 1분마다 생존 로그
+        _eod_warn_logged: bool = False      # EOD 창 야간보유 OFF 경고 (1회)
         while self._running:
             t0 = time.monotonic()
+
+            # 하트비트: 1분마다 루프 정상 동작 확인
+            if t0 - _heartbeat_last >= _HEARTBEAT_INTERVAL:
+                _heartbeat_last = t0
+                _overnight = getattr(self._cfg, "overnight_mode_enabled", False)
+                _log.info("[ScannerWorker] ♥ 루프 정상 동작 중 — 야간보유=%s | 감시=%d종목",
+                          "ON" if _overnight else "OFF", len(self._store))
 
             top_df = self._store.top_by_trade_amount(self._cfg.display_top_n)
 
@@ -149,6 +162,12 @@ class ScannerWorker(QObject):
                                       float(getattr(self._cfg, "max_change_pct", 15.0)))
             candidate_codes = set(self._store.prefilter_candidates(_max_ch))
 
+            # Phase 1 후보 초기화 — OPENING 슬롯 종료 후 더 이상 유효하지 않음
+            if _slot not in ("PRE", "OPENING") and self._pre_surge_candidates:
+                _log.info("[Phase1] OPENING 슬롯 종료 — PRE_SURGE 후보 %d종목 초기화",
+                          len(self._pre_surge_candidates))
+                self._pre_surge_candidates.clear()
+
             seen_codes = set(top_df.index)
             _cool = self._signal_cooldown_sec
             _tnow = time.monotonic()
@@ -170,6 +189,7 @@ class ScannerWorker(QObject):
                     continue
                 sig_type = None
                 reason = None
+                _trend_text = "데이터부족"
                 # 사전필터 탈락 종목은 신호 판단 생략 (watch_list에는 등락 상한 미만만 표시)
                 if code in candidate_codes:
                     snap = self._store.get_snapshot(code)
@@ -181,15 +201,76 @@ class ScannerWorker(QObject):
                         sig_type = None
                         reason   = None
 
+                        # ── 추세 레벨 + 방향 계산 ────────────────────────────
+                        # trend_level(0~3): 상승 강도 / trend_text: 상승·하락·횡보 표시용
+                        _trend_text = "데이터부족"
+                        if getattr(self._cfg, "yosep_trend_enabled", True):
+                            from strategy.jang_dong_min import (
+                                get_trend_status as _gts, calc_ema as _cema, calc_atr as _catr
+                            )
+                            _ema_p  = int(getattr(self._cfg, "yosep_ema_period",      20))
+                            _atr_p  = int(getattr(self._cfg, "yosep_atr_period",      14))
+                            _vol_lb = int(getattr(self._cfg, "yosep_volume_lookback", 20))
+                            _need   = max(_ema_p + 1, _atr_p + 1)
+                            _cl = list(snap.closes_1min)
+                            _hi = list(snap.highs_1min)
+                            _lo = list(snap.lows_1min)
+                            _vl = list(snap.volumes_1min)
+                            if len(_cl) >= _need and len(_hi) >= _need and len(_lo) >= _need:
+                                _tlv = _gts(
+                                    closes=_cl, highs=_hi, lows=_lo, volumes=_vl,
+                                    ema_period=_ema_p, atr_period=_atr_p,
+                                    volume_lookback=_vol_lb,
+                                )
+                                snap.trend_prev_level = snap.trend_level
+                                snap.trend_level = int(_tlv)
+                                self._store.update_trend_level(code, int(_tlv))
+
+                                # 방향 판단 — EMA20·ATR14 이용 (check_jdm_entry JDM_TREND_DOWN 동일 기준)
+                                _ema_now = _cema(_cl, _ema_p)
+                                _atr_now = _catr(_hi, _lo, _cl, _atr_p)
+                                _down_mult = float(getattr(self._cfg, "yosep_downtrend_block_atr", 0.8))
+                                if _ema_now is not None and _atr_now is not None and _atr_now > 0:
+                                    if snap.current_price < (_ema_now - _atr_now * _down_mult):
+                                        _trend_text = "하락"
+                                    elif _tlv >= 3:
+                                        _trend_text = "강세"
+                                    elif _tlv == 2:
+                                        _trend_text = "상승"
+                                    elif _tlv == 1:
+                                        _trend_text = "약세"
+                                    else:
+                                        _trend_text = "횡보"
+                                else:
+                                    _trend_text = "횡보"
+                            else:
+                                _trend_text = "데이터부족"
+
                         # ── 슬롯별 신호 라우팅 ────────────────────────────────
                         # EOD 종가매매 창(14:40~14:55) — overnight_mode_enabled 시 우선 체크
                         _eod_start = getattr(self._cfg, "eod_entry_start", None)
                         _eod_end   = getattr(self._cfg, "eod_entry_end", None)
-                        _is_eod_window = (
-                            getattr(self._cfg, "overnight_mode_enabled", False)
-                            and _eod_start is not None and _eod_end is not None
+                        _eod_time_match = (
+                            _eod_start is not None and _eod_end is not None
                             and _eod_start <= _now_t < _eod_end
                         )
+                        _is_eod_window = (
+                            getattr(self._cfg, "overnight_mode_enabled", False)
+                            and _eod_time_match
+                        )
+                        # EOD 창인데 야간보유 OFF → 1회 경고
+                        if _eod_time_match and not getattr(self._cfg, "overnight_mode_enabled", False):
+                            if not _eod_warn_logged:
+                                _eod_warn_logged = True
+                                _log.warning(
+                                    "⚠️  [EOD창] 14:40~14:55 종가매매 창 — 야간보유 버튼이 OFF입니다. "
+                                    "종가매매를 원하면 UI에서 '🌙 야간보유' 버튼을 켜주세요."
+                                )
+                                self.log_message.emit(
+                                    "⚠️ [EOD] 14:40~14:55 종가매매 창 진입 — 야간보유 OFF (버튼을 켜야 EOD 신호 발동)"
+                                )
+                        elif not _eod_time_match:
+                            _eod_warn_logged = False  # 창 벗어나면 다음 날을 위해 리셋
 
                         if _is_eod_window:
                             # 14:40~14:55: EOD 전용 신호만 판단 (기존 JDM/BREAKOUT 차단)
@@ -202,94 +283,163 @@ class ScannerWorker(QObject):
                             reason = check_pre_surge(snap, self._cfg)
                             if reason:
                                 sig_type = "PRE_SURGE"
+                                self._pre_surge_candidates.add(code)  # Phase 1 후보 등록
 
-                        elif _slot == "OPENING" and len(snap.closes_1min) < (self._cfg.jdm_ma_short + 1):
-                            # 09:00~09:08 (캔들 < 8): OPENING_SURGE — 비활성화 (추세 판단 불가, 손절 집중)
-                            # 캔들이 충분히 쌓일 때까지 대기 → JDM_ENTRY LITE 모드로 진입
-                            pass
+                        elif _slot == "OPENING":
+                            # 09:00~09:30 Phase 1: PRE_SURGE 후보 → OPENING_SCALP 우선 체크
+                            _phase1_min = int(getattr(self._cfg, "phase1_min_candles", 3))
+                            if (code in self._pre_surge_candidates
+                                    and len(snap.closes_1min) >= _phase1_min):
+                                reason = check_opening_scalp(snap, self._cfg)
+                                if reason:
+                                    sig_type = "OPENING_SCALP"
+
+                            # [B안] OPENING_SCALP 미발동 시 JDM_ENTRY LITE도 허용 (캔들 8+ 필요)
+                            if not sig_type and len(snap.closes_1min) >= (self._cfg.jdm_ma_short + 1):
+                                from strategy.jang_dong_min import get_daily_context as _gdc_gate
+                                from scanner.smart_scanner import ScannerLogger as _SL
+                                _dg = _gdc_gate(snap.daily_closes, snap.current_price)
+                                _ma_ok = True
+                                if getattr(self._cfg, "daily_ma20_filter_enabled", True):
+                                    if not _dg["above_ma20"] and _dg["daily_ma20"] > 0:
+                                        _SL.rejected(code, snap.name, "DAILY_MA20",
+                                                     f"일봉 20MA 하방 — {snap.current_price:,} < {_dg['daily_ma20']:,.0f}")
+                                        self._signal_prev_active[code] = False
+                                        _ma_ok = False
+                                if _ma_ok and getattr(self._cfg, "daily_ma60_filter_enabled", True):
+                                    if not _dg["above_ma60"] and _dg["daily_ma60"] > 0:
+                                        _SL.rejected(code, snap.name, "DAILY_MA60",
+                                                     f"일봉 60MA 하방 — {snap.current_price:,} < {_dg['daily_ma60']:,.0f}")
+                                        self._signal_prev_active[code] = False
+                                        _ma_ok = False
+                                if _ma_ok:
+                                    reason = check_jdm_entry(snap, self._cfg)
+                                    if reason:
+                                        sig_type = "JDM_ENTRY"
 
                         else:
-                            # OPENING(캔들 8+) / MORNING / MIDDAY / AFTERNOON:
-                            # BREAKOUT → JDM_ENTRY(LITE 포함) 순으로 판단
-
-                            # ── 일봉 20MA 공통 게이트 (BREAKOUT/JDM 모두 적용) ──
-                            if getattr(self._cfg, "daily_ma20_filter_enabled", True):
+                            # MORNING / MIDDAY / AFTERNOON (OPENING은 위 elif에서 처리됨)
+                            if True:
+                                # ── 일봉 MA 공통 게이트 (BREAKOUT/JDM 모두 적용) ──
+                                # ※ continue 대신 _ma_ok 플래그 사용 — MA 하방 종목도 watch list에는 표시
                                 from strategy.jang_dong_min import get_daily_context as _gdc_gate
+                                from scanner.smart_scanner import ScannerLogger as _SL
                                 _dg = _gdc_gate(snap.daily_closes, snap.current_price)
-                                if not _dg["above_ma20"] and _dg["daily_ma20"] > 0:
-                                    from scanner.smart_scanner import ScannerLogger as _SL
-                                    _SL.rejected(code, snap.name, "DAILY_MA20",
-                                                 f"일봉 20MA 하방 — 현재가 {snap.current_price:,} "
-                                                 f"< 20MA {_dg['daily_ma20']:,.0f}")
-                                    self._signal_prev_active[code] = False
-                                    continue
+                                _ma_ok = True
+                                if getattr(self._cfg, "daily_ma20_filter_enabled", True):
+                                    if not _dg["above_ma20"] and _dg["daily_ma20"] > 0:
+                                        _SL.rejected(code, snap.name, "DAILY_MA20",
+                                                     f"일봉 20MA 하방 — 현재가 {snap.current_price:,} "
+                                                     f"< 20MA {_dg['daily_ma20']:,.0f}")
+                                        self._signal_prev_active[code] = False
+                                        _ma_ok = False
+                                if _ma_ok and getattr(self._cfg, "daily_ma60_filter_enabled", True):
+                                    if not _dg["above_ma60"] and _dg["daily_ma60"] > 0:
+                                        _SL.rejected(code, snap.name, "DAILY_MA60",
+                                                     f"일봉 60MA 하방 — 현재가 {snap.current_price:,} "
+                                                     f"< 60MA {_dg['daily_ma60']:,.0f} (중기 하락 추세)")
+                                        self._signal_prev_active[code] = False
+                                        _ma_ok = False
 
-                            # ── BREAKOUT: 즉시매수 대신 N분 watch-and-confirm ──
-                            breakout_reason = check_breakout(
-                                snap,
-                                self._cfg.breakout_ratio,
-                                self._cfg.breakout_volume_mult,
-                                float(getattr(self._cfg, "breakout_pullback_from_high_pct", 1.5)),
-                                int(getattr(self._cfg, "breakout_min_rising_bars", 2)),
-                            )
-
-                            if breakout_reason:
-                                pending = self._breakout_pending.get(code)
-                                if pending is None:
-                                    # 첫 포착 — 대기 등록, 이번 사이클은 신호 발생 안 함
-                                    self._breakout_pending[code] = {
-                                        "first_time":  _tnow,
-                                        "first_price": snap.current_price,
-                                    }
-                                    _log.info(
-                                        "[BREAKOUT대기] %s(%s) %.0f원 — %.1f분 관찰 시작",
-                                        snap.name, code, snap.current_price, _confirm_secs / 60,
+                                if _ma_ok:
+                                    # ── BREAKOUT: 즉시매수 대신 N분 watch-and-confirm ──
+                                    breakout_reason = check_breakout(
+                                        snap,
+                                        self._cfg.breakout_ratio,
+                                        self._cfg.breakout_volume_mult,
+                                        float(getattr(self._cfg, "breakout_pullback_from_high_pct", 1.5)),
+                                        int(getattr(self._cfg, "breakout_min_rising_bars", 2)),
                                     )
-                                else:
-                                    elapsed  = _tnow - pending["first_time"]
-                                    fp       = pending["first_price"]
-                                    drawdown = (snap.current_price - fp) / fp * 100 if fp > 0 else 0.0
-                                    if drawdown <= _cancel_pct:
-                                        # 관찰 중 하락 → 취소
-                                        _log.info(
-                                            "[BREAKOUT취소] %s(%s) 하락 %.2f%% ≤ %.1f%% — 대기 해제",
-                                            snap.name, code, drawdown, _cancel_pct,
-                                        )
-                                        del self._breakout_pending[code]
-                                    elif elapsed >= _confirm_secs:
-                                        # N분 유지 확인 → 공통 게이트 통과 여부 확인
-                                        _gate = check_breakout_gate(snap, self._cfg)
-                                        if _gate is None:
-                                            # 게이트 차단 — 대기 취소하고 신호 미발생
-                                            del self._breakout_pending[code]
+
+                                    if breakout_reason:
+                                        _tlevel_now = int(getattr(snap, "trend_level", 0))
+                                        if _slot == "AFTERNOON":
+                                            _min_trend_req = int(getattr(self._cfg,
+                                                "yosep_min_trend_level_afternoon", 3))
                                         else:
-                                            sig_type = "BREAKOUT"
-                                            reason   = (
-                                                f"{breakout_reason} | {elapsed/60:.1f}분 유지 확인"
-                                                f" (초기가 {fp:,}→현재 {snap.current_price:,})"
-                                                f" | {_gate}"
+                                            _min_trend_req = int(getattr(self._cfg,
+                                                "yosep_min_trend_level", 1))
+                                        _breakout_trend_blocked = _tlevel_now < _min_trend_req
+                                        if _breakout_trend_blocked:
+                                            if code in self._breakout_pending:
+                                                del self._breakout_pending[code]
+                                            _log.debug(
+                                                "[BREAKOUT차단] %s(%s) 추세Lv%d < 최소Lv%d [%s] — 대기 등록 스킵",
+                                                snap.name, code, _tlevel_now, _min_trend_req, _slot,
+                                            )
+
+                                        if not _breakout_trend_blocked:
+                                            pending = self._breakout_pending.get(code)
+                                            if pending is None:
+                                                _tlevel = int(getattr(snap, "trend_level", 0))
+                                                if _tlevel >= 3:
+                                                    _eff_secs = float(getattr(self._cfg,
+                                                        "breakout_confirm_minutes_trend3", 0.0)) * 60.0
+                                                elif _tlevel >= 2:
+                                                    _eff_secs = float(getattr(self._cfg,
+                                                        "breakout_confirm_minutes_trend2", 1.0)) * 60.0
+                                                else:
+                                                    _eff_secs = _confirm_secs
+                                                self._breakout_pending[code] = {
+                                                    "first_time":  _tnow,
+                                                    "first_price": snap.current_price,
+                                                    "confirm_secs": _eff_secs,
+                                                    "trend_level": _tlevel,
+                                                }
+                                                _log.info(
+                                                    "[BREAKOUT대기] %s(%s) %.0f원 — %.1f분 관찰 시작 (추세Lv%d)",
+                                                    snap.name, code, snap.current_price,
+                                                    _eff_secs / 60, _tlevel,
+                                                )
+                                            else:
+                                                elapsed   = _tnow - pending["first_time"]
+                                                fp        = pending["first_price"]
+                                                _eff_secs = pending.get("confirm_secs", _confirm_secs)
+                                                _tlevel   = pending.get("trend_level", 0)
+                                                drawdown  = (snap.current_price - fp) / fp * 100 if fp > 0 else 0.0
+                                                if drawdown <= _cancel_pct:
+                                                    _log.info(
+                                                        "[BREAKOUT취소] %s(%s) 하락 %.2f%% ≤ %.1f%% — 대기 해제",
+                                                        snap.name, code, drawdown, _cancel_pct,
+                                                    )
+                                                    del self._breakout_pending[code]
+                                                elif elapsed >= _eff_secs:
+                                                    _gate = check_breakout_gate(snap, self._cfg)
+                                                    if _gate is None:
+                                                        del self._breakout_pending[code]
+                                                    else:
+                                                        sig_type = "BREAKOUT"
+                                                        _confirm_label = (
+                                                            f"즉시확인(추세Lv{_tlevel})"
+                                                            if _eff_secs == 0
+                                                            else f"{elapsed/60:.1f}분 유지 확인(추세Lv{_tlevel})"
+                                                        )
+                                                        reason = (
+                                                            f"{breakout_reason} | {_confirm_label}"
+                                                            f" (초기가 {fp:,}→현재 {snap.current_price:,})"
+                                                            f" | {_gate}"
+                                                        )
+                                                        del self._breakout_pending[code]
+                                                else:
+                                                    _log.debug(
+                                                        "[BREAKOUT관찰중] %s(%s) %.1f/%.1f분 경과, 등락 %.2f%% (추세Lv%d)",
+                                                        snap.name, code, elapsed / 60, _eff_secs / 60,
+                                                        drawdown, _tlevel,
+                                                    )
+                                    else:
+                                        # BREAKOUT 조건 해제 → 대기 취소
+                                        if code in self._breakout_pending:
+                                            _log.info(
+                                                "[BREAKOUT해제] %s(%s) 돌파 조건 소멸 — 대기 취소",
+                                                snap.name, code,
                                             )
                                             del self._breakout_pending[code]
-                                    else:
-                                        # 아직 대기 중
-                                        _log.debug(
-                                            "[BREAKOUT관찰중] %s(%s) %.1f/%.1f분 경과, 등락 %.2f%%",
-                                            snap.name, code, elapsed / 60, _confirm_secs / 60, drawdown,
-                                        )
-                            else:
-                                # BREAKOUT 조건 해제 → 대기 취소
-                                if code in self._breakout_pending:
-                                    _log.info(
-                                        "[BREAKOUT해제] %s(%s) 돌파 조건 소멸 — 대기 취소",
-                                        snap.name, code,
-                                    )
-                                    del self._breakout_pending[code]
 
-                            # ── JDM_ENTRY (LITE 포함) ──
-                            if not reason:
-                                reason = check_jdm_entry(snap, self._cfg)
-                                if reason:
-                                    sig_type = "JDM_ENTRY"
+                                    # ── JDM_ENTRY (LITE 포함) ──
+                                    if not reason:
+                                        reason = check_jdm_entry(snap, self._cfg)
+                                        if reason:
+                                            sig_type = "JDM_ENTRY"
 
                         # ── 수급 점수 반영 ──────────────────────────────────
                         if sig_type and self._cfg.investor_filter_enabled:
@@ -377,6 +527,10 @@ class ScannerWorker(QObject):
                     "investor_score": getattr(_snap, "investor_score",   0) if _snap else 0,
                     "foreign_net":    getattr(_snap, "foreign_net_buy",  0) if _snap else 0,
                     "inst_net":       getattr(_snap, "inst_net_buy",     0) if _snap else 0,
+                    "trend_level":    getattr(_snap, "trend_level",      0) if _snap else 0,
+                    "trend_prev":     getattr(_snap, "trend_prev_level", 0) if _snap else 0,
+                    "chejan":         getattr(_snap, "chejan_strength", 0.0) if _snap else 0.0,
+                    "trend_text":     _trend_text if code in candidate_codes else "데이터부족",
                 })
 
             for _c in list(self._signal_prev_active.keys()):
@@ -420,6 +574,10 @@ class PortfolioWorker(QObject):
     @pyqtSlot()
     def sync(self) -> None:
         """메인 스레드에서 QTimer 로 호출된다."""
+        # _tr_busy 중이면 스킵 — scan/crash 등 다른 TR 진행 중 (다음 틱에 자동 재시도)
+        _kw = getattr(self._om, "_kiwoom", None)
+        if _kw and getattr(_kw, "_tr_busy", False):
+            return
         try:
             cash = self._om.sync_balance()
             self.refresh_done.emit({
@@ -596,13 +754,123 @@ class HeaderBar(QWidget):
         )
 
 
+class ManualBuyDialog(QDialog):
+    """수동 매수 확인 다이얼로그 — 시장가/지정가, 수량 입력."""
+
+    def __init__(self, code: str, name: str, price: int, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("수동 매수")
+        self.setFixedWidth(280)
+        self.setModal(True)
+
+        self._code  = code
+        self._price = price
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+
+        # ── 종목 정보 ──────────────────────────────────────────────────
+        info = QLabel(f"<b>{name}</b>  ({code})")
+        info.setAlignment(Qt.AlignCenter)
+        lay.addWidget(info)
+
+        self._lbl_price = QLabel(f"현재가: {price:,} 원")
+        self._lbl_price.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._lbl_price)
+
+        lay.addWidget(_hline())
+
+        # ── 주문유형 ──────────────────────────────────────────────────
+        g = QGridLayout()
+        g.setColumnStretch(1, 1)
+
+        g.addWidget(QLabel("주문유형"), 0, 0)
+        self._combo_type = QComboBox()
+        self._combo_type.addItems(["시장가", "지정가"])
+        self._combo_type.currentTextChanged.connect(self._on_type_changed)
+        g.addWidget(self._combo_type, 0, 1)
+
+        g.addWidget(QLabel("수량"), 1, 0)
+        self._spin_qty = QSpinBox()
+        self._spin_qty.setRange(1, 9999)
+        self._spin_qty.setValue(10)
+        self._spin_qty.setSuffix(" 주")
+        self._spin_qty.valueChanged.connect(self._update_estimate)
+        g.addWidget(self._spin_qty, 1, 1)
+
+        g.addWidget(QLabel("지정가"), 2, 0)
+        self._spin_lmt = QSpinBox()
+        self._spin_lmt.setRange(1, 99_999_999)
+        self._spin_lmt.setValue(price)
+        self._spin_lmt.setSingleStep(10)
+        self._spin_lmt.setSuffix(" 원")
+        self._spin_lmt.setEnabled(False)   # 시장가가 기본
+        self._spin_lmt.valueChanged.connect(self._update_estimate)
+        g.addWidget(self._spin_lmt, 2, 1)
+
+        lay.addLayout(g)
+
+        # ── 예상금액 ──────────────────────────────────────────────────
+        self._lbl_est = QLabel()
+        self._lbl_est.setAlignment(Qt.AlignCenter)
+        self._lbl_est.setStyleSheet("color:#fab387; font-weight:bold;")
+        lay.addWidget(self._lbl_est)
+        self._update_estimate()
+
+        lay.addWidget(_hline())
+
+        # ── 버튼 ──────────────────────────────────────────────────────
+        btns = QDialogButtonBox()
+        self._btn_ok     = btns.addButton("매수 확인", QDialogButtonBox.AcceptRole)
+        self._btn_cancel = btns.addButton("취소",      QDialogButtonBox.RejectRole)
+        self._btn_ok.setStyleSheet("background:#a6e3a1; color:#1e1e2e; font-weight:bold;")
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    # ── 내부 슬롯 ────────────────────────────────────────────────────
+    def _on_type_changed(self, t: str) -> None:
+        is_limit = (t == "지정가")
+        self._spin_lmt.setEnabled(is_limit)
+        self._update_estimate()
+
+    def _update_estimate(self) -> None:
+        qty = self._spin_qty.value()
+        if self._combo_type.currentText() == "지정가":
+            p = self._spin_lmt.value()
+        else:
+            p = self._price
+        self._lbl_est.setText(f"예상금액: {qty * p:,} 원")
+
+    # ── 결과 접근 ────────────────────────────────────────────────────
+    def result_values(self) -> tuple[int, str, int]:
+        """(수량, 주문유형코드, 가격) — 시장가=03, 지정가=00"""
+        qty  = self._spin_qty.value()
+        if self._combo_type.currentText() == "지정가":
+            otype = "00"
+            oprice = self._spin_lmt.value()
+        else:
+            otype  = "03"
+            oprice = 0
+        return qty, otype, oprice
+
+
+def _hline() -> QFrame:
+    """수평 구분선."""
+    f = QFrame()
+    f.setFrameShape(QFrame.HLine)
+    f.setFrameShadow(QFrame.Sunken)
+    return f
+
+
 class ScannerPanel(QWidget):
     """좌측 — 스캐너 포착 종목 리스트"""
 
-    row_clicked = pyqtSignal(str)   # 선택 종목코드
+    row_clicked          = pyqtSignal(str)           # 선택 종목코드
+    manual_buy_requested = pyqtSignal(str, str, int)  # code, name, price
 
     # 스캐너: 전일 대비 당일 등락률(%) — 보유현황의 '수익률'(평단 대비)과 구분
-    _HEADERS = ["종목코드", "종목명", "현재가", "당일등락률", "거래대금", "신호", "수급"]
+    _HEADERS = ["종목코드", "종목명", "현재가", "당일등락률", "거래대금", "신호", "추세", "수급", "매수"]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -617,15 +885,13 @@ class ScannerPanel(QWidget):
         self._table = QTableWidget(0, len(self._HEADERS))
         self._table.setHorizontalHeaderLabels(self._HEADERS)
         hdr = self._table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.Interactive)
+        hdr.setSectionResizeMode(QHeaderView.Interactive)  # 모든 컬럼 마우스 드래그 가능
         hdr.setStretchLastSection(False)
-        # 컬럼별 최적 너비 (글자 크기 비례)
-        col_widths = [68, 110, 82, 62, 100, 72, 48]  # 코드/명/가/등락/거래대금/신호/수급
+        # 컬럼별 초기 너비 — 마우스로 자유롭게 조절 가능
+        col_widths = [65, 100, 78, 60, 90, 65, 72, 36, 42]  # 코드/명/가/등락/거래대금/신호/추세/수급/매수
         for i, w in enumerate(col_widths):
             hdr.resizeSection(i, w)
-        hdr.setSectionResizeMode(1, QHeaderView.Stretch)          # 종목명 늘어남
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents) # 신호 자동
-        hdr.setSectionResizeMode(6, QHeaderView.Fixed)            # 수급 고정
+        hdr.setSectionResizeMode(1, QHeaderView.Stretch)  # 종목명만 자동 늘어남 (나머지는 Interactive 유지)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -671,6 +937,24 @@ class ScannerPanel(QWidget):
                 if (f_net or i_net) else "수급 미조회"
             )
 
+            # 추세 표시
+            trend_text  = row.get("trend_text", "데이터부족")
+            tlevel      = int(row.get("trend_level", 0))
+            chejan      = float(row.get("chejan", 0.0))
+            if trend_text == "강세":
+                trend_color = QColor("#a6e3a1")   # 초록
+            elif trend_text == "상승":
+                trend_color = QColor("#89dceb")   # 시안
+            elif trend_text == "약세":
+                trend_color = QColor("#cdd6f4")   # 연청
+            elif trend_text == "하락":
+                trend_color = QColor("#f38ba8")   # 빨강
+            elif trend_text == "횡보":
+                trend_color = QColor("#a6adc8")   # 연회색
+            else:
+                trend_color = QColor("#585b70")   # 어두운 회색 (데이터부족)
+            trend_tip = f"추세Lv {tlevel} | 체결강도 {chejan:.0f}%"
+
             texts = [
                 row["code"],
                 row["name"],
@@ -678,6 +962,7 @@ class ScannerPanel(QWidget):
                 f"{change:+.2f}%",
                 format_trade_amount_korean(trade_amt),
                 row.get("signal", ""),
+                trend_text,
                 inv_text,
             ]
             for c, text in enumerate(texts):
@@ -692,13 +977,38 @@ class ScannerPanel(QWidget):
                 )
                 if c in (2, 3):
                     item.setForeground(color)
-                if c == 6:
+                if c == 6:   # 추세
+                    item.setForeground(trend_color)
+                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignCenter)
+                    item.setToolTip(trend_tip)
+                if c == 7:   # 수급
                     item.setForeground(inv_color)
                     item.setTextAlignment(Qt.AlignVCenter | Qt.AlignCenter)
                     item.setToolTip(inv_tip)
                 if bg_color:
                     item.setBackground(bg_color)
                 self._table.setItem(r, c, item)
+
+            # ── 매수 버튼 (마지막 컬럼) — 종목마다 1개 ──────────────
+            _code  = row["code"]
+            _name  = row["name"]
+            _price = row["price"]
+            existing_btn = self._table.cellWidget(r, 8)
+            # 같은 종목이면 버튼 재사용, 다른 종목이면 새로 생성
+            if existing_btn is None or existing_btn.property("code") != _code:
+                btn = QPushButton("매수")
+                btn.setProperty("code", _code)
+                btn.setFixedHeight(22)
+                btn.setStyleSheet(
+                    "QPushButton{background:#45475a;color:#cdd6f4;border-radius:3px;font-size:11px;}"
+                    "QPushButton:hover{background:#89dceb;color:#1e1e2e;}"
+                    "QPushButton:pressed{background:#74c7ec;}"
+                )
+                btn.clicked.connect(
+                    lambda _chk, c=_code, n=_name, p=_price:
+                        self.manual_buy_requested.emit(c, n, p)
+                )
+                self._table.setCellWidget(r, 8, btn)
 
     def _on_click(self, row: int, _col: int) -> None:
         item = self._table.item(row, 0)
@@ -1353,8 +1663,43 @@ class InvestorPanel(QWidget):
                 self._table.setItem(0, c, QTableWidgetItem(""))
 
 
+class ScannerLogHandler(QObject, logging.Handler):
+    """
+    scanner.audit 로거의 INFO(PASS) 메시지를 Qt 시그널로 메인 스레드에 중계한다.
+
+    ScannerWorker 스레드에서 emit() 호출 → log_entry 시그널 → 메인 스레드 슬롯.
+    DEBUG(FAIL)는 scanner.log 파일에만 기록하고 UI에는 표시하지 않는다.
+    """
+    log_entry = pyqtSignal(str)   # "PASS|FAIL", 포맷된 메시지
+
+    def __init__(self, parent=None):
+        QObject.__init__(self, parent)
+        logging.Handler.__init__(self)
+        self.setLevel(logging.DEBUG)  # PASS(INFO) + FAIL(DEBUG) 모두 수신, 표시는 필터링
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = record.getMessage()          # "PASS\tcode\tname\tstep\treason"
+            parts = msg.split("\t")
+            if len(parts) >= 5:
+                level  = parts[0]              # "PASS" | "FAIL"
+                code   = parts[1]
+                name   = parts[2]
+                step   = parts[3]
+                reason = "\t".join(parts[4:])
+                formatted = f"{level}\t{name}({code})\t[{step}]\t{reason}"
+            else:
+                formatted = f"INFO\t{msg}\t\t"
+            self.log_entry.emit(formatted)
+        except Exception:
+            self.handleError(record)
+
+
 class LogPanel(QWidget):
-    """하단 — 시스템 로그"""
+    """하단 — 스캐너 진단 + 주문/체결 이벤트"""
+
+    # 최대 표시 줄 수 — 초과 시 오래된 줄 제거
+    _MAX_LINES = 300
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1363,7 +1708,7 @@ class LogPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        title = QLabel("  📋 시스템 로그")
+        title = QLabel("  📡 스캐너 진단")
         title.setObjectName("panel_title")
         lay.addWidget(title)
 
@@ -1373,23 +1718,63 @@ class LogPanel(QWidget):
         self._log.setObjectName("log_area")
         lay.addWidget(self._log)
 
+        self._line_count = 0
+
+    def _trim_if_needed(self) -> None:
+        """줄 수가 _MAX_LINES 초과 시 위쪽 50줄 제거한다."""
+        if self._line_count > self._MAX_LINES:
+            cur = self._log.textCursor()
+            cur.movePosition(QTextCursor.MoveOperation.Start)
+            for _ in range(50):
+                cur.movePosition(QTextCursor.MoveOperation.Down,
+                                 QTextCursor.MoveMode.KeepAnchor)
+            cur.removeSelectedText()
+            self._line_count -= 50
+
+    @pyqtSlot(str)
+    def append_scanner(self, formatted: str) -> None:
+        """ScannerLogHandler 에서 오는 PASS/FAIL 진단 메시지를 표시한다."""
+        parts = formatted.split("\t")
+        if len(parts) < 4:
+            return
+        level, who, step, reason = parts[0], parts[1], parts[2], "\t".join(parts[3:])
+        ts = datetime.now().strftime("%H:%M:%S")
+
+        if level == "PASS":
+            color  = "#a6e3a1"   # 연두색 — 통과
+            prefix = "✅"
+        elif level == "FAIL":
+            color  = "#585b70"   # 어두운 회색 — 거절 (배경에 묻혀 눈에 덜 띔)
+            prefix = "✗"
+        else:
+            color  = "#cdd6f4"
+            prefix = "ℹ"
+
+        msg = f"[{ts}] {prefix} {who} {step} {reason}"
+        self._log.append(f'<span style="color:{color};">{msg}</span>')
+        self._log.moveCursor(QTextCursor.MoveOperation.End)
+        self._line_count += 1
+        self._trim_if_needed()
+
     @pyqtSlot(str)
     def append(self, text: str) -> None:
+        """주문·체결·시스템 이벤트 (기존 경로)."""
         ts  = datetime.now().strftime("%H:%M:%S")
         msg = f"[{ts}] {text}"
 
-        # 색상 분류
         if "체결" in text or "완료" in text:
-            color = "#a6e3a1"
+            color = "#89dceb"    # 시안 — 체결
         elif "오류" in text or "실패" in text or "경고" in text:
-            color = "#f38ba8"
+            color = "#f38ba8"    # 빨강 — 오류
         elif "🚨" in text or "신호" in text:
-            color = "#fab387"
+            color = "#fab387"    # 주황 — 신호
         else:
-            color = "#cdd6f4"
+            color = "#6c7086"    # 회색 — 일반 시스템 (배경에 묻혀 진단 로그 강조)
 
         self._log.append(f'<span style="color:{color};">{msg}</span>')
         self._log.moveCursor(QTextCursor.MoveOperation.End)
+        self._line_count += 1
+        self._trim_if_needed()
 
 
 # ---------------------------------------------------------------------------
@@ -1587,6 +1972,12 @@ class MainWindow(QMainWindow):
         self.portfolio_panel.sl_changed.connect(self._on_sl_changed)
         self.log_panel.append("[스캐너] SmartScanner 초기화 완료")
 
+        # ── ScannerLogHandler — scanner.audit → 대시보드 패널 중계 ─────────
+        from scanner.smart_scanner import scan_log as _scan_audit_log
+        self._scan_log_handler = ScannerLogHandler(self)
+        self._scan_log_handler.log_entry.connect(self.log_panel.append_scanner)
+        _scan_audit_log.addHandler(self._scan_log_handler)
+
         # ── NewsAnalyzer — 백그라운드 뉴스 분석 ──────────────────────────
         import queue as _queue
         from scanner.news_analyzer import NewsAnalyzer
@@ -1631,6 +2022,9 @@ class MainWindow(QMainWindow):
         # ── 스캐너 클릭 → 차트 갱신 ─────────────────────────────────────
         self.scanner_panel.row_clicked.connect(self._on_code_selected)
 
+        # ── 스캐너 수동 매수 버튼 ─────────────────────────────────────
+        self.scanner_panel.manual_buy_requested.connect(self._on_manual_buy)
+
         # ── 보유현황 클릭 → 차트 갱신 ───────────────────────────────────
         self.portfolio_panel.row_clicked.connect(self._on_code_selected)
 
@@ -1659,10 +2053,11 @@ class MainWindow(QMainWindow):
         self._chart_timer.timeout.connect(self._refresh_portfolio_prices)
         self._chart_timer.start(2000)
 
-        # 잔고 동기화 (1분)
+        # 잔고 동기화 (1분) — scan_refresh_timer(60s)와 발화 시간 어긋나도록 5s 지연 시작
         self._balance_timer = QTimer(self)
         self._balance_timer.timeout.connect(self._port_worker.sync)
-        self._balance_timer.start(60_000)
+        # QTimer.singleShot으로 첫 발화를 5s 늦춰 scan timer와 충돌 방지
+        QTimer.singleShot(5_000, lambda: self._balance_timer.start(60_000))
 
         # 시장 시간 스케줄러 (1분마다 체크)
         self._schedule_timer = QTimer(self)
@@ -1897,6 +2292,10 @@ class MainWindow(QMainWindow):
         if not self._auto_trading:
             return
 
+        # 다른 TR 진행 중이면 스킵 — 다음 135s 틱에 재시도
+        if getattr(self._kiwoom, "_tr_busy", False):
+            return
+
         crash_threshold: float = float(_RISK.get("market_crash_pct", -2.0))
 
         # 코스피(001), 코스닥(101) 순서로 조회 — 등락률 cfg에 갱신 후 crash 여부 판단
@@ -1982,6 +2381,14 @@ class MainWindow(QMainWindow):
                 self.header._on_auto_clicked(True)
                 self._opened_today = True
                 self.log_panel.append("📈 08:00 자동매매 시작 (시간외 포함)")
+
+        # 10:30 Phase 1 강제청산 (평일만) — OPENING_SCALP 포지션 보유 시 전량 청산
+        elif time(10, 30) <= now < time(10, 31) and datetime.now().weekday() < 5:
+            self._liquidate_phase1_positions(forced=True)
+
+        # 10:30 이후 Phase 1 트레일 체크 (매 분) — 고점 대비 1% 하락 시 청산
+        elif time(10, 31) <= now < time(15, 15) and datetime.now().weekday() < 5:
+            self._liquidate_phase1_positions(forced=False)
 
         # 15:15~15:19 자동 청산 (평일만, 미청산 포지션 계속 정리)
         elif time(15, 15) <= now < time(15, 20) and datetime.now().weekday() < 5:
@@ -2225,6 +2632,45 @@ class MainWindow(QMainWindow):
                                           reason=f"EOD 타임컷 09:30 ({chg:+.2f}%)")
                 _logger.info("[EOD타임컷] %s(%s) %+.2f%%", pos.name, code, chg)
 
+    def _liquidate_phase1_positions(self, forced: bool = False) -> None:
+        """
+        Phase 1 (OPENING_SCALP) 포지션 관리:
+        - forced=True  (10:30): 트레일 여부 무관 전량 강제 청산
+        - forced=False (10:31~): 고점 대비 phase1_trail_drop_pct% 하락 시 청산
+        """
+        import logging as _log_module
+        _logger = _log_module.getLogger(__name__)
+        _trail_drop = float(getattr(self._scan_cfg, "phase1_trail_drop_pct", 1.0))
+
+        for code, pos in list(self.order_mgr.positions.items()):
+            if getattr(pos, "entry_phase", 0) != 1:
+                continue
+            if pos.qty <= 0:
+                continue
+
+            if forced:
+                # 10:30 강제청산 — Phase 1 포지션 전량 매도
+                self.order_mgr.force_exit(code, pos.name, pos.qty,
+                                          reason="Phase1 10:30 강제청산")
+                self.log_panel.append(
+                    f"⏱ [Phase1강제청산] {pos.name}({code}) {pos.qty}주 — 10:30 타임컷"
+                )
+                _logger.info("[Phase1강제청산] %s(%s) %d주 시장가 매도", pos.name, code, pos.qty)
+            else:
+                # 트레일 — 고점 대비 drop% 이상 하락 시 청산
+                if pos.peak_price <= 0 or pos.current_price <= 0:
+                    continue
+                drop_pct = (pos.peak_price - pos.current_price) / pos.peak_price * 100
+                if drop_pct >= _trail_drop:
+                    self.order_mgr.force_exit(code, pos.name, pos.qty,
+                                              reason=f"Phase1 trail -{_trail_drop:.1f}%")
+                    self.log_panel.append(
+                        f"📉 [Phase1트레일] {pos.name}({code}) 고점 {pos.peak_price:,} → "
+                        f"현재 {pos.current_price:,} (-{drop_pct:.1f}%) 청산"
+                    )
+                    _logger.info("[Phase1트레일] %s(%s) 고점 %.0f → 현재 %.0f (-%.1f%%) 청산",
+                                 pos.name, code, pos.peak_price, pos.current_price, drop_pct)
+
     def _liquidate_all_positions(self) -> None:
         """오늘 이 앱에서 매수한 수량만 강제 청산 (장 종료 1분 전 15:19). 기존 보유·HTS 매수분은 제외."""
         from datetime import date as _date
@@ -2375,6 +2821,28 @@ class MainWindow(QMainWindow):
             "positions": dict(self.order_mgr.positions),
         })
 
+    @pyqtSlot(str, str, int)
+    def _on_manual_buy(self, code: str, name: str, price: int) -> None:
+        """스캐너 수동 매수 버튼 처리 — 다이얼로그 → order_mgr.buy()."""
+        dlg = ManualBuyDialog(code, name, price, parent=self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        qty, otype, oprice = dlg.result_values()
+
+        # 포지션 한도 초과 경고 (차단은 하지 않음 — 수동이므로 사용자 판단 우선)
+        n_pos = len(self.order_mgr.positions)
+        max_pos = getattr(self.order_mgr, "max_positions", 5)
+        if n_pos >= max_pos:
+            self.log_panel.append(
+                f"⚠ [수동매수] 포지션 {n_pos}/{max_pos}개 한도 초과 상태로 주문합니다"
+            )
+
+        # buy(price=0) → 시장가, buy(price>0) → 지정가
+        order_label = "시장가" if otype == "03" else f"지정가 {oprice:,}원"
+        self.log_panel.append(f"[수동매수] {name}({code}) {qty}주 {order_label} 요청")
+        self.order_mgr.buy(code, name, qty, price=oprice)
+
     @pyqtSlot()
     def _run_scanner_scan(self) -> None:
         """
@@ -2426,12 +2894,50 @@ class MainWindow(QMainWindow):
             self.scan_status.done(
                 f"데이터 갱신 완료 / 전체 {len(self._snap_store)}종목 모니터링"
             )
+            # 일봉 갱신 대기 목록이 있으면 QTimer 체인으로 비동기 처리
+            # (메인 스레드 블로킹 없이 350ms 간격으로 1종목씩 처리)
+            _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))
+            if _pending:
+                self._smart_scanner._daily_refresh_pending = []
+                QTimer.singleShot(500, lambda codes=_pending: self._daily_candle_chain(codes, 0))
         except Exception as e:
             self.log_panel.append(f"[스캔 오류] {e}")
             self.scan_status.done(f"오류: {e}")
             _logger.exception("[_run_scanner_scan] 예외")
         finally:
             self._scan_in_progress = False
+
+    def _daily_candle_chain(self, codes: list, idx: int) -> None:
+        """
+        일봉 데이터를 QTimer 체인으로 1종목씩 비동기 갱신.
+
+        350ms 간격으로 한 번에 1 TR 호출 → TRRateLimiter가 sleep 불필요
+        (0.35s > 0.25s MIN_INTERVAL), UI 이벤트 루프 완전 자유.
+        """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+
+        if idx >= len(codes):
+            _logger.info("[일봉갱신] 완료 — %d종목 처리", len(codes))
+            return
+
+        # _tr_busy 중이면 이 종목 스킵 후 다음으로 (무한 재시도 방지)
+        if getattr(self._kiwoom, "_tr_busy", False):
+            _logger.debug("[일봉갱신] TR 사용 중 — %s 스킵 후 다음 종목", codes[idx])
+            QTimer.singleShot(350, lambda: self._daily_candle_chain(codes, idx + 1))
+            return
+
+        code = codes[idx]
+        try:
+            candles = self._kiwoom.get_daily_candles(code, count=120)
+            if candles:
+                self._snap_store.set_daily_candles(code, candles)
+                _logger.debug("[일봉갱신] %s 완료 (%d개)", code, len(candles))
+        except Exception as e:
+            _logger.warning("[일봉갱신] %s 실패: %s", code, e)
+
+        # 다음 종목: 350ms 후 처리 (TRRateLimiter 0.25s 간격 자동 충족 → sleep=0)
+        QTimer.singleShot(350, lambda: self._daily_candle_chain(codes, idx + 1))
 
     def _on_scan_signal_direct(self, sig) -> None:
         """SmartScanner.on_signal 콜백 — 메인 스레드에서 직접 호출됨"""
@@ -2463,11 +2969,28 @@ class MainWindow(QMainWindow):
                 logger.debug("[신호 필터] 최대 보유수 도달 — %s(%s) 신호 무시", sig.name, sig.code)
                 return
             # [일일 손익 한도] 수익 잠금 또는 손절 한도 도달 시 신호 무시
-            if self._new_entry_locked:
+            # EOD_ENTRY는 예외 — 종가매매는 별도 전략이므로 손익 한도 무관하게 허용
+            if self._new_entry_locked and sig.signal_type != "EOD_ENTRY":
                 self.log_panel.append(
                     f"🔒 [락] {sig.name}({sig.code}) 신호 무시 — 일일 손익 한도 도달"
                 )
                 return
+
+            # Phase 1 (OPENING_SCALP) — entry_phase 태깅 + 최대 포지션 한도 체크
+            if sig.signal_type == "OPENING_SCALP":
+                sig.entry_phase = 1
+                _ph1_max = int(getattr(self._scan_cfg, "phase1_max_positions", 3))
+                _ph1_count = sum(1 for p in self.order_mgr.positions.values()
+                                 if getattr(p, "entry_phase", 0) == 1)
+                if _ph1_count >= _ph1_max:
+                    self.log_panel.append(
+                        f"🔒 [Phase1한도] {sig.name}({sig.code}) 스킵 — "
+                        f"Phase1 최대 {_ph1_max}개 도달 (현재 {_ph1_count}개)"
+                    )
+                    return
+            else:
+                sig.entry_phase = 2
+
             self.order_mgr.handle_signal(sig)
 
     def _drain_news_queue(self) -> None:
@@ -2785,22 +3308,35 @@ class MainWindow(QMainWindow):
                 # peak가 activation 이상인 경우에만 트레일 발동
                 if _peak_chg >= _trail_activation:
                     cfg = self._scan_cfg
-                    if _peak_chg < cfg.trail_tier1_max:
-                        _trail_pct = cfg.trail_pct_tier1
-                    elif _peak_chg < cfg.trail_tier2_max:
-                        _trail_pct = cfg.trail_pct_tier2
+                    _strong_lv = int(getattr(cfg, "strong_trend_hold_level", 3))
+                    _is_strong_trend = int(getattr(pos, "trend_level", 0)) >= _strong_lv
+
+                    if _is_strong_trend:
+                        # Strong Trend 포지션: tier1(1.5%) 건너뛰고 tier2(2.5%)부터 시작
+                        # → 추세 상승 중 조기 청산 방지, 더 큰 수익 구간 허용
+                        if _peak_chg < cfg.trail_tier2_max:
+                            _trail_pct = cfg.trail_pct_tier2
+                        else:
+                            _trail_pct = cfg.trail_pct_tier3
                     else:
-                        _trail_pct = cfg.trail_pct_tier3
+                        if _peak_chg < cfg.trail_tier1_max:
+                            _trail_pct = cfg.trail_pct_tier1
+                        elif _peak_chg < cfg.trail_tier2_max:
+                            _trail_pct = cfg.trail_pct_tier2
+                        else:
+                            _trail_pct = cfg.trail_pct_tier3
+
                     _trail_price = int(pos.peak_price * (1 - _trail_pct / 100))
                     if pos.current_price <= _trail_price:
+                        _trend_tag = " [Strong홀딩]" if _is_strong_trend else ""
                         self.log_panel.append(
-                            f"🔻 [트레일스탑] {pos.name}({code}) "
+                            f"🔻 [트레일스탑{_trend_tag}] {pos.name}({code}) "
                             f"현재가 {pos.current_price:,} ≤ 트레일가 {_trail_price:,} "
                             f"(고점 {pos.peak_price:,} - {_trail_pct:.1f}%) — {sell_qty}주 전량 청산"
                         )
                         self._audit.log_sell_decision(
                             code,
-                            f"트레일스탑 현재가 {pos.current_price:,} ≤ {_trail_price:,} "
+                            f"트레일스탑{_trend_tag} 현재가 {pos.current_price:,} ≤ {_trail_price:,} "
                             f"(고점 {pos.peak_price:,}, trail {_trail_pct:.1f}%)",
                             pos.current_price,
                         )
@@ -2824,6 +3360,15 @@ class MainWindow(QMainWindow):
             # ━━━ Time-cut: 설정값(time_cut_minutes) 경과 시 수익률 무관 전량 청산 (안전망) ━━━
             # EOD 포지션은 타임컷 제외 — _check_overnight_gap / _check_overnight_timecut 에서 관리
             if getattr(pos, "eod_trade", False):
+                continue
+            # Strong Trend 포지션 타임컷 면제 — 추세 유지 중 조기 청산 방지
+            # 청산은 트레일스탑 또는 추세소멸(should_exit_on_trend_decay)에 위임
+            _strong_lv = int(getattr(self._scan_cfg, "strong_trend_hold_level", 3))
+            _timecut_exempt = (
+                getattr(self._scan_cfg, "strong_trend_timecut_exempt", True)
+                and int(getattr(pos, "trend_level", 0)) >= _strong_lv
+            )
+            if _timecut_exempt:
                 continue
             _time_cut_min = getattr(self._scan_cfg, "time_cut_minutes", 25)
             entry_time = getattr(pos, "entry_time", None)
@@ -2867,6 +3412,9 @@ class MainWindow(QMainWindow):
         if not (time(9, 0) <= now <= time(15, 30)):
             return
         if not self.header._btn_auto.isChecked():
+            return
+        # 다른 TR 진행 중이면 스킵 — 다음 10분 틱에 재시도
+        if getattr(self._kiwoom, "_tr_busy", False):
             return
         scanner.trigger_investor_refresh()
 

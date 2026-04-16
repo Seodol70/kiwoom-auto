@@ -939,7 +939,7 @@ class KiwoomManager:
                 if _val and _val != "0":
                     _amt_field = _cand
                     break
-            logger.info("[opt10030] 거래대금 필드 감지: '%s' (raw='%s')",
+            logger.debug("[opt10030] 거래대금 필드 감지: '%s' (raw='%s')",
                         _amt_field, _g0(_amt_field))
 
         for i in range(cnt):
@@ -966,11 +966,11 @@ class KiwoomManager:
                     amt_val = price_v * volume_v
 
             if i < 5:
-                # 거래대금 단위 진단 (천원→원 변환 확인용)
+                # 거래대금 단위 진단 (천원→원 변환 확인용) — DEBUG 레벨로 유지
                 from scanner.smart_scanner import format_trade_amount_korean
                 amt_korean = format_trade_amount_korean(amt_val) if amt_val > 0 else "0원"
-                logger.info("[opt10030 진단] 행[%d] %s(%s) 거래대금: raw='%s' → %d원 ≈ %s",
-                            i, code, g("종목명").strip(), raw_amt, amt_val, amt_korean)
+                logger.debug("[opt10030 진단] 행[%d] %s(%s) 거래대금: raw='%s' → %d원 ≈ %s",
+                             i, code, g("종목명").strip(), raw_amt, amt_val, amt_korean)
             rows.append({
                 "code":          code,
                 "name":          g("종목명").strip(),

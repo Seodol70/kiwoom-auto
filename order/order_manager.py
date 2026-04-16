@@ -98,6 +98,8 @@ class Position:
     # 종가매매(EOD) 플래그
     eod_trade:       bool = False         # True → 당일 15:19 강제청산 제외, 익일 관리
     overnight_held:  bool = False         # True → 익일 장 시작 후 갭 체크 관리 중
+    # 매매 단계 태그
+    entry_phase:     int  = 0             # 0=미분류, 1=모닝스캘핑(09~10:30), 2=메인전략(10~14:40)
 
     @property
     def pnl(self) -> int:
@@ -182,6 +184,7 @@ class OrderManager(QObject):
         self._pending_trend: dict[str, tuple[int, int]] = {}  # code -> (trend_level, trend_prev_level)
         self._pending_near_high: dict[str, tuple[bool, float]] = {}  # code -> (near_daily_high, custom_tp_pct)
         self._pending_eod: dict[str, bool] = {}                      # code -> eod_trade flag
+        self._pending_entry_phase: dict[str, int] = {}               # code -> entry_phase (1=모닝스캘핑, 2=메인)
         self._pnl_date: date = date.today()
         # 당일 실현손익 = 파일에서 복구한 이전 세션 합 + 이번 세션 매도 체결 합
         self.daily_realized_pnl: int = 0
@@ -295,18 +298,24 @@ class OrderManager(QObject):
             # opw00018 모의투자 서버는 매입가 필드를 반환하지 않음 → 기존 메모리값 보존
             new_positions: dict[str, Position] = {}
             for h in holdings:
+                qty = h.get("qty", 0)
+                if qty <= 0:
+                    # 보유수량 0 or 키 없음 — 불완전 응답 방어 (KeyError 'qty' 재발 방지)
+                    logger.warning("sync_balance: 보유수량 0 또는 누락 — %s(%s) 스킵",
+                                   h.get("name", "?"), h.get("code", "?"))
+                    continue
                 code = h["code"]
                 avg = h.get("avg_price", 0)
                 if avg == 0 and code in self.positions:
                     avg = self.positions[code].avg_price
                 old = self.positions.get(code)
-                qty_today = min(old.qty_buy_today_app, h["qty"]) if old else 0
+                qty_today = min(old.qty_buy_today_app, qty) if old else 0
                 new_positions[code] = Position(
                     code              = code,
-                    name              = h["name"],
-                    qty               = h["qty"],
+                    name              = h.get("name", ""),
+                    qty               = qty,
                     avg_price         = avg,
-                    current_price     = h["current_price"],
+                    current_price     = h.get("current_price", 0),
                     buy_date          = old.buy_date if old else None,
                     entry_time        = old.entry_time if old else None,
                     opened_by_app     = old.opened_by_app if old else False,
@@ -319,6 +328,7 @@ class OrderManager(QObject):
                     qty_partial_sold  = old.qty_partial_sold  if old else 0,
                     trend_level       = old.trend_level       if old else 0,
                     trend_prev_level  = old.trend_prev_level  if old else 0,
+                    entry_phase       = old.entry_phase       if old else 0,
                 )
             self.positions = new_positions
 
@@ -473,6 +483,7 @@ class OrderManager(QObject):
         _ctp = float(getattr(signal, "custom_tp_pct", 0.0))
         self._pending_near_high[code] = (_near_high, _ctp)
         self._pending_eod[code] = bool(getattr(signal, "eod_trade", False))
+        self._pending_entry_phase[code] = int(getattr(signal, "entry_phase", 0))
 
         self.buy(code, name, qty, price=0)  # 시장가 매수
 
@@ -1007,6 +1018,7 @@ class OrderManager(QObject):
             trend_level, trend_prev_level = self._pending_trend.pop(code, (0, 0))
             _near_high, _ctp = self._pending_near_high.pop(code, (False, 0.0))
             _eod_trade = self._pending_eod.pop(code, False)
+            _entry_phase = self._pending_entry_phase.pop(code, 0)
             if is_app_buy:
                 rem = self._app_pending_buys[code] - filled_qty
                 if rem <= 0:
@@ -1045,6 +1057,7 @@ class OrderManager(QObject):
                     near_daily_high=_near_high,
                     custom_tp_pct=_ctp,
                     eod_trade=_eod_trade,
+                    entry_phase=_entry_phase,
                 )
                 if _near_high:
                     logger.info("[신고가근처] %s(%s) — 일봉 신고가 근처 진입, TP 상향 적용 (custom_tp=%.1f%%)",

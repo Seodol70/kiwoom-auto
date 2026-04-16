@@ -142,9 +142,11 @@ def get_trend_status(
     1: Weak Trend
     2: Medium Trend
     3: Strong Trend
+
+    volumes 가 부족하면 EMA/ATR 거리만으로 판정 (거래량 가중 없이 한 단계 낮춤).
     """
-    need = max(ema_period + 1, atr_period + 1, volume_lookback + 1)
-    if len(closes) < need or len(highs) < need or len(lows) < need or len(volumes) < need:
+    need_price = max(ema_period + 1, atr_period + 1)
+    if len(closes) < need_price or len(highs) < need_price or len(lows) < need_price:
         return 0
 
     ema_now = calc_ema(closes, ema_period)
@@ -154,22 +156,36 @@ def get_trend_status(
         return 0
 
     cur_price = float(closes[-1])
-    # 상승 추세 판정의 최소 조건: 가격이 EMA 위 + EMA 기울기 양수
+    # 상승 추세 최소 조건: 가격이 EMA 위 + EMA 기울기 양수
     if cur_price <= ema_now or ema_now <= ema_prev:
         return 0
 
     dist_atr = (cur_price - ema_now) / atr
-    avg_vol = float(np.mean(np.array(volumes[-(volume_lookback + 1):-1], dtype=np.float64)))
-    if avg_vol <= 0:
-        return 0
-    vol_ratio = float(volumes[-1]) / avg_vol
 
-    if dist_atr >= 1.30 and vol_ratio >= 1.50:
-        return 3
-    if dist_atr >= 0.70 and vol_ratio >= 1.20:
-        return 2
-    if dist_atr >= 0.25 and vol_ratio >= 0.90:
-        return 1
+    # 거래량 데이터가 충분하면 volume 가중 판정
+    need_vol = volume_lookback + 1
+    has_vol = (len(volumes) >= need_vol and any(v > 0 for v in volumes[-need_vol:]))
+    if has_vol:
+        avg_vol = float(np.mean(np.array(volumes[-(need_vol):-1], dtype=np.float64)))
+        if avg_vol <= 0:
+            has_vol = False
+
+    if has_vol:
+        vol_ratio = float(volumes[-1]) / avg_vol
+        if dist_atr >= 1.30 and vol_ratio >= 1.50:
+            return 3
+        if dist_atr >= 0.70 and vol_ratio >= 1.20:
+            return 2
+        if dist_atr >= 0.25 and vol_ratio >= 0.90:
+            return 1
+    else:
+        # 거래량 미확보 — EMA/ATR 거리만으로 판정 (한 단계 보수적 적용)
+        if dist_atr >= 1.30:
+            return 2   # volume 없이 3→2
+        if dist_atr >= 0.70:
+            return 1   # volume 없이 2→1
+        if dist_atr >= 0.25:
+            return 1
     return 0
 
 
@@ -420,26 +436,39 @@ def get_daily_context(
     일봉 데이터 기반 매매 맥락 정보를 반환한다.
 
     Args:
-        daily_closes:            최신순 일봉 종가 리스트 (최대 25개)
+        daily_closes:            최신순 일봉 종가 리스트 (최대 120개)
         current_price:           현재 분봉 현재가
         near_high_threshold_pct: 신고가 근처 판정 기준 (%) — 25일 최고가 대비 이내
 
     Returns:
         dict:
-            above_ma20  (bool)  — 현재가 ≥ 일봉 20MA  → 가짜 신호 여과 기준
+            above_ma20  (bool)  — 현재가 ≥ 일봉 20MA  → 단기 추세 기준
+            above_ma60  (bool)  — 현재가 ≥ 일봉 60MA  → 중기 추세 기준
             near_high   (bool)  — 25일 신고가 근처(overhead 매물대 없음)
             daily_ma20  (float) — 일봉 20MA 값 (0 = 데이터 부족)
+            daily_ma60  (float) — 일봉 60MA 값 (0 = 데이터 부족)
             high_25d    (float) — 최근 25일 최고 종가 (0 = 데이터 부족)
     """
-    result = {"above_ma20": True, "near_high": False, "daily_ma20": 0.0, "high_25d": 0.0}
+    result = {
+        "above_ma20": True, "above_ma60": True,
+        "near_high": False,
+        "daily_ma20": 0.0, "daily_ma60": 0.0,
+        "high_25d": 0.0,
+    }
 
     if len(daily_closes) < 20 or current_price <= 0:
-        # 데이터 부족 → 필터 통과 (패스 fail-open)
+        # 데이터 부족 → 필터 통과 (fail-open)
         return result
 
     daily_ma20 = sum(daily_closes[:20]) / 20
     result["daily_ma20"] = daily_ma20
     result["above_ma20"] = current_price >= daily_ma20
+
+    # MA60 — 데이터가 60개 이상일 때만 계산, 부족하면 fail-open
+    if len(daily_closes) >= 60:
+        daily_ma60 = sum(daily_closes[:60]) / 60
+        result["daily_ma60"] = daily_ma60
+        result["above_ma60"] = current_price >= daily_ma60
 
     # 신고가 근처: 최근 25일 최고가 대비 near_high_threshold_pct 이내
     n = min(25, len(daily_closes))
