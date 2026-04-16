@@ -2389,6 +2389,14 @@ class MainWindow(QMainWindow):
         # 10:30 이후 Phase 1 트레일 체크 (매 분) — 고점 대비 1% 하락 시 청산
         elif time(10, 31) <= now < time(15, 15) and datetime.now().weekday() < 5:
             self._liquidate_phase1_positions(forced=False)
+            # 14:40 야간보유 자동 ON — 종가매매 창 1분 전, 1회만
+            if (time(14, 40) <= now < time(14, 41)
+                    and not getattr(self, "_eod_auto_enabled_today", False)):
+                self._eod_auto_enabled_today = True
+                if not self.header._btn_overnight.isChecked():
+                    self.header._btn_overnight.setChecked(True)
+                    self.header._on_overnight_clicked(True)
+                    self.log_panel.append("🌙 [자동] 14:40 — 야간보유 모드 자동 ON (종가매매 창 활성화)")
 
         # 15:15~15:19 자동 청산 (평일만, 미청산 포지션 계속 정리)
         elif time(15, 15) <= now < time(15, 20) and datetime.now().weekday() < 5:
@@ -2430,6 +2438,7 @@ class MainWindow(QMainWindow):
             self._new_entry_locked      = False
             self._daily_loss_cut_done   = False
             self._manual_unlock_active  = False
+            self._eod_auto_enabled_today = False
             self._eod_gap_checked_today = False   # EOD 갭 체크 플래그 리셋
 
         # 장 시간 중 일일 손익 한도 체크 (매 분 실행)
