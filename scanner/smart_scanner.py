@@ -240,7 +240,9 @@ class SmartScannerConfig:
     pre_surge_chejan_min: float = 110.0  # PRE 체결강도 하한 (%)
     pre_surge_chejan_max: float = 700.0  # PRE 체결강도 상한 — 극단 급등(고점) 차단 (900%+ 는 이미 과열)
     pre_surge_rsi_max:    float = 88.0   # PRE RSI 상한 — 과매수 진입 차단 (RSI=100 손실 사례 방지)
-    breakout_chejan_max:  float = 800.0  # BREAKOUT 체결강도 상한 — 1000%+ 극과열 고점 차단 (2026-04-15 분석)
+    breakout_chejan_max:         float = 800.0  # BREAKOUT 체결강도 상한 — OPENING/기본 슬롯 (2026-04-15 분석)
+    breakout_chejan_max_morning: float = 950.0  # MORNING 슬롯 상한 완화 — 갭업 후 과열 정상화 허용 (삼성SDI 패턴)
+    jdm_chejan_max:       float = 700.0  # JDM_ENTRY 체결강도 상한 — 극과열 고점 차단 (엑스게이트 901% 사례)
     breakout_rsi_max:     float = 80.0   # BREAKOUT RSI 상한 — 과매수 진입 차단 (2026-04-15 분석)
     # OPENING_SURGE 파라미터 (09:00~09:16 정규장 초반, 캔들 부족 구간)
     opening_surge_chg_min:    float = 1.0    # OPENING 최소 등락률 (%)
@@ -745,13 +747,26 @@ class TRRequestQueue:
         fn() 내부에서 QEventLoop.exec_()가 실행될 때 다른 타이머 콜백이
         call()을 재호출하면 동일 스레드에서 threading.Lock을 이중 획득해
         데드락이 발생한다 — fn() 호출 전 락 해제로 방지.
+
+        rate-limit 대기는 time.sleep() 대신 QApplication.processEvents()를 사용해
+        메인 스레드 UI 이벤트 처리를 유지한다 (프리징 방지).
         """
         with self._lock:
-            elapsed = time.monotonic() - self._last_call
-            wait = self._MIN_INTERVAL - elapsed
-            if wait > 0:
-                time.sleep(wait)
-            self._last_call = time.monotonic()
+            now = time.monotonic()
+            elapsed = now - self._last_call
+            wait = max(0.0, self._MIN_INTERVAL - elapsed)
+            # 슬롯을 선점해 다른 호출이 같은 구간에 중복 진입하지 않도록 함
+            self._last_call = now + wait
+        # 락 해제 후 비블로킹 대기 — time.sleep()은 메인 스레드 UI를 완전 차단하므로 사용 금지
+        if wait > 0:
+            from PyQt5.QtCore import QEventLoop as _QEL
+            from PyQt5.QtWidgets import QApplication as _QApp
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                _QApp.processEvents(_QEL.ExcludeUserInputEvents)
+                remaining = deadline - time.monotonic()
+                if remaining > 0.005:
+                    time.sleep(min(0.005, remaining))
         # 락 해제 후 fn 호출 — QEventLoop.exec_() 재진입 데드락 방지
         return fn(*args)
 
@@ -820,6 +835,8 @@ class ScanSignal:
     eod_trade:        bool  = False   # True → 당일 청산 제외, 익일 갭 체크 후 관리
     # 매매 단계 — 메인 스레드에서 설정 후 handle_signal 에 전달
     entry_phase:      int   = 0       # 0=미분류, 1=Phase1 모닝스캘핑, 2=Phase2 메인전략
+    # 신호 생성 시점의 등락률 — opt10001 실패 시 handle_signal 폴백으로 사용
+    change_pct:       float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1242,19 @@ class SnapshotStore:
                 score = 0
             self._inv_score[code] = score
             self._inv_updated_at[code] = datetime.now()   # noqa: DTZ005
+
+    def get_investor_data(self, code: str) -> tuple[int, int, int]:
+        """종목의 수급 데이터를 (foreign_net_buy, inst_net_buy, investor_score) 튜플로 반환.
+
+        get_snapshot() 없이 _inv_* 딕셔너리만 읽으므로 StockSnapshot 객체 생성 비용 없음.
+        미조회 종목은 (0, 0, 0) 반환.
+        """
+        with self._lock:
+            return (
+                int(self._inv_foreign.get(code, 0)),
+                int(self._inv_inst.get(code, 0)),
+                int(self._inv_score.get(code, 0)),
+            )
 
     def set_min_candles(self, code: str, closes: list) -> None:
         """opt10080 등으로 가져온 분봉 종가 리스트를 초기값으로 설정한다."""
@@ -2162,8 +2192,12 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: SmartScannerConfig) -> Optio
         )
         return None
 
-    # ⑤ 체결강도 상한 — 극과열 고점 차단 (1000%+ 는 상승 동력 소진 고점 매수 위험)
-    _chejan_max = getattr(cfg, "breakout_chejan_max", 800.0)
+    # ⑤ 체결강도 상한 — 극과열 고점 차단
+    # MORNING 슬롯: 갭업 후 체결강도 정상화 중인 종목 허용 (950%), 나머지 슬롯: 800%
+    if _slot == "MORNING":
+        _chejan_max = getattr(cfg, "breakout_chejan_max_morning", 950.0)
+    else:
+        _chejan_max = getattr(cfg, "breakout_chejan_max", 800.0)
     if snap.chejan_strength >= _chejan_max:
         ScannerLogger.near_miss(
             snap.code, snap.name, "BREAKOUT_CHEJAN_MAX",
@@ -2717,6 +2751,15 @@ def check_jdm_entry(
             snap.code, snap.name, "JDM_CHEJAN",
             actual=snap.chejan_strength, threshold=_eff_chejan,
             reason=f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
+        )
+        return None
+
+    # 체결강도 상한 — 극과열 고점 차단 (엑스게이트 901% 사례: RSI·추세 완화로 통과됐으나 손실)
+    _jdm_chejan_max = float(getattr(cfg, "jdm_chejan_max", 700.0))
+    if snap.chejan_strength >= _jdm_chejan_max:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM_CHEJAN_MAX",
+            f"[{_slot}] 체결강도 과열 차단 — {snap.chejan_strength:.0f}% ≥ {_jdm_chejan_max:.0f}%",
         )
         return None
 
@@ -3345,6 +3388,7 @@ class SmartScanner:
         return ScanSignal(
             snap.code, snap.name, "BREAKOUT", snap.current_price, reason,
             entry_candle_low=candle_low,
+            change_pct=float(getattr(snap, "change_pct", 0) or 0),
         )
 
     def _build_jdm_signal(self, snap: StockSnapshot) -> Optional[ScanSignal]:
@@ -3373,6 +3417,7 @@ class SmartScanner:
             entry_candle_low=candle_low,
             near_daily_high=_dctx["near_high"],
             daily_ma20=_dctx["daily_ma20"],
+            change_pct=float(getattr(snap, "change_pct", 0) or 0),
         )
 
     # -----------------------------------------------------------------------

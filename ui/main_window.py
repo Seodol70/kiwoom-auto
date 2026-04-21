@@ -458,8 +458,8 @@ class ScannerWorker(QObject):
                                             sig_type = "JDM_ENTRY"
 
                         # ── 수급 점수 반영 ──────────────────────────────────
+                        _iscore = snap.investor_score  # 쿨다운 계산에서도 사용
                         if sig_type and self._cfg.investor_filter_enabled:
-                            _iscore = snap.investor_score
                             if _iscore == 1:
                                 reason = reason + " | 수급↑(외국인+기관 순매수)"
                                 from scanner.smart_scanner import ScannerLogger as _SL
@@ -475,7 +475,9 @@ class ScannerWorker(QObject):
                                 sig_type = None
                                 reason   = None
 
-                        _eff_cool = _cool  # score -1 차단으로 쿨다운 2배 로직 제거
+                        # score +1(외국인+기관 순매수) → 쿨다운 50% 단축으로 재신호 우선권 부여
+                        # score -1은 위에서 sig_type=None 처리되므로 여기선 고려 불필요
+                        _eff_cool = _cool * (0.5 if _iscore == 1 else 1.0)
 
                         now_active = sig_type is not None
                         prev_active = self._signal_prev_active.get(code, False)
@@ -531,8 +533,10 @@ class ScannerWorker(QObject):
 
                 p = row.get("current_price", 0)
                 a = row.get("trade_amount", 0)
-                # snap 은 candidate_codes 에 있는 종목만 정의됨 — 없으면 기본값 사용
+                # 추세·체결강도 — candidate_codes(상승 중인 종목)만 스냅샷 로드
                 _snap = self._store.get_snapshot(code) if code in candidate_codes else None
+                # 수급 — 후보 여부와 무관하게 전 종목 읽기 (경량 딕셔너리 조회)
+                _f_net, _i_net, _iscore = self._store.get_investor_data(code)
                 rows.append({
                     "code":           code,
                     "name":           str(row.get("name", "")),
@@ -540,9 +544,9 @@ class ScannerWorker(QObject):
                     "change_pct":     ch,
                     "trade_amount":   int(a) if a else 0,
                     "signal":         sig_type or "",
-                    "investor_score": getattr(_snap, "investor_score",   0) if _snap else 0,
-                    "foreign_net":    getattr(_snap, "foreign_net_buy",  0) if _snap else 0,
-                    "inst_net":       getattr(_snap, "inst_net_buy",     0) if _snap else 0,
+                    "investor_score": _iscore,
+                    "foreign_net":    _f_net,
+                    "inst_net":       _i_net,
                     "trend_level":    getattr(_snap, "trend_level",      0) if _snap else 0,
                     "trend_prev":     getattr(_snap, "trend_prev_level", 0) if _snap else 0,
                     "chejan":         getattr(_snap, "chejan_strength", 0.0) if _snap else 0.0,
@@ -2248,6 +2252,15 @@ class MainWindow(QMainWindow):
         else:
             self._tg = None
 
+        # ── HealthMonitor — 자가 진단/자기 진화 ──────────────────────────────
+        from analysis.health_monitor import HealthMonitor as _HealthMonitor
+        self._health_monitor = _HealthMonitor(
+            scan_cfg       = self._scan_cfg,
+            on_param_relax = self._on_health_param_relax,
+            on_freeze      = getattr(self._kiwoom, "auto_reconnect", None),
+            on_reconnect   = getattr(self._kiwoom, "auto_reconnect", None),
+        )
+
     def _setup_timers(self) -> None:
         """QTimer — 모두 메인 스레드에서 실행 (Kiwoom OCX 스레드 규칙 준수)"""
         self._selected_code: str = ""
@@ -2274,10 +2287,10 @@ class MainWindow(QMainWindow):
         self._connection_timer.timeout.connect(self._check_connection)
         self._connection_timer.start(900_000)  # 15분
 
-        # 지수 급락 감지 (2분 + 15초마다) — _schedule_timer(1분)와 비동기화해 TR 충돌 완화
+        # 지수 급락 감지 (60초마다) — 헤더 지수 표시 + 급락 감지
         self._crash_check_timer = QTimer(self)
         self._crash_check_timer.timeout.connect(self._check_market_crash)
-        self._crash_check_timer.start(2 * 60_000 + 15_000)  # 135초
+        self._crash_check_timer.start(60_000)  # 60초
 
         # opt10030 주기 스캔 (1분마다) — 메인 스레드에서 호출 (Kiwoom TR은 메인 스레드만 지원)
         # 타임아웃 2초로 설정하여 응답 없으면 빨리 폴백
@@ -2294,6 +2307,13 @@ class MainWindow(QMainWindow):
         self._tg_report_timer = QTimer(self)
         self._tg_report_timer.timeout.connect(self._send_tg_status)
         self._tg_report_timer.start(5 * 60 * 1000)
+
+        # Watchdog ACK (5초마다) — HealthMonitor에 UI가 살아있음을 알림
+        self._watchdog_ack_timer = QTimer(self)
+        self._watchdog_ack_timer.timeout.connect(
+            lambda: getattr(self, "_health_monitor", None) and self._health_monitor.ack()
+        )
+        self._watchdog_ack_timer.start(5_000)
 
         # [P2] 메모리 정리 (1시간마다) — 오래된 dict 키 삭제
         self._memory_cleanup_timer = QTimer(self)
@@ -2367,6 +2387,10 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(3000, _init_watch_state)
 
+        # HealthMonitor 시작
+        self._health_monitor.start()
+        self.log_panel.append("[HealthMonitor] 자가 진단 시작")
+
         # opt10030 첫 스캔을 1초 후 실행 (로그인 직후 여유)
         self.log_panel.append("[스캔] 1초 후 opt10030 초기 스캔 예약...")
         QTimer.singleShot(1000, self._run_scanner_scan)
@@ -2392,6 +2416,7 @@ class MainWindow(QMainWindow):
         self._news_drain_timer.stop()
         self._tg_report_timer.stop()
         self._news_analyzer.stop()
+        self._health_monitor.stop()
         self._scan_worker.stop()
         self._scan_thread.quit()
         self._scan_thread.wait(3000)
@@ -2467,6 +2492,22 @@ class MainWindow(QMainWindow):
             "positions": dict(self.order_mgr.positions),
         })
 
+        # HealthMonitor — 매도체결 시 손익 기록
+        _hm = getattr(self, "_health_monitor", None)
+        if _hm is not None and d.get("side") == "매도체결":
+            _ab = d.get("avg_buy_price") or 0
+            _fp = d.get("filled_price", 0)
+            _fq = d.get("filled_qty",   0)
+            _pnl = (_fp - _ab) * _fq if _ab and _fp and _fq else 0.0
+            from analysis.health_monitor import TradeRecord as _TR
+            _hm.record_trade(_TR(
+                code       = d.get("code",  ""),
+                pnl        = float(_pnl),
+                entry_time = str(d.get("entry_time",  "")),
+                exit_time  = str(d.get("filled_time", "")),
+                reason     = d.get("reason", ""),
+            ))
+
     @pyqtSlot()
     def _check_connection(self) -> None:
         """15분마다 연결 상태 확인 — 끊김 감지 시 자동 재로그인"""
@@ -2477,7 +2518,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _check_market_crash(self) -> None:
         """
-        135초마다 코스피·코스닥 지수 조회.
+        60초마다 코스피·코스닥 지수 조회.
         - 헤더 지수 표시: 자동매매 OFF 상태에서도 항상 갱신
         - 급락 감지(crash) 및 cfg 등락률 갱신: 자동매매 ON + 장중에만 수행
         """
@@ -2485,8 +2526,9 @@ class MainWindow(QMainWindow):
         from datetime import datetime as _dt, time as _time_cls
         from config import RISK as _RISK
 
-        # 다른 TR 진행 중이면 스킵 — 다음 135s 틱에 재시도
+        # 다른 TR 진행 중이면 5초 후 재시도 — 단순 return 시 다음 60s 틱까지 대기
         if getattr(self._kiwoom, "_tr_busy", False):
+            QTimer.singleShot(5_000, self._check_market_crash)
             return
 
         # 이 함수 자체 재진입 방지
@@ -2594,6 +2636,12 @@ class MainWindow(QMainWindow):
                 and datetime.now().weekday() < 5):
             self._check_overnight_timecut()
 
+        # 09:00 HealthMonitor 당일 통계 초기화 (평일만)
+        if time(9, 0) <= now < time(9, 1) and datetime.now().weekday() < 5:
+            _hm = getattr(self, "_health_monitor", None)
+            if _hm is not None:
+                _hm.reset_day()
+
         # 08:00 자동 시작 (평일만) — 시간외 PRE_SURGE 신호 포착 포함
         if time(8, 0) <= now < time(8, 1) and not self._opened_today:
             if datetime.now().weekday() < 5:  # 월~금
@@ -2644,8 +2692,9 @@ class MainWindow(QMainWindow):
 
                 # 전일 거래량 캐시 저장 (hybrid universe score vol_ratio 계산용)
                 try:
-                    if hasattr(self, "scanner") and self.scanner is not None:
-                        self.scanner.save_prev_volumes()
+                    if hasattr(self, "_smart_scanner") and self._smart_scanner is not None:
+                        self._smart_scanner.save_prev_volumes()
+                        logger.info("[15:20] prev_volumes 저장 완료")
                 except Exception as _e:
                     logger.warning("[15:20] prev_volumes 저장 실패: %s", _e)
 
@@ -3146,6 +3195,29 @@ class MainWindow(QMainWindow):
         self.log_panel.append(f"[리스크] 손절 기준 변경 → {value:.1f}%")
 
     @pyqtSlot(str, str, int)
+    def _on_health_param_relax(self, params: dict) -> None:
+        """
+        HealthMonitor 데몬 스레드에서 호출될 수 있으므로
+        Qt 위젯 접근은 QMetaObject.invokeMethod(QueuedConnection)으로 메인 스레드에 위임.
+        실제 setattr은 health_monitor._check_drought()에서 이미 완료됨.
+        """
+        msg = "  ".join(f"{k}={v}" for k, v in params.items())
+        logger.info("[HealthMonitor] 파라미터 완화 적용: %s", msg)
+        # 메시지를 리스트에 먼저 추가한 뒤 invokeMethod로 메인스레드 슬롯 예약
+        if not hasattr(self, "_health_relax_msgs"):
+            self._health_relax_msgs: list = []
+        self._health_relax_msgs.append(msg)
+        from PyQt5.QtCore import QMetaObject, Qt as _Qt
+        QMetaObject.invokeMethod(self, "_health_relax_ui", _Qt.QueuedConnection)
+
+    @pyqtSlot()
+    def _health_relax_ui(self) -> None:
+        """메인 스레드에서만 실행 — UI 위젯 접근 안전."""
+        msgs = getattr(self, "_health_relax_msgs", [])
+        while msgs:
+            m = msgs.pop(0)
+            self.log_panel.append(f"🔧 [가뭄완화] 파라미터 자동 완화: {m}")
+
     def _on_manual_sell(self, code: str, name: str, qty: int) -> None:
         """보유현황 수동 매도 버튼 처리."""
         pos = self.order_mgr.positions.get(code)
@@ -3337,6 +3409,11 @@ class MainWindow(QMainWindow):
                 sig.entry_phase = 2
 
             self.order_mgr.handle_signal(sig)
+
+        # HealthMonitor에 신호 기록 (매매 여부와 무관하게 신호 자체를 기록)
+        _hm = getattr(self, "_health_monitor", None)
+        if _hm is not None:
+            _hm.record_signal(sig.code, sig.name, sig.signal_type)
 
     def _drain_news_queue(self) -> None:
         """
@@ -3780,8 +3857,9 @@ class MainWindow(QMainWindow):
         now = datetime.now().time()
         if not (time(9, 0) <= now <= time(15, 30)):
             return
-        # 다른 TR 진행 중이면 스킵 — 다음 10분 틱에 재시도
+        # 다른 TR 진행 중이면 5초 후 재시도 — 단순 return 시 다음 10분 틱까지 대기하게 됨
         if getattr(self._kiwoom, "_tr_busy", False):
+            QTimer.singleShot(5_000, self._on_investor_refresh_tick)
             return
         scanner.trigger_investor_refresh()
 

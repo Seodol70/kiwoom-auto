@@ -372,10 +372,9 @@ class KiwoomManager:
                     "market_cap":    safe_int(d.get("시가총액")),
                 }
 
-            # 첫 시도 실패 → 0.3초 후 재시도
+            # 첫 시도 실패 → 0.3초 비블로킹 대기 후 재시도
             if retry == 0:
-                import time
-                time.sleep(0.3)
+                self._tr_limiter._nonblocking_wait(0.3)
 
         # 재시도도 실패
         logger.warning("[opt10001] %s 응답 없음 — 스냅샷 폴백", code)

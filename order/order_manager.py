@@ -198,6 +198,9 @@ class OrderManager(QObject):
         # [NEW] 미체결 추적 (2026-04-04)
         self._failed_sells: dict[str, dict] = {}  # code → {qty, attempts, last_time}
 
+        # 매도 주문 30초 타임아웃 재시도 횟수 — 2회 이상 시 지정가로 에스컬레이션
+        self._pending_sell_retries: dict[str, int] = {}  # code → timeout 횟수
+
         # [P2] 매수 주문 접수 시각 추적 — 10초 미체결 시 취소+재주문
         self._pending_buy_time: dict[str, datetime] = {}   # code → 접수 시각
         self._pending_buy_info: dict[str, dict] = {}       # code → {qty, name, order_no}
@@ -252,6 +255,7 @@ class OrderManager(QObject):
         self._force_sell_issued.discard(code)
         self._pending.discard(code)
         self._pending_sell_time.pop(code, None)
+        self._pending_sell_retries.pop(code, None)
         self._failed_sells.pop(code, None)
 
         # 로컬 포지션 제거 — 서버에 없는 포지션이므로
@@ -421,10 +425,12 @@ class OrderManager(QObject):
             from config import RISK as _RISK
             _mx = float(_RISK.get("max_change_pct", 15.0))
             _info = self._kiwoom.get_stock_info(code)
-            # [NEW] opt10001 응답 없음 시 등락률 체크 스킵 (2026-04-03)
             if _info is None:
-                logger.debug("[handle_signal] %s opt10001 응답 없음 — 등락률 체크 스킵", code)
-                _pct = 0.0
+                # opt10001 실패 — 스캐너가 검증한 스냅샷 등락률 재사용 (0% 가정 제거)
+                _pct = float(getattr(signal, "change_pct", 0) or 0)
+                logger.debug(
+                    "[handle_signal] %s opt10001 없음 — 스냅샷 등락률 %.2f%% 폴백", code, _pct
+                )
             else:
                 _pct = float(_info.get("change_pct", 0) or 0)
             logger.debug("[매수 등락률 체크] %s — 현재 등락률: %.2f%% (상한: %.1f%%)", name, _pct, _mx)
@@ -513,9 +519,16 @@ class OrderManager(QObject):
         # 매도 주문이 30초 이상 미체결이면 pending 해제 — 손절 재시도 허용
         sell_time = self._pending_sell_time.get(code)
         if sell_time and (datetime.now() - sell_time).total_seconds() > 30:
-            logger.warning("[미체결 해제] %s 매도 주문 30초 초과 — pending 강제 해제 후 재매도 허용", code)
+            retries = self._pending_sell_retries.get(code, 0) + 1
+            self._pending_sell_retries[code] = retries
+            logger.warning(
+                "[미체결 해제] %s 매도 주문 30초 초과 (재시도 %d회) — pending+force_sell 해제",
+                code, retries,
+            )
             self._pending.discard(code)
             self._pending_sell_time.pop(code, None)
+            # force_exit 데드락 방지: _force_sell_issued도 함께 해제해야 재발령 가능
+            self._force_sell_issued.discard(code)
             return False
         return True
 
@@ -683,6 +696,17 @@ class OrderManager(QObject):
         # 정확한 잔고는 OnReceiveChejanData 콜백 + 주기 sync_balance(5분)에서 반영.
         return self._send(OrderType.BUY, code, name, qty, price)
 
+    @staticmethod
+    def _price_tick(price: int) -> int:
+        """KRX 호가 단위 반환 (현재가 기준)."""
+        if price < 1_000:      return 1
+        if price < 5_000:      return 5
+        if price < 10_000:     return 10
+        if price < 50_000:     return 50
+        if price < 100_000:    return 100
+        if price < 500_000:    return 500
+        return 1_000
+
     def force_exit(
         self,
         code: str,
@@ -716,12 +740,26 @@ class OrderManager(QObject):
             return "0"
 
         try:
+            # 2회 이상 타임아웃 → 지정가(현재가-1틱)로 에스컬레이션 (시장가 미체결 반복 방지)
+            retries = self._pending_sell_retries.get(code, 0)
+            sell_price = 0  # 기본: 시장가
+            if retries >= 2:
+                cur = pos.current_price or pos.avg_price
+                tick = self._price_tick(cur)
+                sell_price = max(1, cur - tick)
+                logger.warning(
+                    "[force_exit] %s(%s) 지정가 에스컬레이션 — %d원 (%d회 타임아웃)",
+                    name, code, sell_price, retries,
+                )
+
             # _pending 체크 없이 바로 주문 시도
-            order_id = self._send(OrderType.SELL, code, name, qty, price=0)
+            order_id = self._send(OrderType.SELL, code, name, qty, price=sell_price)
             if order_id and order_id != "0":
                 logger.warning(
-                    "[force_exit] %s(%s) %d주 시장가 매도 주문 — 사유: %s (주문번호: %s)",
-                    name, code, qty, reason, order_id
+                    "[force_exit] %s(%s) %d주 %s 매도 주문 — 사유: %s (주문번호: %s)",
+                    name, code, qty,
+                    f"지정가({sell_price}원)" if sell_price else "시장가",
+                    reason, order_id,
                 )
                 # pending에 수동으로 추가 (체결 콜백 대기)
                 self._pending.add(code)
@@ -1123,8 +1161,9 @@ class OrderManager(QObject):
                     if self.on_position_closed:
                         self.on_position_closed(code)
                     del self.positions[code]
-                    # 강제 매도 발령 해제 (체결 완료)
+                    # 강제 매도 발령 해제 (체결 완료) + 재시도 카운터 초기화
                     self._force_sell_issued.discard(code)
+                    self._pending_sell_retries.pop(code, None)
                     # 매도 체결 완료 → 대기 중인 매수 신호 실행
                     if self._queued_signal is not None:
                         queued = self._queued_signal

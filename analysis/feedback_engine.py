@@ -53,6 +53,9 @@ PROFIT_LOCK_MIN   = 30_000       # lock 최솟값 (원) — 너무 작으면 비
 # 시간 파라미터 식별자 (write_adaptive_params 에서 문자열로 직렬화)
 TIME_PARAM_NAMES = frozenset({"entry_end_time", "entry_start_time"})
 
+# health_events.jsonl 요약 경고 임계치
+TR_FAIL_THRESHOLD_WARN = 10   # 하루 TR 실패 N회 이상이면 Feedback 로그에 경고
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 안전장치 상수
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1062,6 +1065,9 @@ class FeedbackEngine:
         target_date = target_date or date.today()
         logger.info("[Feedback] 분석 시작: %s", target_date)
 
+        # ── 당일 헬스 이벤트 요약 (health_monitor가 기록한 JSONL) ──────────────
+        self._log_health_summary()
+
         fills  = self.parse_fills(target_date)
         audits = self.parse_audit(target_date)
 
@@ -1203,3 +1209,49 @@ class FeedbackEngine:
             tmp.replace(self.adaptive_path)
         except Exception as e:
             logger.warning("[Feedback] 마커 저장 실패: %s", e)
+
+    def _log_health_summary(self) -> None:
+        """
+        analysis/health_monitor.py 가 기록한 당일 health_events.jsonl 을 읽어
+        Feedback 로그에 요약을 남긴다.  파일이 없으면 무시.
+        """
+        from pathlib import Path as _Path
+        health_path = _Path("logs/health_events.jsonl")
+        if not health_path.exists():
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        events: list = []
+        try:
+            with health_path.open("r", encoding="utf-8") as f:
+                for raw in f:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                        if rec.get("ts", "").startswith(today):
+                            events.append(rec)
+                    except json.JSONDecodeError:
+                        pass
+        except OSError as exc:
+            logger.debug("[Feedback] health_events 읽기 실패: %s", exc)
+            return
+
+        if not events:
+            return
+
+        freeze_cnt   = sum(1 for e in events if e.get("type") == "FREEZE")
+        tr_fail_cnt  = sum(1 for e in events if e.get("type") == "TR_FAIL")
+        relax_cnt    = sum(1 for e in events if e.get("type") == "DROUGHT_RELAX")
+        consec_cnt   = sum(1 for e in events if e.get("type") == "CONSECUTIVE_LOSS")
+        signal_cnt   = sum(1 for e in events if e.get("type") == "SIGNAL")
+
+        logger.info(
+            "[Feedback][HealthSummary] 신호=%d  TR실패=%d  프리징=%d  "
+            "가뭄완화=%d  연속손절=%d",
+            signal_cnt, tr_fail_cnt, freeze_cnt, relax_cnt, consec_cnt,
+        )
+        if freeze_cnt:
+            logger.warning("[Feedback] 오늘 UI 프리징 %d회 감지됨", freeze_cnt)
+        if tr_fail_cnt >= TR_FAIL_THRESHOLD_WARN:
+            logger.warning("[Feedback] TR 실패 %d회 — 네트워크 불안정 의심", tr_fail_cnt)
