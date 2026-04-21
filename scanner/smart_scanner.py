@@ -19,6 +19,7 @@ SmartScanner — 영웅문 조건검색 없이 파이썬이 직접 전 종목을
 
 from __future__ import annotations
 
+import csv
 import heapq
 import json
 import logging
@@ -46,6 +47,50 @@ from rich.text import Text
 
 logger = logging.getLogger(__name__)     # 일반 로거 (콘솔)
 
+class _WinSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """
+    Windows 호환 RotatingFileHandler.
+
+    표준 RotatingFileHandler는 파일 회전 시 os.rename을 사용하는데,
+    Windows에서는 다른 프로세스(log_monitor, VS Code 등)가 scanner.log를
+    열고 있으면 PermissionError(WinError 32)가 발생한다.
+
+    이 핸들러는 rename 대신 shutil.copy2 + truncate 방식으로 회전해
+    파일이 읽기 모드로 열려 있는 상태에서도 안전하게 동작한다.
+    """
+
+    def doRollover(self) -> None:
+        import shutil
+
+        # 현재 스트림 닫기
+        if self.stream:
+            self.stream.close()
+            self.stream = None  # type: ignore[assignment]
+
+        # 백업 파일 순환: .N → .N+1 (backupCount-1 → backupCount, …, 1 → 2)
+        # 백업→백업 이동은 해당 파일을 아무도 열지 않으므로 rename OK
+        for i in range(self.backupCount - 1, 0, -1):
+            sfn = self.rotation_filename(f"{self.baseFilename}.{i}")
+            dfn = self.rotation_filename(f"{self.baseFilename}.{i + 1}")
+            if os.path.exists(sfn):
+                if os.path.exists(dfn):
+                    os.remove(dfn)
+                os.rename(sfn, dfn)
+
+        # 현재 로그 → .1 : rename 대신 copy + truncate
+        dfn = self.rotation_filename(f"{self.baseFilename}.1")
+        if os.path.exists(dfn):
+            os.remove(dfn)
+        if os.path.exists(self.baseFilename):
+            shutil.copy2(self.baseFilename, dfn)          # 복사
+            with open(self.baseFilename, "w",             # 원본 비우기
+                      encoding=self.encoding or "utf-8"):
+                pass
+
+        if not self.delay:
+            self.stream = self._open()
+
+
 def _build_scan_logger(log_dir: str = "logs") -> logging.Logger:
     """scanner.log 전용 로거를 생성한다."""
     os.makedirs(log_dir, exist_ok=True)
@@ -53,7 +98,7 @@ def _build_scan_logger(log_dir: str = "logs") -> logging.Logger:
     scan_log.setLevel(logging.DEBUG)
     scan_log.propagate = False   # 루트 로거로 전파 금지
 
-    handler = logging.handlers.RotatingFileHandler(
+    handler = _WinSafeRotatingFileHandler(
         filename=os.path.join(log_dir, "scanner.log"),
         maxBytes=20 * 1024 * 1024,   # 20 MB
         backupCount=10,
@@ -139,9 +184,12 @@ def format_trade_amount_growth(current: int, baseline: Optional[int]) -> str:
 @dataclass
 class SmartScannerConfig:
     # opt10030 최초 수집 목표(연속조회로 최대 ~2회 TR). 이후 ETF·우선주 제거 → watch_pool_max 로 캡.
-    collect_raw_top_n:    int   = 200
+    collect_raw_top_n:    int   = 400         # 2026-04-20: 200→400 (hybrid 스코어 pool 확장)
     watch_pool_max:       int   = 110         # 필터 후 거래대금 상위 유지 (100~120 권장 중앙값)
-    pre_filter_top_n:     int   = 200         # 하위 호환: collect_raw_top_n 과 동일 사용 권장
+    pre_filter_top_n:     int   = 400         # 하위 호환: collect_raw_top_n 과 동일 사용 권장
+    universe_trade_amt_weight: float = 0.4   # 거래대금 순위 가중치 (hybrid universe score)
+    universe_vol_ratio_weight: float = 0.4   # 전일 대비 거래량 비율 가중치
+    universe_chg_pct_weight:   float = 0.2   # 등락률 가중치
     pre_filter_time:      dtime = dtime(9, 0, 0)
     realtime_sub_max:     int   = 110         # SetRealReg 감시 상한( watch_pool_max 와 맞춤)
     scan_interval:        float = 10.0  # 2026-04-16: 1→10초 (1분봉 기반 JDM은 1초 반복이 무의미)
@@ -275,12 +323,20 @@ class SmartScannerConfig:
     tp_pct_midday:    float = 3.0
     tp_pct_afternoon: float = 3.5
     # [Trail] 고점 추적 트레일링 스탑 파라미터
-    trail_activation_pct: float = 1.0   # 트레일 시작 최소 이익(%) — 2026-04-13: 0.57→1.0 (소폭 수익 구간 조기 청산 방지)
-    trail_pct_tier1:      float = 1.5   # 수익 < tier1_max 구간 트레일 폭 (%) — 2026-04-13: 1.1→1.5
-    trail_tier1_max:      float = 1.5   # tier1/tier2 경계 (%)
-    trail_pct_tier2:      float = 1.5   # 수익 tier1_max ~ tier2_max 구간
-    trail_tier2_max:      float = 3.0   # tier2/tier3 경계 (%)
+    trail_activation_pct: float = 1.5   # 트레일 시작 최소 이익(%) — 2026-04-20: 1.0→1.5 (추세주 조기 청산 방지)
+    trail_pct_tier1:      float = 0.8   # 수익 < tier1_max 구간 트레일 폭 (%) — 2026-04-20: 1.5→0.8 (발동 후 좁은 폭으로 꽉 물기)
+    trail_tier1_max:      float = 2.0   # tier1/tier2 경계 (%) — 2026-04-20: 1.5→2.0
+    trail_pct_tier2:      float = 1.2   # 수익 tier1_max ~ tier2_max 구간 — 2026-04-20: 1.5→1.2
+    trail_tier2_max:      float = 4.0   # tier2/tier3 경계 (%) — 2026-04-20: 3.0→4.0
     trail_pct_tier3:      float = 2.0   # 수익 tier2_max 이상 구간 (크게 올랐을 때 여유)
+    # [추세추종] JDM 진입 조건 추세 레벨 오버라이드 파라미터 (2026-04-20)
+    jdm_candle_skip_trend_level:   int   = 2     # 이 이상 trend_level이면 캔들 반전패턴 스킵 (추세 계속 진행 중)
+    jdm_rsi_high_trend:            float = 80.0  # trend_level≥2 시 RSI 상한 완화 (기본 70 → 80)
+    jdm_rsi_high_breakout:         float = 82.0  # ATR1.5 돌파 확인 시 RSI 상한 추가 완화 (82)
+    jdm_rsi_entry_min_trend:       float = 45.0  # trend_level≥2 시 RSI 하한 완화 (슬롯 기준값 → 45)
+    ema_disp_max_pct_trend:        float = 7.0   # trend_level≥2 EMA10/EMA20 이격 상한 완화
+    price_ema_disp_max_pct_trend:  float = 6.0   # trend_level≥2 현재가/EMA10 이격 상한 완화
+    ema20_exit_enabled:            bool  = False  # 분봉 EMA20 이탈 시 추세 소멸 청산 (기본 OFF)
     # [NEW] 보유 시간 상한 (타임컷)
     time_cut_minutes:     int   = 25   # 2026-04-13: 40→25 (타임컷 단축 — 추세 꺾인 종목 조기 청산)
     # [NEW] 전략 실험 옵션
@@ -296,9 +352,22 @@ class SmartScannerConfig:
     yosep_atr_period: int = 14
     yosep_volume_lookback: int = 20
     yosep_min_trend_level: int = 0            # 2026-04-16: 1→0 (무추세 종목도 MORNING/MIDDAY 허용)
+    yosep_min_trend_level_opening: int = 1   # OPENING(09:00~09:30) 전용 — balanced preset과 동일하게 level 1 유지 (데이터 부족 level0 혼입 방지)
     yosep_min_trend_level_afternoon: int = 1  # 2026-04-16: 3→1 (약추세 이상으로 완화, 하루 신호 0건 방지)
     yosep_downtrend_block_atr: float = 0.8    # EMA 아래 ATR*N 이상이면 하락 강세로 차단
     yosep_preset: str = "balanced"            # aggressive | balanced | conservative
+
+    # ── JDM 골든크로스 추세 오버라이드 ────────────────────────────────────────
+    # trend_level ≥ jdm_golden_cross_trend_override 이면 골든크로스 없이
+    # MA 정배열(ma_short > ma_long)만으로 JDM 진입 허용.
+    # 이미 상승 중인 종목(Lv2+)은 단기MA가 이미 장기MA 위라 골든크로스 미충족이 정상.
+    jdm_golden_cross_trend_override: int = 2  # Medium 이상 추세 시 골든크로스 우회 (0=비활성)
+
+    # ── 추세 확인 시 고점 진입 상한 완화 ─────────────────────────────────────
+    # JDM_SURGE(시가 대비 상승) / JDM_CHGPCT(전일 대비 등락률) 두 필터에 동시 적용.
+    # trend_level ≥ surge_trend_override_level 이면 해당 상한을 surge_trend_max_pct로 교체.
+    surge_trend_override_level: int   = 2     # Medium 이상 추세 확인 시 완화 (0=비활성)
+    surge_trend_max_pct:        float = 15.0  # 추세 확인 시 허용 상한 (%) — 기본 15%
 
     # ── 수급 필터 (외국인/기관 순매수, opt10059) ──────────────────────────────
     investor_filter_enabled: bool  = True   # 수급 필터 활성화 여부
@@ -535,7 +604,7 @@ def filter_equity_rows(rows: list[dict]) -> tuple[list[dict], int]:
 
 
 def apply_watch_pool_cap(rows: list[dict], watch_pool_max: int) -> list[dict]:
-    """거래대금 내림차순으로 상위 watch_pool_max 종목만 유지."""
+    """거래대금 내림차순으로 상위 watch_pool_max 종목만 유지. (레거시 — apply_universe_score_cap 사용 권장)"""
     if not rows:
         return []
     rows = sorted(
@@ -544,6 +613,113 @@ def apply_watch_pool_cap(rows: list[dict], watch_pool_max: int) -> list[dict]:
         reverse=True,
     )
     return rows[:watch_pool_max]
+
+
+def _vol_pace_ratio(today_vol: int, prev_volume: int) -> float:
+    """
+    거래량 페이스 비율 (시간대 편향 보정).
+
+    단순 today_vol/prev_volume 은 장 초반(09:00~09:30)에 항상 극소값이 되어
+    vol_ratio 가중치가 무의미해지는 문제가 있다.
+
+    이를 해결하기 위해 '경과시간 대비 기대 거래량'으로 정규화한다:
+        pace_ratio = today_vol / (prev_volume × elapsed_ratio)
+
+    여기서 elapsed_ratio = 장 시작 후 경과 분 / 390(총 거래 시간 분).
+    최소 5분 보정으로 장 정확히 열리는 순간의 분모 0 방지.
+
+    해석: pace_ratio = 1.0 → 전일과 동일한 속도 / 2.0 → 전일의 2배 속도
+    이 값은 시간대에 무관하게 동일한 의미를 가진다.
+
+    Returns
+    -------
+    pace_ratio : float  (0.0 이면 계산 불가 — 중립 처리)
+    """
+    if prev_volume <= 0 or today_vol <= 0:
+        return 0.0
+
+    _MARKET_OPEN_MIN   = 9 * 60   # 09:00 분 기준
+    _TOTAL_TRADING_MIN = 390      # 09:00 ~ 15:30
+    _MIN_ELAPSED_MIN   = 5        # 극초반 분모 0 방어
+
+    now = datetime.now().time()   # 모듈 최상위 from datetime import datetime
+    now_min = now.hour * 60 + now.minute
+    elapsed = max(now_min - _MARKET_OPEN_MIN, _MIN_ELAPSED_MIN)
+
+    # 장외 시간(사전/사후)은 전체 거래 시간 기준으로 클램프
+    elapsed = min(elapsed, _TOTAL_TRADING_MIN)
+    elapsed_ratio = elapsed / _TOTAL_TRADING_MIN
+
+    return today_vol / (prev_volume * elapsed_ratio)
+
+
+def apply_universe_score_cap(
+    rows: list[dict],
+    watch_pool_max: int,
+    cfg: "SmartScannerConfig",
+    prev_volumes: dict[str, int],
+) -> list[dict]:
+    """
+    거래대금 순위 × 거래량 페이스 × 등락률을 복합 스코어링해 상위 watch_pool_max 종목 반환.
+
+    Hybrid score = trade_amt_score×w1 + vol_pace_score×w2 + chg_pct_score×w3
+
+    vol_pace_score 는 거래량 페이스 비율(_vol_pace_ratio) 기반:
+      - pace_ratio  = today_vol / (prev_volume × elapsed_ratio)
+      - 장 초반이어도 "같은 시간대 기준 전일 대비 몇 배 속도인지"로 비교
+      - min(pace_ratio / 3.0, 1.0)  — 전일 대비 3배 속도=만점
+      - 전일 데이터 없으면 0.5 (중립)
+    """
+    if not rows:
+        return []
+
+    n = len(rows)
+    w_amt = getattr(cfg, "universe_trade_amt_weight", 0.4)
+    w_vol = getattr(cfg, "universe_vol_ratio_weight", 0.4)
+    w_chg = getattr(cfg, "universe_chg_pct_weight",   0.2)
+
+    # 거래대금 내림차순 순위 → 정규화 점수
+    sorted_by_amt = sorted(rows, key=lambda r: int(r.get("trade_amount", 0) or 0), reverse=True)
+    amt_rank: dict[str, float] = {}
+    for i, r in enumerate(sorted_by_amt):
+        # i=0 (1위) → 1.0, i=n-1 (꼴찌) → 0.0
+        amt_rank[r["code"]] = 1.0 - (i / max(n - 1, 1))
+
+    scored: list[tuple[float, dict]] = []
+    for r in rows:
+        code = r["code"]
+
+        # ① 거래대금 스코어
+        s_amt = amt_rank.get(code, 0.5)
+
+        # ② 거래량 페이스 스코어 (시간대 편향 보정)
+        pv = prev_volumes.get(code, 0)
+        today_vol = int(r.get("volume", 0) or 0)
+        pace = _vol_pace_ratio(today_vol, pv)
+        if pace > 0:
+            r["vol_ratio"]   = round(pace, 4)  # SnapshotStore에 시간 보정 배율 저장
+            r["prev_volume"] = pv
+            s_vol = min(pace / 3.0, 1.0)       # pace 3배 = 만점
+        else:
+            r["vol_ratio"]   = 0.0
+            r["prev_volume"] = pv
+            s_vol = 0.5                         # 전일 데이터 없으면 중립
+
+        # ③ 등락률 스코어
+        chg = float(r.get("change_pct", 0) or 0)
+        s_chg = min(max(chg / 10.0, 0.0), 1.0)
+
+        score = s_amt * w_amt + s_vol * w_vol + s_chg * w_chg
+        scored.append((score, r))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    result = [r for _, r in scored[:watch_pool_max]]
+    logger.debug(
+        "[유니버스스코어] pool %d→%d, top5: %s",
+        n, len(result),
+        [(r["code"], round(sc, 3)) for sc, r in scored[:5]],
+    )
+    return result
 
 
 class TRRequestQueue:
@@ -615,6 +791,15 @@ class StockSnapshot:
     trend_prev_level:    int             = 0     # 직전 추세 단계(강세 소멸 감시용)
     is_daily_bull:       bool            = False # 일봉 정배열(5MA>10MA>20MA) 캐시 — prefilter 속도용
     rank:                int             = 0     # opt10030 거래대금 순위 (0=미할당)
+    rsi:                 float           = 0.0   # RSI14 캐시 (closes_1min 기반, 0=미계산/데이터부족)
+                                                 # check_breakout_gate · check_pre_surge 의 과매수 차단에 사용
+                                                 # snap.rsi > 0 인 경우에만 필터 적용 (데이터 부족 시 스킵)
+    prev_volume:         int             = 0     # 전일 총거래량 (hybrid universe score 계산용)
+    vol_ratio:           float           = 0.0   # 유니버스 스코어 거래량 페이스 비율
+                                                 # = today_vol / (prev_volume × elapsed_ratio)
+                                                 # ※ trade_audit_logger의 vol_ratio(1분봉 급증 배수)와
+                                                 #   개념이 다름 — 해당 파일은 snap.volumes_1min을 직접
+                                                 #   읽어 로컬 변수로 계산하므로 이 필드를 읽지 않음
 
 
 @dataclass
@@ -704,12 +889,6 @@ class SnapshotStore:
         # [NEW] 일봉 캐시 추적 (2026-04-03)
         self._daily_data: dict[str, list[dict]] = {}   # code → 일봉 OHLCV 리스트 (최신순)
         self._daily_updated_at: dict[str, datetime] = {}  # code → 마지막 갱신 시각
-        # 일봉 디스크 캐시 — 재시작해도 당일 데이터 즉시 복구
-        self._daily_cache_path: Path = self._get_daily_cache_path()
-        self._load_daily_cache()
-        # 1분봉 디스크 캐시 — 재시작/신규 편입 종목 즉시 복구
-        self._1min_cache_path: Path = self._get_1min_cache_path()
-        self._load_1min_cache()
         # [수급 필터] opt10059 결과 캐시
         self._inv_foreign: dict[str, int] = {}
         self._inv_inst: dict[str, int] = {}
@@ -717,7 +896,14 @@ class SnapshotStore:
         self._inv_updated_at: dict[str, datetime] = {}
         self._trend_level: dict[str, int] = {}         # code → 현재 추세 단계(0~3)
         self._trend_prev_level: dict[str, int] = {}    # code → 직전 추세 단계
+        # _lock은 캐시 로드보다 먼저 초기화해야 함 (_load_1min_cache에서 self._lock 사용)
         self._lock = threading.Lock()
+        # 일봉 디스크 캐시 — 재시작해도 당일 데이터 즉시 복구
+        self._daily_cache_path: Path = self._get_daily_cache_path()
+        self._load_daily_cache()
+        # 1분봉 디스크 캐시 — 재시작/신규 편입 종목 즉시 복구
+        self._1min_cache_path: Path = self._get_1min_cache_path()
+        self._load_1min_cache()
 
     # ── 일괄 적재 ─────────────────────────────────────────────────────────
 
@@ -725,6 +911,7 @@ class SnapshotStore:
     _NUM_COLS = [
         "current_price", "open_price", "high_price", "low_price",
         "volume", "trade_amount", "prev_close", "change_pct", "rank",
+        "prev_volume", "vol_ratio",
     ]
 
     def bulk_update(self, rows: list[dict]) -> None:
@@ -921,8 +1108,19 @@ class SnapshotStore:
             daily_low_prev = daily_data[0].get("low", 0) if daily_data else 0
 
             # 일봉 정배열 캐시 (5MA>10MA>20MA) — prefilter에서 재계산 없이 바로 사용
-            from strategy.jang_dong_min import check_daily_alignment as _cda
+            from strategy.jang_dong_min import check_daily_alignment as _cda, calc_rsi as _calc_rsi
             _is_daily_bull = _cda(daily_closes) if len(daily_closes) >= 20 else False
+
+            # RSI14 캐시 — closes_1min 15개 이상일 때만 계산 (부족 시 0.0 → 필터 스킵)
+            _closes_now = list(self._mins.get(code, []))
+            _rsi_cached = 0.0
+            if len(_closes_now) >= 15:
+                try:
+                    _r = _calc_rsi(_closes_now, 14)
+                    if _r is not None and _r > 0:
+                        _rsi_cached = float(_r)
+                except Exception:
+                    pass
 
             return StockSnapshot(
                 code          = code,
@@ -952,6 +1150,7 @@ class SnapshotStore:
                 trend_prev_level = int(self._trend_prev_level.get(code, 0)),
                 is_daily_bull    = _is_daily_bull,
                 rank             = safe_int_cell("rank", 0),
+                rsi              = _rsi_cached,
                 updated_at       = updated_at,
             )
 
@@ -1229,12 +1428,66 @@ class SnapshotStore:
 
 class ScannerLogger:
     """
-    스캐너 판단 근거를 scanner.log 에 기록한다.
+    스캐너 판단 근거를 scanner.log + 일별 CSV 에 이중 기록한다.
 
-    선정 로그: PASS  | code | name | signal_type | reason
-    탈락 로그: FAIL  | code | name | filter_step | reason
-    신호 로그: SIGNAL| code | name | signal_type | price | reason
+    scanner.log 라인 형식 (탭 구분):
+      PASS   | code | name | filter_step | reason
+      FAIL   | code | name | filter_step | reason        ← 탈락 (DEBUG 레벨)
+      NEAR   | code | name | filter_step | reason        ← 근사 탈락 (INFO 레벨)
+      SIGNAL | code | name | signal_type | price | reason
+
+    일별 CSV: logs/scanner_reject_YYYYMMDD.csv
+      time, code, name, filter_step, near_miss, reason
+      → 하루치 탈락 이력을 pandas 로 바로 읽어 전략 튜닝에 활용
+
+    FeedbackEngine / LogAnalyzer 는 양쪽 파일을 모두 읽을 수 있음.
     """
+
+    # ── CSV 클래스 변수 (날짜별 자동 교체) ───────────────────────────────────
+    _csv_file   = None          # IO[str] | None
+    _csv_writer = None          # csv.writer | None
+    _csv_date   = None          # date | None
+    _csv_lock   = threading.Lock()
+
+    @classmethod
+    def _ensure_csv(cls) -> None:
+        """오늘 날짜의 CSV 파일이 열려 있는지 확인하고, 필요하면 열거나 교체한다."""
+        today = date.today()
+        if cls._csv_date == today and cls._csv_file is not None:
+            return
+        # 기존 파일 닫기
+        if cls._csv_file is not None:
+            try:
+                cls._csv_file.close()
+            except Exception:
+                pass
+        path = Path("logs") / f"scanner_reject_{today.strftime('%Y%m%d')}.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not path.exists()
+        cls._csv_file   = open(path, "a", encoding="utf-8-sig", newline="")
+        cls._csv_writer = csv.writer(cls._csv_file)
+        if is_new:
+            cls._csv_writer.writerow(["time", "code", "name", "filter_step", "near_miss", "reason"])
+        cls._csv_date = today
+
+    @classmethod
+    def _write_csv(cls, code: str, name: str, step: str,
+                   reason: str, near_miss: bool = False) -> None:
+        """CSV 에 탈락 한 줄 추가. 예외는 무시(로깅 자체가 주 업무 차단하면 안 됨)."""
+        with cls._csv_lock:
+            try:
+                cls._ensure_csv()
+                cls._csv_writer.writerow([
+                    datetime.now().strftime("%H:%M:%S"),
+                    code, name, step,
+                    "Y" if near_miss else "",
+                    reason,
+                ])
+                cls._csv_file.flush()
+            except Exception as _e:
+                logger.debug("[ScannerLogger] CSV 쓰기 오류: %s", _e)
+
+    # ── 공개 API ──────────────────────────────────────────────────────────────
 
     @staticmethod
     def passed(code: str, name: str, step: str, reason: str) -> None:
@@ -1242,7 +1495,34 @@ class ScannerLogger:
 
     @staticmethod
     def rejected(code: str, name: str, step: str, reason: str) -> None:
+        """일반 탈락 — scanner.log(DEBUG) + 일별 CSV 에 기록."""
         scan_log.debug("FAIL\t%s\t%s\t%s\t%s", code, name, step, reason)
+        ScannerLogger._write_csv(code, name, step, reason, near_miss=False)
+
+    @staticmethod
+    def near_miss(
+        code: str, name: str, step: str,
+        actual: float, threshold: float,
+        reason: str,
+        miss_pct_limit: float = 15.0,
+    ) -> None:
+        """
+        기준값에 근접하여 탈락한 경우 별도 기록 (파라미터 튜닝 힌트).
+
+        actual vs threshold 의 차이가 threshold 대비 miss_pct_limit % 이내이면
+        [근사] 태그를 붙여 scanner.log INFO 레벨로 기록하고, CSV 에도 near_miss=Y 로 저장.
+
+        예) RSI 87.5 탈락(기준 88.0) → 차이 0.5/88.0 = 0.57% < 15% → 근사 탈락
+        """
+        diff_pct = abs(actual - threshold) / max(abs(threshold), 1e-9) * 100
+        if diff_pct <= miss_pct_limit:
+            tagged = f"[근사 {diff_pct:.1f}%] {reason}"
+            scan_log.info("NEAR\t%s\t%s\t%s\t%s", code, name, step, tagged)
+            ScannerLogger._write_csv(code, name, step, tagged, near_miss=True)
+        else:
+            # 근사 아님 → 일반 rejected 와 동일
+            scan_log.debug("FAIL\t%s\t%s\t%s\t%s", code, name, step, reason)
+            ScannerLogger._write_csv(code, name, step, reason, near_miss=False)
 
     @staticmethod
     def signal(sig: ScanSignal) -> None:
@@ -1256,6 +1536,21 @@ class ScannerLogger:
         scan_log.info(
             "PRE_FILTER\t전체=%d\t통과=%d\tTop%d 선정",
             total, passed, top_n,
+        )
+
+    @staticmethod
+    def cycle_summary(n_candidates: int, step_counts: "dict[str, int]") -> None:
+        """
+        스캔 사이클 종료 시 필터별 탈락 건수 요약.
+        step_counts: {filter_step: 탈락_건수} — 호출자가 해당 사이클에서 집계해 넘김.
+        """
+        if not step_counts:
+            return
+        top = sorted(step_counts.items(), key=lambda x: -x[1])[:6]
+        top_str = "  ".join(f"{s}:{c}" for s, c in top)
+        scan_log.info(
+            "CYCLE\t후보%d건\t탈락상위→ %s",
+            n_candidates, top_str,
         )
 
 
@@ -1860,22 +2155,31 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: SmartScannerConfig) -> Optio
                      snap.name, snap.code, _eff_chejan, _fear_chejan)
         _eff_chejan = _fear_chejan
     if snap.chejan_strength < _eff_chejan:
-        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_CHEJAN",
-            f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%")
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "BREAKOUT_CHEJAN",
+            actual=snap.chejan_strength, threshold=_eff_chejan,
+            reason=f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
+        )
         return None
 
     # ⑤ 체결강도 상한 — 극과열 고점 차단 (1000%+ 는 상승 동력 소진 고점 매수 위험)
     _chejan_max = getattr(cfg, "breakout_chejan_max", 800.0)
     if snap.chejan_strength >= _chejan_max:
-        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_CHEJAN_MAX",
-            f"[{_slot}] 체결강도 과열 차단 — {snap.chejan_strength:.0f}% ≥ {_chejan_max:.0f}%")
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "BREAKOUT_CHEJAN_MAX",
+            actual=snap.chejan_strength, threshold=_chejan_max,
+            reason=f"[{_slot}] 체결강도 과열 차단 — {snap.chejan_strength:.0f}% ≥ {_chejan_max:.0f}%",
+        )
         return None
 
     # ⑥ RSI 상한 — 과매수 고점 차단 (snap.rsi > 0 인 경우만 적용)
     _rsi_max = getattr(cfg, "breakout_rsi_max", 80.0)
     if snap.rsi > 0 and snap.rsi >= _rsi_max:
-        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_RSI_MAX",
-            f"[{_slot}] RSI 과매수 차단 — {snap.rsi:.1f} ≥ {_rsi_max:.1f}")
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "BREAKOUT_RSI_MAX",
+            actual=snap.rsi, threshold=_rsi_max,
+            reason=f"[{_slot}] RSI 과매수 차단 — {snap.rsi:.1f} ≥ {_rsi_max:.1f}",
+        )
         return None
 
     return f"[{_slot}] 체결강도 {snap.chejan_strength:.0f}% | 등락률 {_snap_chg:.1f}%"
@@ -1952,22 +2256,31 @@ def check_pre_surge(
 
     chejan_min = getattr(cfg, "pre_surge_chejan_min", 110.0)
     if snap.chejan_strength < chejan_min:
-        ScannerLogger.rejected(snap.code, snap.name, "PRE_SURGE",
-            f"체결강도 미달 — {snap.chejan_strength:.0f}% < {chejan_min:.0f}%")
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "PRE_SURGE",
+            actual=snap.chejan_strength, threshold=chejan_min,
+            reason=f"체결강도 미달 — {snap.chejan_strength:.0f}% < {chejan_min:.0f}%",
+        )
         return None
 
     # ⑤ 체결강도 상한 — 이미 극단 과열(고점) 종목 차단
     chejan_max = getattr(cfg, "pre_surge_chejan_max", 700.0)
     if snap.chejan_strength >= chejan_max:
-        ScannerLogger.rejected(snap.code, snap.name, "PRE_SURGE",
-            f"체결강도 과열 차단 — {snap.chejan_strength:.0f}% ≥ {chejan_max:.0f}%")
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "PRE_SURGE",
+            actual=snap.chejan_strength, threshold=chejan_max,
+            reason=f"체결강도 과열 차단 — {snap.chejan_strength:.0f}% ≥ {chejan_max:.0f}%",
+        )
         return None
 
     # ⑥ RSI 상한 — 과매수 구간(고점) 진입 차단 (RSI=0 은 미계산이므로 스킵)
     rsi_max = getattr(cfg, "pre_surge_rsi_max", 88.0)
     if snap.rsi > 0 and snap.rsi >= rsi_max:
-        ScannerLogger.rejected(snap.code, snap.name, "PRE_SURGE",
-            f"RSI 과매수 차단 — {snap.rsi:.1f} ≥ {rsi_max:.1f}")
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "PRE_SURGE",
+            actual=snap.rsi, threshold=rsi_max,
+            reason=f"RSI 과매수 차단 — {snap.rsi:.1f} ≥ {rsi_max:.1f}",
+        )
         return None
 
     if snap.volume <= 0:
@@ -2282,12 +2595,20 @@ def check_jdm_entry(
             return None
 
     # [고점 방지] 현재가가 시가 대비 entry_open_surge_max% 이상 이미 올랐으면 진입 차단
+    # 단, 추세 레벨 ≥ surge_trend_override_level 이면 surge_trend_max_pct까지 허용
     if snap.open_price > 0:
         surge_from_open = (snap.current_price - snap.open_price) / snap.open_price * 100
-        if surge_from_open >= cfg.entry_open_surge_max:
+        _surge_cap = float(cfg.entry_open_surge_max)
+        _surge_override_lvl = int(getattr(cfg, "surge_trend_override_level", 2))
+        _surge_trend_max    = float(getattr(cfg, "surge_trend_max_pct", 15.0))
+        _snap_trend_lvl     = int(getattr(snap, "trend_level", 0))
+        if _surge_override_lvl > 0 and _snap_trend_lvl >= _surge_override_lvl:
+            _surge_cap = max(_surge_cap, _surge_trend_max)
+        if surge_from_open >= _surge_cap:
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM_SURGE",
-                f"시가 대비 이미 {surge_from_open:.2f}% 상승 — 고점 진입 차단 (상한 {cfg.entry_open_surge_max:.1f}%)",
+                f"시가 대비 이미 {surge_from_open:.2f}% 상승 — 고점 진입 차단 "
+                f"(상한 {_surge_cap:.1f}%, trend={_snap_trend_lvl})",
             )
             return None
 
@@ -2306,6 +2627,14 @@ def check_jdm_entry(
     _eff_vol_mult = _get_slot_value(_slot, cfg, "volume_surge_mult",     cfg.volume_1min_surge_mult)
     _eff_rsi_min  = _get_slot_value(_slot, cfg, "jdm_rsi_entry_min",     cfg.jdm_rsi_entry_min)
 
+    # 추세추종 오버라이드 — trend_level ≥ jdm_candle_skip_trend_level 이면 RSI 하한 완화
+    _trend_snap_lv = int(getattr(snap, "trend_level", 0))
+    _candle_skip_lv = int(getattr(cfg, "jdm_candle_skip_trend_level", 2))
+    if _trend_snap_lv >= _candle_skip_lv:
+        _rsi_trend_min = float(getattr(cfg, "jdm_rsi_entry_min_trend", 45.0))
+        if _rsi_trend_min < _eff_rsi_min:
+            _eff_rsi_min = _rsi_trend_min
+
     # ── Safety Filter ① 공포 장세 체결강도 상향 ────────────────────────────
     # 지수가 market_fear_pct(기본 -1%) 이하로 하락 중이면 체결강도 기준을 강화.
     # index_block_pct(-1.5%)까지는 차단하지 않고 조건만 더 까다롭게 적용.
@@ -2315,22 +2644,27 @@ def check_jdm_entry(
     if _is_fear and _eff_chejan < _fear_chejan:
         _prev_chejan = _eff_chejan
         _eff_chejan  = _fear_chejan
-        ScannerLogger.rejected(
-            snap.code, snap.name, "JDM_FEAR",
-            f"공포 장세 감지 (코스피 {_kospi_chg:+.2f}% / 코스닥 {_kosdaq_chg:+.2f}%) "
-            f"→ 체결강도 기준 {_prev_chejan:.0f}% → {_eff_chejan:.0f}% 상향 (아직 통과 여부 미확정)",
-        ) if False else None  # 상향만 하고 차단은 하지 않음 — 이후 체결강도 체크에서 판정
-        logger.debug(
-            "[Safety] %s(%s) 공포 장세 — 체결강도 기준 %.0f%% → %.0f%%",
-            snap.name, snap.code, _prev_chejan, _eff_chejan,
+        # 차단은 하지 않고 기준 상향만 — 이후 체결강도 체크에서 판정
+        # FEAR 상황 자체는 INFO 로 기록해 튜닝 데이터에 포함
+        scan_log.info(
+            "FEAR\t%s\t%s\tJDM_FEAR\t공포 장세 감지 (코스피 %+.2f%% / 코스닥 %+.2f%%) "
+            "→ 체결강도 기준 %.0f%% → %.0f%% 상향",
+            snap.code, snap.name, _kospi_chg, _kosdaq_chg, _prev_chejan, _eff_chejan,
         )
 
     # 구간별 등락률 상한 체크 (prefilter 이후 2차 보호)
+    # 단, 추세 레벨 ≥ surge_trend_override_level 이면 surge_trend_max_pct까지 완화
     _snap_chg = float(getattr(snap, "change_pct", 0) or 0)
-    if _snap_chg >= _eff_ch_max:
+    _chg_cap = float(_eff_ch_max)
+    _surge_override_lvl2 = int(getattr(cfg, "surge_trend_override_level", 2))
+    _surge_trend_max2    = float(getattr(cfg, "surge_trend_max_pct", 15.0))
+    _snap_trend_lvl2     = int(getattr(snap, "trend_level", 0))
+    if _surge_override_lvl2 > 0 and _snap_trend_lvl2 >= _surge_override_lvl2:
+        _chg_cap = max(_chg_cap, _surge_trend_max2)
+    if _snap_chg >= _chg_cap:
         ScannerLogger.rejected(
             snap.code, snap.name, "JDM_CHGPCT",
-            f"[{_slot}] 등락률 {_snap_chg:.2f}% ≥ 구간 상한 {_eff_ch_max:.0f}%",
+            f"[{_slot}] 등락률 {_snap_chg:.2f}% ≥ 구간 상한 {_chg_cap:.0f}% (trend={_snap_trend_lvl2})",
         )
         return None
 
@@ -2379,7 +2713,11 @@ def check_jdm_entry(
 
     r_chej = check_chejan_strength(snap, _eff_chejan)
     if r_chej is None:
-        logger.debug(f"[신호필터] {snap.name}({snap.code}) [{_slot}] 체결강도 미달 — 현재 {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%")
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "JDM_CHEJAN",
+            actual=snap.chejan_strength, threshold=_eff_chejan,
+            reason=f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
+        )
         return None
 
     from strategy.jang_dong_min import (
@@ -2388,9 +2726,11 @@ def check_jdm_entry(
 
     # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
     if getattr(cfg, "yosep_trend_enabled", True):
-        # AFTERNOON 슬롯은 별도 기준 적용 (Strong Trend=3 강제)
+        # 슬롯별 최소 추세 레벨 — OPENING은 1분봉 부족으로 level 0이 정상이므로 별도 기준
         if _slot == "AFTERNOON":
             _min_trend = int(getattr(cfg, "yosep_min_trend_level_afternoon", 3))
+        elif _slot == "OPENING":
+            _min_trend = int(getattr(cfg, "yosep_min_trend_level_opening", 0))
         else:
             _min_trend = int(getattr(cfg, "yosep_min_trend_level", 1))
         _trend_lv = int(getattr(snap, "trend_level", 0))
@@ -2445,12 +2785,21 @@ def check_jdm_entry(
             return None
 
         golden = pma_s <= pma_l and ma_s > ma_l
+        _gc_override_lvl = int(getattr(cfg, "jdm_golden_cross_trend_override", 2))
+        _snap_trend_lv   = int(getattr(snap, "trend_level", 0))
         if not golden:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM",
-                f"골든크로스 미충족 (직전MA:{pma_s:.0f}/{pma_l:.0f} → 현재MA:{ma_s:.0f}/{ma_l:.0f})")
-            return None
+            # 추세 오버라이드: trend_level ≥ jdm_golden_cross_trend_override AND MA 정배열이면 허용
+            # 이미 상승 중인 종목은 단기MA가 장기MA 위에 유지되므로 골든크로스 미발생이 정상
+            if _gc_override_lvl > 0 and _snap_trend_lv >= _gc_override_lvl and ma_s > ma_l:
+                ScannerLogger.passed(snap.code, snap.name, "JDM_GC_OVERRIDE",
+                    f"골든크로스 없지만 추세Lv{_snap_trend_lv}+MA정배열 진입 허용 "
+                    f"(직전{pma_s:.0f}/{pma_l:.0f}→현재{ma_s:.0f}/{ma_l:.0f})")
+            else:
+                ScannerLogger.rejected(snap.code, snap.name, "JDM",
+                    f"골든크로스 미충족 (직전MA:{pma_s:.0f}/{pma_l:.0f} → 현재MA:{ma_s:.0f}/{ma_l:.0f})")
+                return None
 
-        # 09:30 이후엔 MA 정배열 유지 확인
+        # 09:30 이후엔 MA 정배열 유지 확인 (추세 오버라이드 종목도 정배열 필요)
         if now >= cfg.ma_alignment_time:
             if not (ma_s > ma_l):
                 ScannerLogger.rejected(snap.code, snap.name, "JDM",
@@ -2480,6 +2829,10 @@ def check_jdm_entry(
     _ema_l_period      = getattr(cfg, "ema_disp_long",          20)
     _ema_disp_max      = getattr(cfg, "ema_disp_max_pct",       3.0)
     _price_ema_disp_max = getattr(cfg, "price_ema_disp_max_pct", 3.0)
+    # 추세추종 완화: trend_level ≥ 기준 레벨이면 EMA 이격 상한을 넓혀 추격 차단 해제
+    if _trend_snap_lv >= _candle_skip_lv:
+        _ema_disp_max       = float(getattr(cfg, "ema_disp_max_pct_trend",       7.0))
+        _price_ema_disp_max = float(getattr(cfg, "price_ema_disp_max_pct_trend", 6.0))
     if len(closes) >= _ema_l_period:
         ema_s = calc_ema(closes, _ema_s_period)
         ema_l = calc_ema(closes, _ema_l_period)
@@ -2504,33 +2857,55 @@ def check_jdm_entry(
 
     # RSI 체크 — 라이트 모드(캔들 부족)에서는 스킵
     if not _lite_mode:
-        rsi_ok = _eff_rsi_min <= rsi < cfg.jdm_rsi_high
+        # RSI 상한: trend_level ≥ 기준 레벨이면 80으로 완화 (추세주 70대 RSI 차단 방지)
+        _eff_rsi_high = cfg.jdm_rsi_high  # 기본 70
+        if _trend_snap_lv >= _candle_skip_lv:
+            _eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_trend", 80.0))
+            # ATR 돌파 확인: 현재가 > EMA20 + ATR×1.5 이면 추가 완화(82)
+            _highs = list(snap.highs_1min or [])
+            _lows  = list(snap.lows_1min  or [])
+            if len(closes) >= 20 and len(_highs) >= 15 and len(_lows) >= 15:
+                _ema20_b = calc_ema(closes, 20)
+                _atr14_b = calc_atr(_highs, _lows, closes, 14)
+                if (_ema20_b is not None and _atr14_b is not None and _atr14_b > 0
+                        and snap.current_price > _ema20_b + _atr14_b * 1.5):
+                    _eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_breakout", 82.0))
+
+        rsi_ok = _eff_rsi_min <= rsi < _eff_rsi_high
         if not rsi_ok:
-            ScannerLogger.rejected(
-                snap.code, snap.name, "JDM",
-                f"[{_slot}] RSI 범위 초과 — 현재 {rsi:.1f}% (진입허용 {_eff_rsi_min:.0f}~{cfg.jdm_rsi_high:.0f}%)",
+            _rsi_thresh = _eff_rsi_min if rsi < _eff_rsi_min else _eff_rsi_high
+            ScannerLogger.near_miss(
+                snap.code, snap.name, "JDM_RSI",
+                actual=rsi, threshold=_rsi_thresh,
+                reason=f"[{_slot}] RSI 범위 초과 — 현재 {rsi:.1f}% (진입허용 {_eff_rsi_min:.0f}~{_eff_rsi_high:.0f}%, trend_lv={_trend_snap_lv})",
             )
             return None
 
-    # [NEW] 캔들 패턴 확인 — 라이트 모드에서는 스킵 (캔들 수 부족 시 신뢰도 낮음)
+    # [추세추종] 캔들 패턴 확인 — trend_level ≥ 기준 레벨이면 반전 캔들 불필요 (추세 계속 진행 중)
+    # 라이트 모드(캔들 부족)에서도 스킵
     if not _lite_mode:
-        r_engulf = check_bullish_engulfing(snap)
-        r_pinbar = check_bullish_pin_bar(snap)
-        if r_engulf is None and r_pinbar is None:
-            ScannerLogger.rejected(
-                snap.code, snap.name, "JDM_CANDLE",
-                "캔들 패턴 미충족 (상승장악형·강세핀바 모두 불성립)",
-            )
-            return None
-        candle_reason = r_engulf or r_pinbar
+        if _trend_snap_lv >= _candle_skip_lv:
+            # 추세주: MA정배열·ATR·EMA 이미 검증됨 → 반전 캔들 패턴 요구 불필요
+            candle_reason = f"TREND_SKIP(lv{_trend_snap_lv})"
+        else:
+            r_engulf = check_bullish_engulfing(snap)
+            r_pinbar = check_bullish_pin_bar(snap)
+            if r_engulf is None and r_pinbar is None:
+                ScannerLogger.rejected(
+                    snap.code, snap.name, "JDM_CANDLE",
+                    f"캔들 패턴 미충족 (상승장악형·강세핀바 불성립, trend_lv={_trend_snap_lv} < {_candle_skip_lv})",
+                )
+                return None
+            candle_reason = r_engulf or r_pinbar
     else:
         candle_reason = "LITE(캔들패턴스킵)"
 
     # [NEW] 체결강도 최종 재확인 (슬롯 기반 기준값 적용)
     if snap.chejan_strength < _eff_chejan:
-        ScannerLogger.rejected(
-            snap.code, snap.name, "JDM",
-            f"[{_slot}] 체결강도 최종 재확인 미충족 — 현재 {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "JDM_CHEJAN_FINAL",
+            actual=snap.chejan_strength, threshold=_eff_chejan,
+            reason=f"[{_slot}] 체결강도 최종 재확인 미충족 — 현재 {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
         )
         return None
 
@@ -2624,6 +2999,10 @@ class SmartScanner:
         self._scan_thread: Optional[threading.Thread] = None
         self._lock        = threading.Lock()
 
+        # 첫 스캔 시 전체 종목 1분봉 일괄 로딩 플래그
+        # True가 되면 이후 사이클은 12종목/사이클 제한으로 복귀
+        self._initial_candle_load_done: bool = False
+
         self.on_signal: Optional[Callable[[ScanSignal], None]] = None
 
         # 포지션 현재가 실시간 업데이트용 (MainWindow에서 주입)
@@ -2652,10 +3031,77 @@ class SmartScanner:
         self._amt_baseline: dict[str, int] = {}
         # opt10030 직전 성공 결과 캐시 — 실패 시 하드코딩 대체 대신 이전 결과 재사용
         self._last_volume_rows: list[dict] = []
+        # 전일 거래량 캐시 — hybrid universe score vol_ratio 계산용
+        # {code: prev_volume}; 매일 장 마감(15:20) save_prev_volumes() 로 갱신
+        self._prev_volumes: dict[str, int] = {}
+        self._load_prev_volumes()
         # 동일 종목/신호 중복 emit 방지 (signal_cooldown_sec)
         self._last_signal_ts: dict[tuple[str, str], float] = {}
 
         self._connect_realtime_signal()
+
+    # ── 전일 거래량 캐시 save/load ────────────────────────────────────────────
+
+    def _prev_volumes_path(self) -> Path:
+        return Path("logs") / "prev_volumes.json"
+
+    def _load_prev_volumes(self) -> None:
+        """
+        logs/prev_volumes.json 에서 전일 거래량 캐시를 로드.
+        파일에 저장된 날짜가 오늘이거나 4일 이상 지난 경우 사용하지 않는다.
+        """
+        # json 은 모듈 최상위에서 이미 임포트됨
+        path = self._prev_volumes_path()
+        if not path.exists():
+            logger.info("[prev_volumes] 캐시 파일 없음 — vol_ratio 중립(0.5)으로 동작")
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            saved_date_str = data.get("date", "")
+            saved_date = date.fromisoformat(saved_date_str) if saved_date_str else None
+            today = date.today()
+            if saved_date is None:
+                logger.warning("[prev_volumes] 날짜 정보 없음 — 캐시 무효")
+                return
+            if saved_date >= today:
+                logger.info("[prev_volumes] 저장 날짜(%s)가 오늘 이후 — 무효 (장중 저장본)", saved_date)
+                return
+            age_days = (today - saved_date).days
+            if age_days > 4:
+                logger.warning("[prev_volumes] 캐시가 %d일 경과 — 무효 (주말/연휴 등)", age_days)
+                return
+            volumes: dict = data.get("volumes", {})
+            self._prev_volumes = {k: int(v) for k, v in volumes.items() if int(v or 0) > 0}
+            logger.info("[prev_volumes] 로드 완료 — %d종목 (%s 기준)", len(self._prev_volumes), saved_date)
+        except Exception as e:
+            logger.warning("[prev_volumes] 로드 실패: %s", e)
+
+    def save_prev_volumes(self) -> None:
+        """
+        현재 SnapshotStore의 거래량을 전일 거래량으로 저장 (15:20 강제청산 시 호출).
+        저장 형식: {"date": "YYYY-MM-DD", "volumes": {"code": volume, ...}}
+        """
+        # json 은 모듈 최상위에서 이미 임포트됨
+        try:
+            with self.store._lock:
+                snap_df = self.store._df.copy()
+            if snap_df.empty or "volume" not in snap_df.columns:
+                logger.warning("[prev_volumes] 스냅샷 데이터 없음 — 저장 스킵")
+                return
+            volumes = {
+                str(code): int(row["volume"])
+                for code, row in snap_df.iterrows()
+                if int(row.get("volume", 0) or 0) > 0
+            }
+            path = self._prev_volumes_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"date": date.today().isoformat(), "volumes": volumes}, f, ensure_ascii=False)
+            logger.info("[prev_volumes] 저장 완료 — %d종목 (%s)", len(volumes), date.today())
+            self._prev_volumes = volumes  # 메모리 캐시도 갱신
+        except Exception as e:
+            logger.warning("[prev_volumes] 저장 실패: %s", e)
 
     def _roll_amt_baseline_date(self) -> None:
         t = date.today()
@@ -2745,12 +3191,12 @@ class SmartScanner:
                 "  등락률 상한 %.1f%% 미만만 유지 — %d → %d종목",
                 mc, _n0, len(rows),
             )
-        rows = apply_watch_pool_cap(rows, self.cfg.watch_pool_max)
+        rows = apply_universe_score_cap(rows, self.cfg.watch_pool_max, self.cfg, self._prev_volumes)
         if not rows:
             logger.warning("  ⚠ Pre-Filter — 필터 후 종목 없음, Pre-Filter 생략")
             return
 
-        logger.info("  📊 감시 후보 %d종목 (순수 주식·거래대금 상위·등락률 < %.1f%%)", len(rows), mc)
+        logger.info("  📊 감시 후보 %d종목 (순수 주식·hybrid스코어 상위·등락률 < %.1f%%)", len(rows), mc)
 
         # ① DataFrame 에 일괄 적재
         self.top_mgr.clear()
@@ -3052,7 +3498,7 @@ class SmartScanner:
         """
         거래대금 상위 조회 — opt10030 (KiwoomManager.fetch_opt10030_top_volume).
 
-        200종목 근처는 보통 TR 2회(연속조회) + 레이트리미터 ~0.5s 수준.
+        target=400 기준 TR 약 4회(연속조회) + 레이트리미터 각 0.25s → 합계 ~1~2s 수준.
         """
         logger.info("[opt10030] 거래대금 상위 조회 시작 (목표 %d종목)", target)
         if on_progress:
@@ -3156,7 +3602,7 @@ class SmartScanner:
                 "[주기 스캔] 등락률 상한 %.1f%% 미만만 유지 — %d → %d종목",
                 mc, _n0, len(rows),
             )
-        rows = apply_watch_pool_cap(rows, self.cfg.watch_pool_max)
+        rows = apply_universe_score_cap(rows, self.cfg.watch_pool_max, self.cfg, self._prev_volumes)
         if not rows:
             logger.warning("[주기 스캔] 필터 후 종목 없음 — 중단")
             return []
@@ -3165,7 +3611,7 @@ class SmartScanner:
               f"{len(rows)}종목 감시 후보")
 
         logger.info(
-            "[주기 스캔] 감시 후보 %d종목 (수집 %d → 등락 <%.1f%%·상위 %d)",
+            "[주기 스캔] 감시 후보 %d종목 (수집 %d → 등락 <%.1f%%·hybrid스코어 상위 %d)",
             len(rows), self.cfg.collect_raw_top_n, mc, self.cfg.watch_pool_max,
         )
 
@@ -3207,18 +3653,32 @@ class SmartScanner:
         # ⚠️  메인 스레드에서 TR 을 동기 루프로 호출하면 UI 가 수십 초 얼어붙음.
         #     QTimer.singleShot 체인으로 한 종목씩 분산 처리한다.
         _CANDLE_MIN_BARS = 55   # MA50 에 필요한 최소 분봉 수
-        _CANDLE_LOAD_MAX = 12   # 한 스캔 사이클당 최대 예약 종목 수
-        codes_need = [
+        _CANDLE_LOAD_MAX = 12   # 이후 사이클당 최대 예약 종목 수
+        codes_need_all = [
             code for code in top_codes
             if len(self.store._mins.get(code, [])) < _CANDLE_MIN_BARS
-        ][:_CANDLE_LOAD_MAX]
+        ]
+
+        if not self._initial_candle_load_done:
+            # 첫 스캔: 제한 없이 전체 종목 일괄 로딩 (장 시작부터 누적된 데이터 확보)
+            codes_need = codes_need_all
+            if codes_need:
+                logger.info(
+                    "[주기 스캔] STEP-H: 첫 스캔 — 전체 %d종목 1분봉 일괄 로딩 시작 "
+                    "(350ms 간격 체인, 이후 사이클은 %d종목/회로 복귀)",
+                    len(codes_need), _CANDLE_LOAD_MAX,
+                )
+        else:
+            # 이후 사이클: 12종목/사이클 제한 유지 (신규 편입 종목만 처리)
+            codes_need = codes_need_all[:_CANDLE_LOAD_MAX]
 
         if codes_need:
-            logger.debug(
-                "[주기 스캔] STEP-H: 1분봉 비동기 로딩 예약 (%d종목) — "
-                "350ms 간격으로 순차 처리, UI 블로킹 없음",
-                len(codes_need),
-            )
+            if self._initial_candle_load_done:
+                logger.debug(
+                    "[주기 스캔] STEP-H: 1분봉 비동기 로딩 예약 (%d종목) — "
+                    "350ms 간격으로 순차 처리, UI 블로킹 없음",
+                    len(codes_need),
+                )
             QTimer.singleShot(500, lambda c=list(codes_need): self._load_candles_async(c, 0))
         else:
             logger.debug("[주기 스캔] STEP-H: 분봉 데이터 충분 — 초기 로딩 스킵")
@@ -3417,6 +3877,15 @@ class SmartScanner:
         """
         if idx >= len(codes):
             logger.info("[STEP-H async] 완료 — 총 %d종목 처리", len(codes))
+            if not self._initial_candle_load_done:
+                self._initial_candle_load_done = True
+                logger.info("[STEP-H async] 첫 일괄 로딩 완료 — 이후 사이클 12종목/회 제한 복귀")
+                # 캐시 저장 (일괄 로딩 완료 시점에 파일로 영속)
+                try:
+                    self.store.save_1min_cache()
+                    logger.info("[STEP-H async] 1분봉 캐시 파일 저장 완료")
+                except Exception as _e:
+                    logger.warning("[STEP-H async] 1분봉 캐시 저장 실패: %s", _e)
             return
 
         # _tr_busy 중이면 이 종목 스킵 후 다음으로 (TRRequestQueue 락 데드락 방지)

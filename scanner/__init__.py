@@ -6,7 +6,10 @@ from .smart_scanner import (
     TopVolumeManager, PriorityWatchQueue,
     StockSnapshot, ScanSignal,
     check_breakout, check_jdm_entry,
-    is_pure_equity_name, filter_equity_rows, apply_watch_pool_cap,
+    is_pure_equity_name, filter_equity_rows,
+    apply_watch_pool_cap,        # 레거시 — 거래대금 단일 정렬
+    apply_universe_score_cap,    # 현행 — 거래대금+vol_ratio+등락률 복합 스코어
+    ScannerLogger,
 )
 
 __all__ = [
@@ -17,5 +20,8 @@ __all__ = [
     "TopVolumeManager", "PriorityWatchQueue",
     "StockSnapshot", "ScanSignal",
     "check_breakout", "check_jdm_entry",
-    "is_pure_equity_name", "filter_equity_rows", "apply_watch_pool_cap",
+    "is_pure_equity_name", "filter_equity_rows",
+    "apply_watch_pool_cap",
+    "apply_universe_score_cap",
+    "ScannerLogger",
 ]

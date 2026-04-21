@@ -77,46 +77,56 @@ class TRRateLimiter:
     키움 정책: 1초당 최대 5회, 연속 TR 간 최소 0.2초 간격.
     실제로는 안전 마진을 두어 4회/초, 0.25초 간격으로 제한한다.
 
-    사용 예)
-        _lim = TRRateLimiter()
-        _lim.acquire()   # 필요 시 sleep 후 반환
-        # TR 호출
+    acquire()는 메인 스레드에서만 호출 (_comm_rq 전용).
+    대기 구간에서 QApplication.processEvents()를 호출해 UI 블로킹을 방지한다.
+    호출 전 _tr_busy=True 가 이미 설정되어 있으므로 processEvents 중 재진입 없음.
     """
     MAX_PER_SEC  = 4      # 1초당 최대 호출 횟수 (5→4, 안전 마진)
     MIN_INTERVAL = 0.25   # 연속 호출 최소 간격 (초)
 
     def __init__(self) -> None:
         self._timestamps: collections.deque = collections.deque()
-        self._lock = threading.Lock()
+
+    @staticmethod
+    def _nonblocking_wait(wait_sec: float) -> None:
+        """메인 스레드에서 UI를 살려두면서 wait_sec 초를 대기한다.
+        ExcludeUserInputEvents: 사용자 입력은 막고 페인트/타이머 이벤트는 허용."""
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import QEventLoop
+        deadline = time.monotonic() + wait_sec
+        while time.monotonic() < deadline:
+            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.01, remaining))
 
     def acquire(self) -> None:
-        """TR 호출 전 반드시 호출. 필요 시 sleep 후 반환한다."""
-        with self._lock:
-            now = time.monotonic()
+        """TR 호출 전 반드시 호출. 필요 시 비블로킹 대기 후 반환한다."""
+        now = time.monotonic()
 
-            # 1. 최소 간격 보장
-            if self._timestamps:
-                wait = self.MIN_INTERVAL - (now - self._timestamps[-1])
-                if wait > 0:
-                    time.sleep(wait)
-                    now = time.monotonic()
+        # 1. 최소 간격 보장
+        if self._timestamps:
+            wait = self.MIN_INTERVAL - (now - self._timestamps[-1])
+            if wait > 0:
+                self._nonblocking_wait(wait)
+                now = time.monotonic()
 
-            # 2. 슬라이딩 윈도우(1초) 내 호출 수 확인
+        # 2. 슬라이딩 윈도우(1초) 내 호출 수 확인
+        cutoff = now - 1.0
+        while self._timestamps and self._timestamps[0] <= cutoff:
+            self._timestamps.popleft()
+
+        if len(self._timestamps) >= self.MAX_PER_SEC:
+            wait = (self._timestamps[0] + 1.0) - now
+            if wait > 0:
+                self._nonblocking_wait(wait)
+                now = time.monotonic()
+            # 윈도우 재정리
             cutoff = now - 1.0
             while self._timestamps and self._timestamps[0] <= cutoff:
                 self._timestamps.popleft()
 
-            if len(self._timestamps) >= self.MAX_PER_SEC:
-                wait = (self._timestamps[0] + 1.0) - now
-                if wait > 0:
-                    time.sleep(wait)
-                    now = time.monotonic()
-                # 윈도우 재정리
-                cutoff = now - 1.0
-                while self._timestamps and self._timestamps[0] <= cutoff:
-                    self._timestamps.popleft()
-
-            self._timestamps.append(time.monotonic())
+        self._timestamps.append(time.monotonic())
 
 
 # ---------------------------------------------------------------------------
@@ -283,11 +293,12 @@ class KiwoomManager:
     # opt10030 거래대금 상위 (연속조회 지원)
     # -----------------------------------------------------------------------
 
-    def fetch_opt10030_top_volume(self, max_rows: int = 200) -> list[dict]:
+    def fetch_opt10030_top_volume(self, max_rows: int = 400) -> list[dict]:
         """
         opt10030 거래대금 상위 종목. 한 페이지(최대 약 100행)를 넘기면 연속조회로 이어 받는다.
 
         키움: prev_next 콜백이 '2'이면 다음 페이지가 있음 → CommRqData(..., prev_next=2).
+        max_rows=400 기준 약 4페이지(TR 4회) 소요. 각 TR 간 0.25s 딜레이 포함.
         """
         all_rows: list[dict] = []
         prev_next = 0
@@ -446,16 +457,24 @@ class KiwoomManager:
             }
         """
         logger.info("get_balance 호출 — 계좌: '%s'", self._account)
+        if not self._account:
+            logger.warning("get_balance 계좌번호 없음 — 스킵")
+            return {}   # sync_balance가 if not balance: 로 스킵
         self._set_input("계좌번호",    self._account)
         self._set_input("비밀번호",    "")
         self._set_input("비밀번호입력매체구분", "00")
         self._set_input("조회구분",    "2")
-        ok = self._comm_rq(TR_ACCOUNT, "balance", "2000")
+        # opw00001은 서버 부하 시 4~6초 소요 → 타임아웃 6초로 늘림
+        ok = self._comm_rq(TR_ACCOUNT, "balance", "2000", timeout_ms=6_000)
         if not ok:
-            logger.warning("get_balance TR 차단됨 — 잔고 조회 생략")
-            return {"cash": 0, "stock_value": 0, "total": 0, "pnl": 0, "pnl_pct": 0.0}
+            logger.warning("get_balance TR 차단됨 — 잔고 동기화 스킵 (기존값 유지)")
+            return {}   # 빈 dict → sync_balance가 if not balance: 로 스킵, 기존 self.cash 유지
 
         d = self._tr_data
+        # 타임아웃으로 _tr_data가 비어 있으면(응답 미도착) 스킵 — 0원으로 덮어쓰기 방지
+        if not d.get("예수금"):
+            logger.warning("get_balance 응답 없음 또는 예수금 필드 비어 있음 — 스킵 (서버 응답 지연)")
+            return {}
         cash = safe_int(d.get("예수금"))
 
         # 총평가금액·총매입금액은 opw00001 필드명이 서버마다 다를 수 있음
@@ -563,14 +582,21 @@ class KiwoomManager:
             조회 실패 시 None
         """
         self._set_input("업종코드", index_code)
-        self._comm_rq(TR_INDEX_INFO, "index_info", "9300")
+        ok = self._comm_rq(TR_INDEX_INFO, "index_info", "9300", timeout_ms=1_000)
+        if not ok:
+            logger.debug("[opt20001] TR 차단 — 지수 조회 스킵 (code=%s)", index_code)
+            return None
 
         d = self._tr_data
         raw_current = d.get("현재가", "")
         raw_base    = d.get("기준가", "")
 
+        logger.info("[opt20001] 응답 raw — code=%s 현재가=%r 기준가=%r tr_data=%s",
+                    index_code, raw_current, raw_base, dict(list(d.items())[:8]))
+
         if not raw_current:
-            logger.warning("[opt20001] 지수 응답 없음 — code=%s", index_code)
+            logger.warning("[opt20001] 지수 응답 없음 — code=%s (tr_data=%s)",
+                           index_code, dict(list(d.items())[:8]))
             return None
 
         raw_c = safe_int(raw_current)
@@ -691,7 +717,14 @@ class KiwoomManager:
     def _set_input(self, key: str, value: str) -> None:
         self._ocx.dynamicCall("SetInputValue(QString, QString)", key, value)
 
-    def _comm_rq(self, tr_code: str, rq_name: str, screen_no: str, prev_next: int = 0) -> bool:
+    def _comm_rq(
+        self,
+        tr_code:    str,
+        rq_name:    str,
+        screen_no:  str,
+        prev_next:  int = 0,
+        timeout_ms: int = 2_000,
+    ) -> bool:
         """
         TR 요청 후 응답 이벤트를 QEventLoop으로 대기 (Qt 이벤트 처리 유지).
 
@@ -719,26 +752,27 @@ class KiwoomManager:
         self._tr_data = {}
         self._tr_prev_next = ""
 
-        # 레이트 리미터 — 호출 간격 / 초당 횟수 보장
-        self._tr_limiter.acquire()
-        logger.debug("[CommRqData] tr=%s rq=%s prev_next=%d screen=%s", tr_code, rq_name, prev_next, screen_no)
-
-        ret = self._ocx.dynamicCall(
-            "CommRqData(QString, QString, int, QString)",
-            rq_name, tr_code, prev_next, screen_no,
-        )
-        if ret != ReturnCode.OK:
-            logger.error("CommRqData 실패 — tr=%s ret=%d", tr_code, ret)
-            return False
-
+        # ★ acquire() 전에 busy 플래그 설정 —
+        #   _wait()의 QEventLoop 도중 다른 타이머가 재진입하는 것을 차단
         self._tr_busy = True
         self._tr_current_rq = rq_name
         try:
+            # 레이트 리미터 — UI 비블로킹 대기 (QEventLoop 사용)
+            self._tr_limiter.acquire()
+            logger.debug("[CommRqData] tr=%s rq=%s prev_next=%d screen=%s", tr_code, rq_name, prev_next, screen_no)
+
+            ret = self._ocx.dynamicCall(
+                "CommRqData(QString, QString, int, QString)",
+                rq_name, tr_code, prev_next, screen_no,
+            )
+            if ret != ReturnCode.OK:
+                logger.error("CommRqData 실패 — tr=%s ret=%d", tr_code, ret)
+                return False
             self._tr_loop = QEventLoop()
             timer = QTimer()
             timer.setSingleShot(True)
             timer.timeout.connect(self._tr_loop.quit)
-            timer.start(2_000)  # 2초 타임아웃 (응답 없으면 빨리 폴백)
+            timer.start(timeout_ms)  # 타임아웃 (호출자 지정, 기본 2초)
             self._tr_loop.exec_()
             timer.stop()
             self._tr_loop = None

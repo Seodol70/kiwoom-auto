@@ -172,7 +172,7 @@ def get_trend_status(
 
     if has_vol:
         vol_ratio = float(volumes[-1]) / avg_vol
-        if dist_atr >= 1.30 and vol_ratio >= 1.50:
+        if dist_atr >= 1.30 and vol_ratio >= 1.20:   # 2026-04-17: 1.50→1.20 (신호 포착 확대)
             return 3
         if dist_atr >= 0.70 and vol_ratio >= 1.20:
             return 2
