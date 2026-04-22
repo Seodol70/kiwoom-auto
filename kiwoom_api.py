@@ -89,16 +89,12 @@ class TRRateLimiter:
 
     @staticmethod
     def _nonblocking_wait(wait_sec: float) -> None:
-        """메인 스레드에서 UI를 살려두면서 wait_sec 초를 대기한다.
-        ExcludeUserInputEvents: 사용자 입력은 막고 페인트/타이머 이벤트는 허용."""
-        from PyQt5.QtWidgets import QApplication
-        from PyQt5.QtCore import QEventLoop
-        deadline = time.monotonic() + wait_sec
-        while time.monotonic() < deadline:
-            QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
-            remaining = deadline - time.monotonic()
-            if remaining > 0:
-                time.sleep(min(0.01, remaining))
+        """TR 속도 제한 대기. time.sleep() 사용 — processEvents() 금지.
+        processEvents()는 타이머 콜백을 발화시켜 nested event loop cascade를 유발함.
+        _comm_rq의 QEventLoop.exec_() 안에서 watchdog/UI 타이머가 정상 처리되므로
+        rate limiter 대기 중에 processEvents를 호출할 필요 없음.
+        최대 대기: MIN_INTERVAL=0.25s 또는 슬라이딩 윈도우=~1s — Windows '응답없음' 미발생."""
+        time.sleep(wait_sec)
 
     def acquire(self) -> None:
         """TR 호출 전 반드시 호출. 필요 시 비블로킹 대기 후 반환한다."""
@@ -433,7 +429,8 @@ class KiwoomManager:
         self._set_input("종목코드", code)
         self._set_input("기준일자", "")   # 오늘 기준 최근 N개
         self._set_input("수정주가구분", "1")
-        self._comm_rq(TR_DAILY_CANDLE, "daily_candle", "0101")
+        # 타임아웃 1초 — 일봉 체인 10종목 × 최대 1s = 최대 10s (기본 2s × 10 = 20s → watchdog 초과 방지)
+        self._comm_rq(TR_DAILY_CANDLE, "daily_candle", "0101", timeout_ms=1_000)
 
         rows: list[dict] = self._tr_data.get("rows", [])
         return rows[:count]
@@ -482,11 +479,9 @@ class KiwoomManager:
         invest      = safe_int(d.get("총매입금액"))
         stock_value = safe_int(d.get("유가잔고평가액") or d.get("주식평가금액"))
 
-        if total == 0 or invest == 0:
-            # holdings TR로 보완
-            holdings = self.get_holdings()
-            invest = sum(h.get("avg_price", 0) * h["qty"] for h in holdings)
-            stock_value = sum(h["current_price"] * h["qty"] for h in holdings)
+        # total/invest가 0이어도 holdings TR 추가 호출 금지 — _tr_busy 연장으로 8s 프리징 유발
+        # → 값이 없으면 cash만으로 대체 (다음 30s 갱신 시 정상화됨)
+        if total == 0:
             total = cash + stock_value
 
         pnl = total - invest - cash  # 주식 평가손익만
@@ -590,28 +585,50 @@ class KiwoomManager:
         raw_current = d.get("현재가", "")
         raw_base    = d.get("기준가", "")
 
-        logger.info("[opt20001] 응답 raw — code=%s 현재가=%r 기준가=%r tr_data=%s",
-                    index_code, raw_current, raw_base, dict(list(d.items())[:8]))
+        logger.debug("[opt20001] 응답 raw — code=%s 현재가=%r 기준가=%r",
+                     index_code, raw_current, raw_base)
 
-        if not raw_current:
-            logger.warning("[opt20001] 지수 응답 없음 — code=%s (tr_data=%s)",
-                           index_code, dict(list(d.items())[:8]))
+        # ── 단일 필드로 값이 온 경우 (표준 응답) ─────────────────────────
+        if raw_current:
+            raw_c = safe_int(raw_current)
+            raw_b = safe_int(raw_base)
+            # opt20001은 지수를 소수점 2자리 정수화하여 전송할 수 있음
+            # 코스피/코스닥 통상 1000~3000 범위. 10000 초과면 ×100 보정
+            current = raw_c / 100.0 if raw_c > 10_000 else float(raw_c)
+            base    = raw_b / 100.0 if raw_b > 10_000 else float(raw_b)
+            change_pct = round((current - base) / base * 100, 2) if base else 0.0
+            logger.info("[opt20001] 지수 — code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",
+                        index_code, current, base, change_pct)
+            return {"index_code": index_code, "current": current,
+                    "base": base, "change_pct": change_pct}
+
+        # ── rows 형태 응답 — 분봉 데이터에서 현재가/기준가 추출 ────────────
+        # rows[0] = 최신 분봉 (오늘), rows 이후 = 전일 이전 데이터 (최신순 정렬)
+        rows = d.get("rows", [])
+        if not rows:
+            logger.warning("[opt20001] 지수 응답 없음 — code=%s", index_code)
             return None
 
-        raw_c = safe_int(raw_current)
-        raw_b = safe_int(raw_base)
-        # 키움 opt20001은 지수를 소수점 2자리 정수화하여 전송하는 경우가 있음
-        # 코스피/코스닥은 통상 1000~3000 범위. 10000 초과면 ×100 보정
-        current = raw_c / 100.0 if raw_c > 10_000 else float(raw_c)
-        base    = raw_b / 100.0 if raw_b > 10_000 else float(raw_b)
+        today_str = datetime.now().strftime("%Y%m%d")
+        today_rows = [r for r in rows if str(r.get("time", "")).startswith(today_str)]
+        prev_rows  = [r for r in rows if not str(r.get("time", "")).startswith(today_str)]
+
+        if not today_rows:
+            logger.warning("[opt20001] 오늘 분봉 없음 — code=%s (rows=%d)", index_code, len(rows))
+            return None
+
+        # 최신 분봉 close = 현재가, 전일 가장 최근 close = 기준가
+        current_raw = today_rows[0].get("close", 0)
+        base_raw    = prev_rows[0].get("close", 0) if prev_rows else 0
+
+        current = float(current_raw) / 100.0 if current_raw > 10_000 else float(current_raw)
+        base    = float(base_raw)    / 100.0 if base_raw    > 10_000 else float(base_raw)
         change_pct = round((current - base) / base * 100, 2) if base else 0.0
 
-        return {
-            "index_code": index_code,
-            "current":    current,
-            "base":       base,
-            "change_pct": change_pct,
-        }
+        logger.info("[opt20001] 지수(rows) — code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",
+                    index_code, current, base, change_pct)
+        return {"index_code": index_code, "current": current,
+                "base": base, "change_pct": change_pct}
 
     def get_holdings(self) -> list[dict]:
         """
@@ -829,6 +846,31 @@ class KiwoomManager:
         logger.warning("연결 끊김 감지 — 자동 재로그인 시도")
         self._ocx.dynamicCall("CommConnect()")
         return False
+
+    def force_unfreeze(self) -> None:
+        """Watchdog freeze 감지 시 daemon thread에서 호출 — 막힌 TR EventLoop 강제 해제.
+
+        QEventLoop.quit()은 Qt 내부적으로 thread-safe (QCoreApplication::postEvent 경유).
+        _tr_busy=False 설정은 CPython GIL로 원자적.
+        이후 _comm_rq finally 블록이 정상적으로 _tr_busy=False를 재설정함.
+        """
+        logger.warning(
+            "[force_unfreeze] 프리징 복구 시도 — tr_busy=%s, rq='%s'",
+            self._tr_busy, self._tr_current_rq,
+        )
+        # ① 현재 처리 중인 TR EventLoop 강제 종료 (가장 중요)
+        tr_loop = self._tr_loop
+        if tr_loop is not None:
+            try:
+                tr_loop.quit()   # thread-safe: Qt가 메인 스레드에 quit 이벤트 포스팅
+                logger.warning("[force_unfreeze] _tr_loop.quit() 전송 완료")
+            except Exception as e:
+                logger.warning("[force_unfreeze] _tr_loop.quit() 실패: %s", e)
+
+        # ② busy 플래그 강제 해제 — _comm_rq finally가 다시 False로 설정하므로 중복 해제 무해
+        self._tr_busy = False
+        self._tr_current_rq = ""
+        logger.warning("[force_unfreeze] _tr_busy 강제 해제 완료")
 
     def _on_receive_tr_data(
         self,

@@ -623,6 +623,7 @@ class HeaderBar(QWidget):
     exit_requested = pyqtSignal()              # 프로그램 종료 요청
     unlock_requested = pyqtSignal()            # 일일 손익 락 수동 해제 요청
     overnight_mode_toggled = pyqtSignal(bool)  # True = 야간보유 ON, False = OFF
+    switch_real_requested = pyqtSignal()       # 실전투자 전환 버튼
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -687,6 +688,14 @@ class HeaderBar(QWidget):
         )
         self._btn_overnight.clicked.connect(self._on_overnight_clicked)
 
+        # ── 실전투자 전환 버튼 ────────────────────────────────────────────────
+        self._btn_switch_real = QPushButton("💎 실전투자 전환")
+        self._btn_switch_real.setObjectName("btn_switch_real")
+        self._btn_switch_real.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        self._btn_switch_real.setFixedSize(120, 30)
+        self._btn_switch_real.setVisible(False)
+        self._btn_switch_real.clicked.connect(self._on_switch_real_clicked)
+
         lay.addWidget(self._lbl_title)
         lay.addStretch()
         lay.addWidget(self._divider())
@@ -702,6 +711,7 @@ class HeaderBar(QWidget):
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_pnl)
         lay.addWidget(self._divider())
+        lay.addWidget(self._btn_switch_real)
         lay.addWidget(self._btn_overnight)
         lay.addWidget(self._btn_auto)
         lay.addWidget(self._btn_unlock)
@@ -730,6 +740,9 @@ class HeaderBar(QWidget):
         self._btn_auto.style().unpolish(self._btn_auto)
         self._btn_auto.style().polish(self._btn_auto)
         self.auto_trade_toggled.emit(checked)
+
+    def _on_switch_real_clicked(self) -> None:
+        self.switch_real_requested.emit()
 
     def _on_overnight_clicked(self, checked: bool) -> None:
         if checked:
@@ -769,6 +782,7 @@ class HeaderBar(QWidget):
         self._lbl_conn.setObjectName("conn_on")
         self._lbl_conn.style().unpolish(self._lbl_conn)
         self._lbl_conn.style().polish(self._lbl_conn)
+        self._btn_switch_real.setVisible(mode != "실전투자")
 
     def set_pnl(self, pnl: int) -> None:
         sign = "+" if pnl >= 0 else ""
@@ -1734,8 +1748,7 @@ class ScannerLogHandler(QObject, logging.Handler):
     # UI에 표시할 FAIL 단계 — 초기 필터(VOL_SURGE, TIME 등) 제외, 후기 필터만 표시
     # 이 목록에 없는 FAIL은 파일에만 기록 (수백 개 초기 거절이 패널을 덮는 것 방지)
     _FAIL_SHOW_STEPS = {
-        "JDM", "JDM_LITE",
-        "JDM_EMA", "JDM_PRICE_EMA", "JDM_SLIP",
+        "JDM_RSI", "JDM_EMA", "JDM_PRICE_EMA", "JDM_SLIP",
         "JDM_CANDLE", "JDM_PIVOT",
         "JDM_DAILY_MA20", "JDM_MA20_SLOPE", "JDM_ALIGN",
         "JDM_SURGE", "JDM_LIQUIDITY",
@@ -2221,6 +2234,7 @@ class MainWindow(QMainWindow):
         self.header.exit_requested.connect(self.close)
         self.header.unlock_requested.connect(self._on_manual_unlock_requested)
         self.header.overnight_mode_toggled.connect(self._on_overnight_mode_toggle)
+        self.header.switch_real_requested.connect(self._on_switch_real_requested)
 
         # 버튼 연결 확인 로그
         self.log_panel.append(
@@ -2254,11 +2268,33 @@ class MainWindow(QMainWindow):
 
         # ── HealthMonitor — 자가 진단/자기 진화 ──────────────────────────────
         from analysis.health_monitor import HealthMonitor as _HealthMonitor
+        # on_freeze: force_unfreeze (TR EventLoop 강제 해제) + 스캔 상태 리셋 + auto_reconnect
+        def _on_freeze_handler():
+            import logging as _lg
+            _freeze_log = _lg.getLogger(__name__)
+            _freeze_log.warning("[on_freeze] 프리징 복구 핸들러 실행")
+            # ① TR EventLoop 강제 종료
+            force_fn = getattr(self._kiwoom, "force_unfreeze", None)
+            if force_fn:
+                force_fn()
+            # ② 스캔 진행 상태 플래그 리셋 (이후 스캔 사이클 차단 방지)
+            self._scan_in_progress = False
+            _freeze_log.warning("[on_freeze] _scan_in_progress 리셋 완료")
+            # ③ 재연결 (연결 끊긴 경우 대비)
+            if hasattr(self, "login_mgr") and self.login_mgr:
+                self.login_mgr.reconnect_silent()
+            else:
+                recon_fn = getattr(self._kiwoom, "auto_reconnect", None)
+                if recon_fn:
+                    recon_fn()
+
         self._health_monitor = _HealthMonitor(
             scan_cfg       = self._scan_cfg,
             on_param_relax = self._on_health_param_relax,
-            on_freeze      = getattr(self._kiwoom, "auto_reconnect", None),
-            on_reconnect   = getattr(self._kiwoom, "auto_reconnect", None),
+            on_freeze      = _on_freeze_handler,
+            on_reconnect   = (self.login_mgr.reconnect_silent
+                              if hasattr(self, "login_mgr") and self.login_mgr
+                              else getattr(self._kiwoom, "auto_reconnect", None)),
         )
 
     def _setup_timers(self) -> None:
@@ -2303,10 +2339,10 @@ class MainWindow(QMainWindow):
         self._news_drain_timer.timeout.connect(self._drain_news_queue)
         self._news_drain_timer.start(1000)
 
-        # 텔레그램 5분 보고 (5분마다) — 자동매매 ON일 때만 발송
+        # 텔레그램 1시간 보고 (1시간마다) — 자동매매 ON일 때 장중에만 발송
         self._tg_report_timer = QTimer(self)
         self._tg_report_timer.timeout.connect(self._send_tg_status)
-        self._tg_report_timer.start(5 * 60 * 1000)
+        self._tg_report_timer.start(60 * 60 * 1000)
 
         # Watchdog ACK (5초마다) — HealthMonitor에 UI가 살아있음을 알림
         self._watchdog_ack_timer = QTimer(self)
@@ -2344,6 +2380,9 @@ class MainWindow(QMainWindow):
         """로그인 완료 후 호출"""
         self._kiwoom._account   = self.login_mgr.account
         self.order_mgr._account = self.login_mgr.account
+
+        # 업종지수 실시간 콜백 연결 — opt20001 TR 폴링 대신 SetRealReg 구독 결과를 받음
+        self._smart_scanner.on_index_update = self._on_realtime_index
 
         # [NEW] 포지션 실시간 현재가 갱신 + 동적 감시 중단/재개 콜백 연결
         self._smart_scanner._order_mgr = self.order_mgr
@@ -2454,6 +2493,20 @@ class MainWindow(QMainWindow):
 
         self.header.set_connected(account, mode)
         self.log_panel.append(f"로그인 성공 — {mode} / 계좌: {account}")
+
+        # 재연결(reconnect_silent) 시 start_after_login() 재호출 차단
+        # → CommConnect 중복 호출(err=-101) 및 워밍업 리셋으로 인한 오청산 방지
+        if getattr(self, "_already_started", False):
+            # 계좌 정보만 최신화하고 잔고 재동기화
+            if hasattr(self._kiwoom, "_account"):
+                self._kiwoom._account = account
+            if hasattr(self.order_mgr, "_account"):
+                self.order_mgr._account = account
+            self._port_worker.sync()
+            self.log_panel.append(f"[재연결] 계좌 재설정 완료 — {mode} / {account}")
+            return
+
+        self._already_started = True
         self._today_watch.clear()           # 로그인 시 당일 감시 목록 초기화
         self._news_analyzer.reset_daily()   # 뉴스 분석 캐시 초기화
         _wu = float(_RISK2.get("sl_tp_warmup_sec", 45.0))
@@ -2513,7 +2566,52 @@ class MainWindow(QMainWindow):
         """15분마다 연결 상태 확인 — 끊김 감지 시 자동 재로그인"""
         if not self._kiwoom.is_connected():
             self.log_panel.append("⚠️ 연결 끊김 감지 — 자동 재로그인 시도 중...")
-            self._kiwoom.auto_reconnect()
+            if hasattr(self, "login_mgr") and self.login_mgr:
+                self.login_mgr.reconnect_silent()
+            else:
+                self._kiwoom.auto_reconnect()
+
+    def _on_realtime_index(self, idx_code: str, current: float, chg_pct: float) -> None:
+        """
+        SmartScanner._handle_index_realtime → 업종지수 실시간 틱 콜백.
+        TR 호출 없이 헤더 지수를 즉시 갱신하고 급락 감지 cfg를 업데이트한다.
+        """
+        if not hasattr(self, "_realtime_index"):
+            self._realtime_index: dict = {}
+        self._realtime_index[idx_code] = (current, chg_pct)
+
+        # cfg 등락률 갱신 — check_jdm_entry / check_breakout 급락 차단에 사용
+        if idx_code == "001":
+            self._scan_cfg.kospi_chg_pct  = chg_pct
+        else:
+            self._scan_cfg.kosdaq_chg_pct = chg_pct
+
+        # 헤더 지수 표시 — 코스피·코스닥 둘 다 수신된 후 갱신
+        if "001" in self._realtime_index and "101" in self._realtime_index:
+            k_cur, k_chg = self._realtime_index["001"]
+            d_cur, d_chg = self._realtime_index["101"]
+            self.header.set_index(k_cur, k_chg, d_cur, d_chg)
+
+        # 급락 감지 — 자동매매 ON + 장중에만 수행
+        from datetime import datetime as _dt2, time as _tc2
+        from config import RISK as _RISK2
+        import time as _time2
+        now_t = _dt2.now().time()
+        in_market = _tc2(9, 1) <= now_t < _tc2(15, 20)
+        if (in_market and self._auto_trading and not self._market_crash_off
+                and _time2.monotonic() >= getattr(self, "_sl_tp_warmup_end", 0.0)):
+            crash_threshold = float(_RISK2.get("market_crash_pct", -2.0))
+            if chg_pct <= crash_threshold:
+                idx_name = "코스피" if idx_code == "001" else "코스닥"
+                self.header._btn_auto.setChecked(False)
+                self.header._on_auto_clicked(False)
+                self._market_crash_off = True
+                msg = (f"[급락감지] {idx_name} {chg_pct:+.2f}% ≤ {crash_threshold:.1f}%\n"
+                       f"→ 자동매매 OFF (수동으로 재개하세요)")
+                self.log_panel.append(f"🚨 {msg}")
+                logger.warning(msg)
+                if self._tg:
+                    self._tg.send(f"🚨 {msg}")
 
     @pyqtSlot()
     def _check_market_crash(self) -> None:
@@ -2603,11 +2701,13 @@ class MainWindow(QMainWindow):
 
                         break  # 코스피·코스닥 중복 OFF 방지
 
-            # ── 헤더 지수 표시 갱신 (자동매매 OFF여도 항상 표시) ────────────────
+            # 헤더 지수 표시는 실시간 콜백(_on_realtime_index)이 담당.
+            # 여기서는 실시간 구독이 아직 없는 경우(예: 장 전)에만 fallback 갱신.
             if "001" in _idx_display and "101" in _idx_display:
-                k_cur, k_chg = _idx_display["001"]
-                d_cur, d_chg = _idx_display["101"]
-                self.header.set_index(k_cur, k_chg, d_cur, d_chg)
+                if not getattr(self, "_realtime_index", {}):
+                    k_cur, k_chg = _idx_display["001"]
+                    d_cur, d_chg = _idx_display["101"]
+                    self.header.set_index(k_cur, k_chg, d_cur, d_chg)
         finally:
             self._crash_checking = False
 
@@ -3165,6 +3265,19 @@ class MainWindow(QMainWindow):
         logger.info("[overnight_mode] %s", state)
 
     @pyqtSlot()
+    def _on_switch_real_requested(self) -> None:
+        import os
+        from PyQt5.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, '실전투자 전환', '실전투자로 전환하려면 프로그램을 재시작해야 합니다.\n기존 설정 캐시를 삭제하고 즉시 재시작하시겠습니까?',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            cache_file = "config/login_cache.json"
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+            self.header._on_restart_clicked()
+
     def _on_manual_unlock_requested(self) -> None:
         """
         사용자 수동 개입으로 일일 손익 락을 해제한다.
@@ -3344,6 +3457,11 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(350, lambda: self._daily_candle_chain(codes, idx + 1))
             return
 
+        # 일봉 갱신 중 watchdog ACK 명시적 전송 (10종목 × 최대 1s = 최대 10s, 12s 임계값 방어)
+        _hm = getattr(self, "_health_monitor", None)
+        if _hm:
+            _hm.ack()
+
         code = codes[idx]
         try:
             candles = self._kiwoom.get_daily_candles(code, count=120)
@@ -3472,9 +3590,12 @@ class MainWindow(QMainWindow):
         self._tg.send("\n".join(lines))
 
     def _send_tg_status(self) -> None:
-        """5분 주기 텔레그램 자동 보고 — 자동매매 ON일 때만."""
-        if self._auto_trading and self._tg:
-            self._on_tg_status_requested()
+        """1시간 주기 텔레그램 자동 보고 — 자동매매 ON일 때, 08:00~15:30 에만."""
+        from datetime import datetime, time
+        now_time = datetime.now().time()
+        if time(8, 0) <= now_time <= time(15, 30):
+            if self._auto_trading and self._tg:
+                self._on_tg_status_requested()
 
     def _refresh_chart(self) -> None:
         if not self._selected_code:
@@ -3791,7 +3912,10 @@ class MainWindow(QMainWindow):
 
             # ━━━ 요셉 시그널 추세 소멸 익절: Strong(3) → No Trend(0) ━━━
             # 추세가 꺾일 때 이익을 잠그는 보조 청산. 손실 구간에서는 강제하지 않음.
-            if chg > 0 and self.order_mgr.should_exit_on_trend_decay(code):
+            # EOD 종목은 당일(갭 체크 이전) 추세 소멸 익절 제외
+            _is_eod_pre_gap = (getattr(pos, "eod_trade", False)
+                               and not getattr(pos, "overnight_held", False))
+            if chg > 0 and not _is_eod_pre_gap and self.order_mgr.should_exit_on_trend_decay(code):
                 self.log_panel.append(
                     f"🟡 [추세소멸익절] {pos.name}({code}) Strong→No Trend 전환, 수익 {chg:+.2f}% — {sell_qty}주 청산"
                 )
@@ -4232,10 +4356,10 @@ if __name__ == "__main__":
     )
     file_handler.setLevel(logging.INFO)
 
-    # 콘솔 핸들러 (UTF-8 강제 — Windows cp949 인코딩 우회)
-    import io
-    utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    console_handler = logging.StreamHandler(utf8_stdout)
+    # 콘솔 핸들러 (Windows 기본 인코딩 유지, 에러만 무시)
+    import sys
+    sys.stdout.reconfigure(errors='replace')
+    console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
 
     # 포매터

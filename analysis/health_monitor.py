@@ -40,7 +40,7 @@ HEALTH_LOG_PATH = Path("logs/health_events.jsonl")
 
 # WatchdogTimer
 WATCHDOG_PING_SEC    = 5      # 메인 스레드가 ACK를 보내는 주기 (초)
-WATCHDOG_TIMEOUT_SEC = 12     # 이 시간 동안 ACK 없으면 프리징 판정
+WATCHDOG_TIMEOUT_SEC = 20     # 이 시간 동안 ACK 없으면 프리징 판정 (일봉체인 10종목×1s+여유 = 20s)
 
 # SignalDroughtDetector
 DROUGHT_WINDOW_MIN   = 45     # 신호 없는 시간이 이 분 이상이면 완화 시작

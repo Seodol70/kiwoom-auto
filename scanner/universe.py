@@ -21,7 +21,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # 유니버스 기본 파라미터
-MIN_TRADE_AMT: int = 5_000_000_000   # 50억 원
+MIN_TRADE_AMT: int = 10_000_000_000   # 100억 원
 TR_DELAY:      float = 0.22          # 키움 TR 딜레이 정책
 
 

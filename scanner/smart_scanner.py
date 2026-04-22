@@ -212,13 +212,13 @@ class SmartScannerConfig:
     jdm_rsi_high:         float = 70.0       # RSI 상한(과열 차단) — 과매수 구간 진입 금지
     jdm_rsi_entry_min:    float = 52.0       # JDM 진입 RSI 하한 — 2026-04-13: 60→52 (상승 시작점 타점)
     jdm_min_ma_spread_abs: int = 30          # [deprecated] MA 이격(원) — 레거시 호환성 유지
-    jdm_ma_spread_pct:    float = 0.3        # MA 이격 비율(%) 하한 — 골든크로스 직후 확인
+    jdm_ma_spread_pct:    float = 0.15       # MA 이격 비율(%) 하한 — 골든크로스 직후 확인 (기존 0.3에서 완화)
     jdm_ma_spread_max_pct: float = 3.5      # MA 이격 비율(%) 상한 — 2026-04-13: 2.5→3.5 (골든크로스 직후 허용 범위 확장)
     jdm_take_profit_pct:  float = 3.0        # 익절 목표 (최적화됨: 4.0%→3.0%)
     jdm_stop_loss_pct:    float = -1.2       # 손절 기준 — config RISK.stop_loss_pct 와 동기화 (2026-04-07)
-    # [NEW] 2026-04-03 수급 절대치 필터 — 소외주 거르기 (2026-04-04 강화: 대장주 집중)
-    min_trade_amount:     int = 30_000_000_000   # 최소 거래대금 (원) — 30억 이상 (rank 없을 때 fallback)
-    min_daily_rank:       int = 150          # 거래대금 상위 몇 위 이내 (top200 감시 기준에 맞게 완화)
+    # [NEW] 2026-04-03 수급 절대치 필터 — 금액 무관, 순위 100위 내
+    min_trade_amount:     int = 0                # 최소 거래대금 (원) — 금액 제한 철폐 (유니버스에서 차단)
+    min_daily_rank:       int = 100          # 거래대금 상위 몇 위 이내 (기존 150/50에서 100으로 통일)
     markets:              tuple = ("0", "10")
     screen_realtime:      str   = "9200"
     display_top_n:        int   = 50    # 스캐너 UI 감시 테이블·Worker 상위 표시
@@ -242,7 +242,8 @@ class SmartScannerConfig:
     pre_surge_rsi_max:    float = 88.0   # PRE RSI 상한 — 과매수 진입 차단 (RSI=100 손실 사례 방지)
     breakout_chejan_max:         float = 800.0  # BREAKOUT 체결강도 상한 — OPENING/기본 슬롯 (2026-04-15 분석)
     breakout_chejan_max_morning: float = 950.0  # MORNING 슬롯 상한 완화 — 갭업 후 과열 정상화 허용 (삼성SDI 패턴)
-    jdm_chejan_max:       float = 700.0  # JDM_ENTRY 체결강도 상한 — 극과열 고점 차단 (엑스게이트 901% 사례)
+    jdm_chejan_max:         float = 700.0   # JDM_ENTRY 체결강도 상한 (MORNING 이후) — 극과열 고점 차단
+    jdm_chejan_max_opening: float = 1200.0  # OPENING 슬롯 전용 상한 — 장 초반 단일가 직후 900%+ 왜곡 허용
     breakout_rsi_max:     float = 80.0   # BREAKOUT RSI 상한 — 과매수 진입 차단 (2026-04-15 분석)
     # OPENING_SURGE 파라미터 (09:00~09:16 정규장 초반, 캔들 부족 구간)
     opening_surge_chg_min:    float = 1.0    # OPENING 최소 등락률 (%)
@@ -266,8 +267,11 @@ class SmartScannerConfig:
     prev_close_min_ratio: float = 0.98              # 조건A: V자반등 최소 비율 (시가 대비 -2% 이내)
     entry_open_surge_max: float = 10.0             # 2026-04-16: 4.0→10.0% (오후 active 종목 JDM_SURGE 전차단 — 완화)
     vi_approach_chg_pct:  float = 7.0               # 조건B: VI 직전 등락률 기준 (%)
-    volume_1min_surge_mult: float = 1.5             # 최근 1분 거래량 급증 배수 (직전 10분 평균 대비) — 2026-04-03 재강화: 1.1→1.5배(150%)
+    volume_1min_surge_mult: float = 1.2             # 최근 1분 거래량 급증 배수 (직전 10분 평균 대비) — 기존 1.5→1.2 완화
     volume_surge_lookback: int = 10                 # 직전 N분 평균 계산 구간
+    # [NEW] 스코어링 로직 보너스 기준
+    scoring_vol_surge_bonus: float = 2.0            # 이 배수 이상 폭발 시 혜택
+    scoring_rank_bonus: int = 10                    # 상위 N위 이내 대장주 시 혜택
     ma_alignment_time:    dtime = dtime(9, 30, 0)  # 이 시각 이후엔 MA 정배열 확인
     # [NEW] 일봉 정배열 + 피봇 R2 설정 (2026-04-03)
     pivot_r2_enabled:     bool = True               # 피봇 R2 돌파 조건 활성화
@@ -277,7 +281,7 @@ class SmartScannerConfig:
     daily_ma20_slope_enabled:  bool = True          # 일봉 20MA 우상향 필터 (추세추종형 — 3일 기울기 양수)
     daily_near_high_threshold_pct: float = 3.0      # 신고가 근처 판정 (25일 최고가 대비 %)
     daily_near_high_tp_pct: float = 5.0             # 신고가 근처 종목 익절 목표 (기본보다 높게)
-    daily_candle_refresh_min: int = 5               # 일봉 데이터 갱신 주기(분)
+    daily_candle_refresh_min: int = 15              # 일봉 데이터 갱신 주기(분) — 장 중 거의 불변, 15분으로 완화
     # [NEW] 지수 등락률 기반 진입 차단 (2026-04-07)
     # index_block_pct: 코스피/코스닥 중 하나라도 이 값 이하면 신규 진입 신호 차단
     #   (market_crash_pct -2.0%보다 여유있는 1단계 차단 — config RISK.market_index_block_pct)
@@ -315,10 +319,10 @@ class SmartScannerConfig:
     volume_surge_mult_midday:    float = 1.2   # 2026-04-16: 2.0→1.2 (오후 거래량 자연 감소 반영)
     volume_surge_mult_afternoon: float = 1.2   # 2026-04-16: 2.0→1.2 (오후 거래량 자연 감소 반영)
     # 구간별 RSI 진입 하한
-    jdm_rsi_entry_min_opening:   float = 50.0  # 2026-04-13: 55→50 (장초반 빠른 포착)
-    jdm_rsi_entry_min_morning:   float = 52.0  # 2026-04-13: 60→52 (핵심 오전 타점 앞당김)
-    jdm_rsi_entry_min_midday:    float = 55.0  # 2026-04-13: 63→55 (점심 기준 동기화)
-    jdm_rsi_entry_min_afternoon: float = 58.0  # 2026-04-13: 65→58 (오후 완화, 보수적 유지)
+    jdm_rsi_entry_min_opening:   float = 45.0  # 장초반 빠른 포착 (기존 50->45 완화)
+    jdm_rsi_entry_min_morning:   float = 47.0  # 핵심 오전 타점 (기존 52->47 완화)
+    jdm_rsi_entry_min_midday:    float = 50.0  # 점심 기준 동기화 (기존 55->50 완화)
+    jdm_rsi_entry_min_afternoon: float = 50.0  # 오후 완화 (기존 58->50 완화)
     # [P2] 구간별 익절 목표 (%) — (레거시, 트레일 스탑으로 대체)
     tp_pct_opening:   float = 2.0
     tp_pct_morning:   float = 2.5
@@ -335,6 +339,7 @@ class SmartScannerConfig:
     jdm_candle_skip_trend_level:   int   = 2     # 이 이상 trend_level이면 캔들 반전패턴 스킵 (추세 계속 진행 중)
     jdm_rsi_high_trend:            float = 80.0  # trend_level≥2 시 RSI 상한 완화 (기본 70 → 80)
     jdm_rsi_high_breakout:         float = 82.0  # ATR1.5 돌파 확인 시 RSI 상한 추가 완화 (82)
+    jdm_rsi_high_opening_trend3:   float = 95.0  # OPENING 슬롯 + 추세Lv3 — 장초반 강세 종목 RSI 상한 완화
     jdm_rsi_entry_min_trend:       float = 45.0  # trend_level≥2 시 RSI 하한 완화 (슬롯 기준값 → 45)
     ema_disp_max_pct_trend:        float = 7.0   # trend_level≥2 EMA10/EMA20 이격 상한 완화
     price_ema_disp_max_pct_trend:  float = 6.0   # trend_level≥2 현재가/EMA10 이격 상한 완화
@@ -374,7 +379,7 @@ class SmartScannerConfig:
     # ── 수급 필터 (외국인/기관 순매수, opt10059) ──────────────────────────────
     investor_filter_enabled: bool  = True   # 수급 필터 활성화 여부
     investor_refresh_min:    int   = 10     # opt10059 갱신 주기 (분)
-    investor_top_n:          int   = 30     # 수급 조회 대상 상위 N종목 (TR 절약)
+    investor_top_n:          int   = 15     # 수급 조회 대상 상위 N종목 (30→15, TR 부하 절반)
     # score +1 종목: 쿨다운 유지 (우선 처리)
     # score -1 종목: 쿨다운 2배 적용 (우선순위 하향, 차단은 아님)
 
@@ -743,31 +748,22 @@ class TRRequestQueue:
     def call(self, fn: Callable, *args):
         """fn(*args)를 최소 간격 보장 후 실행하고 결과를 반환한다.
 
-        ⚠️ 락은 rate-limit 계산/sleep 구간만 보호하고 fn() 호출 전에 해제한다.
-        fn() 내부에서 QEventLoop.exec_()가 실행될 때 다른 타이머 콜백이
-        call()을 재호출하면 동일 스레드에서 threading.Lock을 이중 획득해
-        데드락이 발생한다 — fn() 호출 전 락 해제로 방지.
+        ⚠️ 대기 구간에 processEvents()를 쓰면 다른 QTimer 콜백이 재귀 발화해
+        cascading nested event loop 으로 16초+ 프리징이 발생한다.
+        (실측: _load_candles_async → processEvents → scan timer → fetch_opt10030 4페이지
+         → get_balance 6초 → get_holdings 2초 총 16초 블로킹)
 
-        rate-limit 대기는 time.sleep() 대신 QApplication.processEvents()를 사용해
-        메인 스레드 UI 이벤트 처리를 유지한다 (프리징 방지).
+        따라서 대기는 time.sleep(wait) 으로만 처리한다. 최대 대기는 0.25초이므로
+        UI 체감 영향 없음. _comm_rq 내 TRRateLimiter.acquire() 가 별도로
+        processEvents를 사용해 그 구간의 UI 응답성을 보장한다.
         """
         with self._lock:
             now = time.monotonic()
             elapsed = now - self._last_call
             wait = max(0.0, self._MIN_INTERVAL - elapsed)
-            # 슬롯을 선점해 다른 호출이 같은 구간에 중복 진입하지 않도록 함
             self._last_call = now + wait
-        # 락 해제 후 비블로킹 대기 — time.sleep()은 메인 스레드 UI를 완전 차단하므로 사용 금지
         if wait > 0:
-            from PyQt5.QtCore import QEventLoop as _QEL
-            from PyQt5.QtWidgets import QApplication as _QApp
-            deadline = time.monotonic() + wait
-            while time.monotonic() < deadline:
-                _QApp.processEvents(_QEL.ExcludeUserInputEvents)
-                remaining = deadline - time.monotonic()
-                if remaining > 0.005:
-                    time.sleep(min(0.005, remaining))
-        # 락 해제 후 fn 호출 — QEventLoop.exec_() 재진입 데드락 방지
+            time.sleep(wait)   # 최대 0.25초 — cascade 방지를 위해 processEvents 사용 금지
         return fn(*args)
 
 
@@ -2669,6 +2665,27 @@ def check_jdm_entry(
         if _rsi_trend_min < _eff_rsi_min:
             _eff_rsi_min = _rsi_trend_min
 
+    # [NEW] 스코어링 시스템 — 대장주/거래량 폭발 시 조건 추가 완화
+    _eff_ma_spread = float(getattr(cfg, "jdm_ma_spread_pct", 0.15))
+    _scoring_bonus = False
+    
+    _rank = snap.rank if hasattr(snap, 'rank') else None
+    _rank_bonus = int(getattr(cfg, "scoring_rank_bonus", 10))
+    if _rank is not None and _rank > 0 and _rank <= _rank_bonus:
+        _scoring_bonus = True
+
+    _surge_lookback = int(getattr(cfg, "volume_surge_lookback", 10))
+    _vol_bonus_mult = float(getattr(cfg, "scoring_vol_surge_bonus", 2.0))
+    if snap.volumes_1min and len(snap.volumes_1min) >= _surge_lookback + 1:
+        _avg_vol = sum(snap.volumes_1min[-(_surge_lookback+1):-1]) / _surge_lookback
+        _cur_vol = snap.volumes_1min[-1]
+        if _avg_vol > 0 and (_cur_vol / _avg_vol) >= _vol_bonus_mult:
+            _scoring_bonus = True
+
+    if _scoring_bonus:
+        _eff_rsi_min = min(_eff_rsi_min, 40.0)  # 스코어링: RSI 하한 40.0% 로 완화
+        _eff_ma_spread = min(_eff_ma_spread, 0.10) # 스코어링: 이격도 0.10% 로 완화
+
     # ── Safety Filter ① 공포 장세 체결강도 상향 ────────────────────────────
     # 지수가 market_fear_pct(기본 -1%) 이하로 하락 중이면 체결강도 기준을 강화.
     # index_block_pct(-1.5%)까지는 차단하지 않고 조건만 더 까다롭게 적용.
@@ -2736,32 +2753,7 @@ def check_jdm_entry(
             )
             return None
 
-    # [강화] 거래량 급증: 직전 N분 평균 대비 배수 이상 (슬롯별 배수 적용)
-    r_vol = check_volume_surge(snap, _eff_vol_mult, cfg.volume_surge_lookback)
-    if r_vol is None:
-        if snap.volumes_1min and len(snap.volumes_1min) >= cfg.volume_surge_lookback + 1:
-            avg = sum(snap.volumes_1min[-(cfg.volume_surge_lookback+1):-1]) / cfg.volume_surge_lookback
-            cur = snap.volumes_1min[-1]
-            logger.debug(f"[신호필터] {snap.name}({snap.code}) [{_slot}] 거래량 미달 — 현재 {cur:,}주 / {cfg.volume_surge_lookback}분평균 {avg:,.0f}주 ({cur/max(avg,1):.2f}배 < {_eff_vol_mult}배)")
-        return None
-
-    r_chej = check_chejan_strength(snap, _eff_chejan)
-    if r_chej is None:
-        ScannerLogger.near_miss(
-            snap.code, snap.name, "JDM_CHEJAN",
-            actual=snap.chejan_strength, threshold=_eff_chejan,
-            reason=f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
-        )
-        return None
-
-    # 체결강도 상한 — 극과열 고점 차단 (엑스게이트 901% 사례: RSI·추세 완화로 통과됐으나 손실)
-    _jdm_chejan_max = float(getattr(cfg, "jdm_chejan_max", 700.0))
-    if snap.chejan_strength >= _jdm_chejan_max:
-        ScannerLogger.rejected(
-            snap.code, snap.name, "JDM_CHEJAN_MAX",
-            f"[{_slot}] 체결강도 과열 차단 — {snap.chejan_strength:.0f}% ≥ {_jdm_chejan_max:.0f}%",
-        )
-        return None
+    # [우선순위 변경] 거래량 및 체결강도 체크 로직은 MA(정배열/이격도) 평가 이후로 이동되었습니다.
 
     from strategy.jang_dong_min import (
         calc_atr, calc_ema, calc_ma, calc_pivot_r2, calc_rsi, check_daily_alignment
@@ -2852,10 +2844,17 @@ def check_jdm_entry(
         # MA 이격 체크
         spread_abs = float(ma_s) - float(ma_l)
         spread_pct = (spread_abs / float(ma_l) * 100) if float(ma_l) > 0 else 0
-        if spread_pct < float(cfg.jdm_ma_spread_pct):
+        
+        # Whipsaw 방지: MA7이 MA15보다 명확히 위에 있는지(정배열) 명시적 재확인
+        if ma_s <= ma_l:
+             ScannerLogger.rejected(snap.code, snap.name, "JDM",
+                 f"MA 정배열 미충족 (Whipsaw 방지) — MA{cfg.jdm_ma_short}:{ma_s:.0f} <= MA{cfg.jdm_ma_long}:{ma_l:.0f}")
+             return None
+
+        if spread_pct < _eff_ma_spread:
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM",
-                f"MA 이격 부족 ({spread_pct:.2f}% < 최소 {cfg.jdm_ma_spread_pct:.1f}%)",
+                f"MA 이격 부족 ({spread_pct:.2f}% < 최소 {_eff_ma_spread:.2f}%" + (" [Scoring Bonus]" if _scoring_bonus else "") + ")",
             )
             return None
         if spread_pct > float(cfg.jdm_ma_spread_max_pct):
@@ -2866,6 +2865,32 @@ def check_jdm_entry(
             return None
         spread_tag = f"MA{cfg.jdm_ma_short}/{cfg.jdm_ma_long} {ma_s:.0f}/{ma_l:.0f} ({spread_pct:.2f}%)"
         rsi_tag    = f"RSI{rsi:.0f}"
+
+    # ── 거래량 및 체결강도 체크 (MA 평가 후 진행) ────────────────────────────────────
+    r_vol = check_volume_surge(snap, _eff_vol_mult, getattr(cfg, "volume_surge_lookback", 10))
+    if r_vol is None:
+        return None
+
+    r_chej = check_chejan_strength(snap, _eff_chejan)
+    if r_chej is None:
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "JDM_CHEJAN",
+            actual=snap.chejan_strength, threshold=_eff_chejan,
+            reason=f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
+        )
+        return None
+
+    # OPENING 슬롯은 단일가 직후 체결강도가 900%+ 로 왜곡 — 별도 상한 적용
+    if _slot == "OPENING":
+        _jdm_chejan_max = float(getattr(cfg, "jdm_chejan_max_opening", 1200.0))
+    else:
+        _jdm_chejan_max = float(getattr(cfg, "jdm_chejan_max", 700.0))
+    if snap.chejan_strength >= _jdm_chejan_max:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "JDM_CHEJAN_MAX",
+            f"[{_slot}] 체결강도 과열 차단 — {snap.chejan_strength:.0f}% ≥ {_jdm_chejan_max:.0f}%",
+        )
+        return None
 
     # ── Safety Filter ② EMA10/EMA20 이격 과열 (기존) + 현재가/EMA10 이격 과열 (신규) ──
     _ema_s_period      = getattr(cfg, "ema_disp_short",         10)
@@ -2913,6 +2938,9 @@ def check_jdm_entry(
                 if (_ema20_b is not None and _atr14_b is not None and _atr14_b > 0
                         and snap.current_price > _ema20_b + _atr14_b * 1.5):
                     _eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_breakout", 82.0))
+            # OPENING 슬롯 추세Lv3: 장초반 강세 종목 RSI 상한 95%로 완화
+            if _slot == "OPENING" and _trend_snap_lv >= 3:
+                _eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_opening_trend3", 95.0))
 
         rsi_ok = _eff_rsi_min <= rsi < _eff_rsi_high
         if not rsi_ok:
@@ -2963,7 +2991,8 @@ def check_jdm_entry(
             return None
 
     # [NEW] 일봉 정배열 확인 (5일 > 10일 > 20일)
-    if cfg.daily_alignment_enabled:
+    # 일봉 데이터 20개 미만(로드 전)이면 fail-open — 데이터 없다고 차단하지 않음
+    if cfg.daily_alignment_enabled and len(snap.daily_closes) >= 20:
         if not check_daily_alignment(snap.daily_closes):
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM_ALIGN",
@@ -3046,7 +3075,8 @@ class SmartScanner:
         # True가 되면 이후 사이클은 12종목/사이클 제한으로 복귀
         self._initial_candle_load_done: bool = False
 
-        self.on_signal: Optional[Callable[[ScanSignal], None]] = None
+        self.on_signal:        Optional[Callable[[ScanSignal], None]] = None
+        self.on_index_update:  Optional[Callable[[str, float, float], None]] = None  # (idx_code, current, chg_pct)
 
         # 포지션 현재가 실시간 업데이트용 (MainWindow에서 주입)
         self._order_mgr = None
@@ -3454,10 +3484,24 @@ class SmartScanner:
 
     def _connect_realtime_signal(self) -> None:
         self._kiwoom._ocx.OnReceiveRealData.connect(self._on_receive_real_data)
+        # 코스피(001)/코스닥(101) 업종지수 실시간 구독 — opt20001 TR 폴링 의존 제거
+        try:
+            self._kiwoom._ocx.dynamicCall(
+                "SetRealReg(QString, QString, QString, QString)",
+                ["9050", "001;101", "10;11;12;25", "0"],
+            )
+            logger.info("[업종지수 실시간] 코스피·코스닥 SetRealReg 등록 완료")
+        except Exception as _e:
+            logger.warning("[업종지수 실시간] SetRealReg 실패 — opt20001 폴백 유지: %s", _e)
 
     def _on_receive_real_data(
         self, code: str, real_type: str, real_data: str
     ) -> None:
+        # ── 업종지수 실시간 (코스피 001 / 코스닥 101) ─────────────────────────
+        if real_type == "업종지수":
+            self._handle_index_realtime(code)
+            return
+
         if real_type not in ("주식체결",):
             return
 
@@ -3516,6 +3560,25 @@ class SmartScanner:
 
         except Exception as e:
             logger.debug("실시간 파싱 오류 — %s: %s", code, e)
+
+    def _handle_index_realtime(self, idx_code: str) -> None:
+        """업종지수 실시간 틱 처리 — TR 호출 없이 헤더 지수를 즉시 갱신한다."""
+        try:
+            from kiwoom_api import safe_float
+            def fid(n: int) -> str:
+                return self._kiwoom._ocx.dynamicCall(
+                    "GetCommRealData(QString, int)", [idx_code, n]
+                )
+            raw_cur = safe_float(fid(10))
+            # 키움 opt20001과 동일: 10,000 초과 시 ×100 보정 (소수점 2자리 정수화)
+            current = raw_cur / 100.0 if raw_cur > 10_000 else raw_cur
+            chg_pct = safe_float(fid(12))
+            if current <= 0:
+                return
+            if self.on_index_update:
+                self.on_index_update(idx_code, current, chg_pct)
+        except Exception as e:
+            logger.debug("[업종지수 실시간] %s 파싱 오류: %s", idx_code, e)
 
     # -----------------------------------------------------------------------
     # 헬퍼
@@ -3698,7 +3761,7 @@ class SmartScanner:
         # ⚠️  메인 스레드에서 TR 을 동기 루프로 호출하면 UI 가 수십 초 얼어붙음.
         #     QTimer.singleShot 체인으로 한 종목씩 분산 처리한다.
         _CANDLE_MIN_BARS = 55   # MA50 에 필요한 최소 분봉 수
-        _CANDLE_LOAD_MAX = 12   # 이후 사이클당 최대 예약 종목 수
+        _CANDLE_LOAD_MAX = 6    # 이후 사이클당 최대 예약 종목 수 (12→6, TR 경합 감소)
         codes_need_all = [
             code for code in top_codes
             if len(self.store._mins.get(code, [])) < _CANDLE_MIN_BARS
@@ -3788,10 +3851,11 @@ class SmartScanner:
         logger.info("[주기 스캔] 완료 — 신호 판단은 실시간 워커(_evaluate)에 위임")
         logger.info("=" * 60)
 
-        # 1분봉 캐시 저장 — 5분 주기 (일봉 갱신 주기와 동일)
+        # 1분봉 캐시 저장 — 5분 주기, 백그라운드 스레드에서 실행 (메인 스레드 I/O 블로킹 방지)
         if now - getattr(self, "_last_1min_cache_save", 0) >= 300:
             self._last_1min_cache_save = now
-            self.store.save_1min_cache()
+            import threading as _threading
+            _threading.Thread(target=self.store.save_1min_cache, daemon=True).start()
 
         _prog("감시종목 갱신", len(top_codes), len(top_codes), "데이터 갱신 완료")
         return []
@@ -3925,19 +3989,30 @@ class SmartScanner:
             if not self._initial_candle_load_done:
                 self._initial_candle_load_done = True
                 logger.info("[STEP-H async] 첫 일괄 로딩 완료 — 이후 사이클 12종목/회 제한 복귀")
-                # 캐시 저장 (일괄 로딩 완료 시점에 파일로 영속)
-                try:
-                    self.store.save_1min_cache()
-                    logger.info("[STEP-H async] 1분봉 캐시 파일 저장 완료")
-                except Exception as _e:
-                    logger.warning("[STEP-H async] 1분봉 캐시 저장 실패: %s", _e)
+                # 캐시 저장 — 백그라운드 스레드 (메인 스레드 I/O 블로킹 방지)
+                import threading as _threading
+                def _save():
+                    try:
+                        self.store.save_1min_cache()
+                        logger.info("[STEP-H async] 1분봉 캐시 파일 저장 완료")
+                    except Exception as _e:
+                        logger.warning("[STEP-H async] 1분봉 캐시 저장 실패: %s", _e)
+                _threading.Thread(target=_save, daemon=True).start()
             return
 
-        # _tr_busy 중이면 이 종목 스킵 후 다음으로 (TRRequestQueue 락 데드락 방지)
+        # _tr_busy 중이면 동일 종목을 최대 3회 재시도 후 다음으로 (cascade 방지)
         if getattr(self._kiwoom, "_tr_busy", False):
-            logger.debug("[STEP-H async] TR 처리 중 — %s 스킵", codes[idx])
-            QTimer.singleShot(350, lambda: self._load_candles_async(codes, idx + 1))
+            retries = getattr(self, "_candle_retry_count", 0)
+            if retries < 3:
+                self._candle_retry_count = retries + 1
+                logger.debug("[STEP-H async] TR 처리 중 — %s 재시도 %d/3", codes[idx], retries + 1)
+                QTimer.singleShot(400, lambda: self._load_candles_async(codes, idx))
+            else:
+                self._candle_retry_count = 0
+                logger.debug("[STEP-H async] TR 처리 중 — %s 재시도 초과, 다음으로", codes[idx])
+                QTimer.singleShot(350, lambda: self._load_candles_async(codes, idx + 1))
             return
+        self._candle_retry_count = 0
 
         code = codes[idx]
 
@@ -3948,9 +4023,9 @@ class SmartScanner:
             QTimer.singleShot(0, lambda: self._load_candles_async(codes, idx + 1))
             return
 
-        # ② 캐시 없거나 부족 → opt10080 TR 호출
+        # ② 캐시 없거나 부족 → opt10080 TR 호출 (direct, _tr_q 미사용 — cascade 방지)
         try:
-            candles = self._tr_q.call(self._kiwoom.get_min_candles, code, 1, 70)
+            candles = self._kiwoom.get_min_candles(code, 1, 70)
             ohlc = [c for c in reversed(candles) if c.get("close")]
             if ohlc:
                 self.store.set_min_candles_ohlc(code, ohlc)
@@ -3986,26 +4061,38 @@ class SmartScanner:
         logger.info("[수급갱신] %d종목 opt10059 갱신 시작", len(top_codes))
         QTimer.singleShot(0, lambda: self._refresh_investor_data_async(top_codes, 0))
 
-    def _refresh_investor_data_async(self, codes: list, idx: int) -> None:
+    def _refresh_investor_data_async(self, codes: list, idx: int, retries: int = 0) -> None:
         """
         opt10059를 QTimer.singleShot 체인으로 1종목씩 비동기 처리한다.
-        350ms 간격 → 최대 30종목 × 0.35s ≈ 10.5초 (TR 레이트 리미터 내).
+        350ms 간격 → 최대 15종목 × 0.35s ≈ 5.25초 (TR 레이트 리미터 내).
 
-        다른 TR(잔고·캔들·opt10030)이 처리 중이면 해당 종목을 건너뛴다.
+        _tr_busy 시 최대 3회 재시도(800ms 간격), 초과 시 다음 종목으로 이동.
+        _tr_q.call() 래퍼 사용 금지 — processEvents 중 스캔 타이머 발화로 인한
+        cascading nested event loop 프리징 방지.
         """
         if idx >= len(codes):
             logger.info("[수급갱신] 완료 — %d종목 처리", len(codes))
             return
 
-        # 다른 고우선순위 TR이 처리 중이면 이 종목 스킵 후 다음으로
+        # _tr_busy 시 같은 종목 재시도 (3회 한도) → 초과 시 skip
         if getattr(self._kiwoom, "_tr_busy", False):
-            logger.debug("[수급갱신] TR 처리 중 — %s 스킵", codes[idx])
-            QTimer.singleShot(500, lambda: self._refresh_investor_data_async(codes, idx + 1))
+            if retries < 3:
+                logger.debug("[수급갱신] TR 처리 중 — %s 재시도 %d/3", codes[idx], retries + 1)
+                QTimer.singleShot(
+                    800, lambda: self._refresh_investor_data_async(codes, idx, retries + 1)
+                )
+            else:
+                logger.debug("[수급갱신] TR 처리 중 — %s 재시도 초과, 다음 종목 이동", codes[idx])
+                QTimer.singleShot(
+                    500, lambda: self._refresh_investor_data_async(codes, idx + 1, 0)
+                )
             return
 
         code = codes[idx]
         try:
-            data = self._tr_q.call(self._kiwoom.get_investor_trend, code)
+            # _tr_q.call() 래퍼 제거 — processEvents cascade 방지
+            # _comm_rq 내부의 TRRateLimiter가 rate limiting을 직접 처리함
+            data = self._kiwoom.get_investor_trend(code)
             self.store.update_investor(code, data["foreign_net"], data["inst_net"])
             snap = self.store.get_snapshot(code)
             if snap:
@@ -4017,7 +4104,7 @@ class SmartScanner:
         except Exception as e:
             logger.debug("[수급갱신] %s 실패: %s", code, e)
 
-        QTimer.singleShot(350, lambda: self._refresh_investor_data_async(codes, idx + 1))
+        QTimer.singleShot(350, lambda: self._refresh_investor_data_async(codes, idx + 1, 0))
 
     @staticmethod
     def _seconds_until(t: dtime) -> float:

@@ -144,7 +144,31 @@ class LoginManager(QObject):
         self.server_mode: str = ""   # "모의투자" | "실전투자"
         self.use_real:    bool = False
 
+        self._account_cache_file = "config/last_account.txt"
+
         self._kiwoom._ocx.OnEventConnect.connect(self._on_event_connect)
+
+    def _save_last_account(self) -> None:
+        try:
+            import os, json
+            os.makedirs("config", exist_ok=True)
+            with open(self._account_cache_file, "w", encoding="utf-8") as f:
+                json.dump({"account": self.account, "use_real": self.use_real}, f)
+        except Exception as e:
+            logger.debug("계좌 정보 저장 실패: %s", e)
+
+    def _load_last_account(self) -> dict:
+        import os, json
+        if os.path.exists(self._account_cache_file):
+            try:
+                with open(self._account_cache_file, "r", encoding="utf-8") as f:
+                    data = f.read().strip()
+                    if not data.startswith("{"):
+                        return {"account": data, "use_real": False}
+                    return json.loads(data)
+            except Exception:
+                return {}
+        return {}
 
     # -----------------------------------------------------------------------
     # 공개 API
@@ -152,11 +176,29 @@ class LoginManager(QObject):
 
     def show_and_login(self) -> bool:
         """
-        서버 선택 다이얼로그를 표시하고 CommConnect 를 호출한다.
+        저장된 캐시가 있으면 다이얼로그 없이 바로 접속하고,
+        없으면 서버 선택 다이얼로그를 표시한 뒤 CommConnect를 호출한다.
 
         Returns:
             True → 로그인 성공
         """
+        cache = self._load_last_account()
+        if cache and "account" in cache:
+            self.account = cache["account"]
+            self.use_real = cache.get("use_real", False)
+            self.server_mode = "실전투자" if self.use_real else "모의투자"
+            logger.info("캐시된 설정으로 다이얼로그 생략 접속: %s 모드", self.server_mode)
+            
+            # 접속 성공 시 바로 True 반환
+            if self._connect(preferred_account=self.account):
+                return True
+            
+            # 자동 접속 실패(기간 만료, 비번 오류 등) 시 캐시 삭제 후 선택창으로 폴백
+            import os
+            if os.path.exists(self._account_cache_file):
+                os.remove(self._account_cache_file)
+            logger.warning("캐시로 자동 접속 실패! 서버 선택 창으로 넘어갑니다.")
+
         dlg = LoginDialog()
         if dlg.exec() != QDialog.Accepted:
             logger.info("로그인 취소")
@@ -184,7 +226,21 @@ class LoginManager(QObject):
     # 내부 로직
     # -----------------------------------------------------------------------
 
-    def _connect(self) -> bool:
+    def reconnect_silent(self) -> bool:
+        """자동 재연결 — 다이얼로그 없이 이전 계좌로 재접속.
+
+        키움이 연결을 강제로 끊었을 때(야간 점검, 장 종료 후 등) 호출.
+        이전에 선택했던 self.account가 있으면 다이얼로그 없이 자동 선택.
+        """
+        logger.warning("[자동재연결] 시도 — 이전 계좌: '%s' 모드: %s",
+                        self.account, self.server_mode)
+        return self._connect(preferred_account=self.account)
+
+    def _connect(self, preferred_account: str = "") -> bool:
+        """CommConnect → OnEventConnect 대기 → 계좌 선택.
+
+        preferred_account: 재연결 시 이전 계좌번호. 지정되면 다이얼로그 없이 자동 선택.
+        """
         self._err_code = -999
 
         # 모의투자: SetLoginInfo로 모의투자 플래그 설정 후 CommConnect
@@ -227,13 +283,30 @@ class LoginManager(QObject):
         raw = self._kiwoom._ocx.dynamicCall("GetLoginInfo(QString)", "ACCNO")
         accounts = [a for a in raw.strip().split(";") if a]
 
-        if len(accounts) > 1:
-            dlg = AccountSelectDialog(accounts)
-            dlg.exec()
-            self.account = dlg.selected_account
-            logger.info("계좌 선택 완료: %s (전체 %d개)", self.account, len(accounts))
+        if len(accounts) == 0:
+            logger.error("계좌 목록 없음")
+            return False
+        elif len(accounts) == 1:
+            self.account = accounts[0]
+            self._save_last_account()
+        elif preferred_account and preferred_account in accounts:
+            # 자동 재연결 (실시간 끊김 시): 메모리의 이전 계좌를 자동 선택
+            self.account = preferred_account
+            logger.info("계좌 자동 선택 완료: %s (전체 %d개)", self.account, len(accounts))
         else:
-            self.account = accounts[0] if accounts else ""
+            # 파일에 저장된 이전 선택 계좌가 있는지 확인
+            last_acc_data = self._load_last_account()
+            last_acc = last_acc_data.get("account", "")
+            if last_acc and last_acc in accounts:
+                self.account = last_acc
+                logger.info("이전 접속 계좌 자동 선택 (재시작): %s", self.account)
+            else:
+                # 최초 로그인 또는 저장된 계좌가 유효하지 않을 때: 다이얼로그에서 선택
+                dlg = AccountSelectDialog(accounts)
+                dlg.exec()
+                self.account = dlg.selected_account
+                self._save_last_account()
+                logger.info("계좌 선택 완료: %s (전체 %d개)", self.account, len(accounts))
 
         logger.info("로그인 성공 — 모드: %s / 계좌: %s",
                     self.server_mode, self.account)

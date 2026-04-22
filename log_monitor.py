@@ -331,11 +331,10 @@ def build_dashboard() -> Layout:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    # Windows에서 UTF-8 출력 강제 설정
-    import io
-    # Rich Console은 기본적으로 UTF-8 지원, file 인자로 UTF-8 스트림 전달
-    utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    console = Console(file=utf8_stdout, force_terminal=True)
+    # Windows 콘솔 인코딩 유지, 에러만 무시
+    import sys
+    sys.stdout.reconfigure(errors='replace')
+    console = Console(file=sys.stdout, force_terminal=True)
 
     # 파일 끝부터 읽기
     _seek_end(LOG_FILE,   "scanner_pos")
