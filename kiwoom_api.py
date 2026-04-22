@@ -366,6 +366,7 @@ class KiwoomManager:
                     "low":           safe_int(d.get("저가")),
                     "volume":        safe_int(d.get("거래량")),
                     "market_cap":    safe_int(d.get("시가총액")),
+                    "sector":        str(d.get("업종명", "")).strip(),
                 }
 
             # 첫 시도 실패 → 0.3초 비블로킹 대기 후 재시도

@@ -25,6 +25,7 @@ from typing import Callable, Optional
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from config import COST as _COST
+from logging_config import order_log, position_log
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,8 @@ class Position:
     overnight_held:  bool = False         # True → 익일 장 시작 후 갭 체크 관리 중
     # 매매 단계 태그
     entry_phase:     int  = 0             # 0=미분류, 1=모닝스캘핑(09~10:30), 2=메인전략(10~14:40)
+    # 섹터 쏠림 방지
+    sector:          str  = ""            # 업종명 (opt10001 응답, 섹터 노출 집계용)
 
     @property
     def pnl(self) -> int:
@@ -183,6 +186,7 @@ class OrderManager(QObject):
         self._pending_candle_stop: dict[str, int] = {}    # code -> 진입 캔들 저가 (체결 시 Position에 반영)
         self._pending_trend: dict[str, tuple[int, int]] = {}  # code -> (trend_level, trend_prev_level)
         self._pending_near_high: dict[str, tuple[bool, float]] = {}  # code -> (near_daily_high, custom_tp_pct)
+        self._pending_sector: dict[str, str] = {}          # code -> 업종명 (섹터 쏠림 방지용)
         self._pending_eod: dict[str, bool] = {}                      # code -> eod_trade flag
         self._pending_entry_phase: dict[str, int] = {}               # code -> entry_phase (1=모닝스캘핑, 2=메인)
         self._pnl_date: date = date.today()
@@ -333,6 +337,7 @@ class OrderManager(QObject):
                     trend_level       = old.trend_level       if old else 0,
                     trend_prev_level  = old.trend_prev_level  if old else 0,
                     entry_phase       = old.entry_phase       if old else 0,
+                    sector            = old.sector            if old else "",
                 )
             self.positions = new_positions
 
@@ -417,10 +422,21 @@ class OrderManager(QObject):
         name = signal.name
         price = signal.price
 
+        # ── [Zone 1] 신호수신 로그 ──────────────────────────────────────────
+        _sig_type  = getattr(signal, "signal_type", "?")
+        _trend_lv  = int(getattr(signal, "trend_level", 0) or 0)
+        _vel_ratio = float(getattr(signal, "exec_velocity_ratio", 0.0) or 0.0)
+        _phase_nm  = getattr(signal, "entry_phase", 0)
+        order_log.info(
+            "[신호수신] %s(%s) 가격=%d 유형=%s trend_lv=%d vel_ratio=%.2f phase=%s",
+            name, code, price, _sig_type, _trend_lv, _vel_ratio, _phase_nm,
+        )
+
         # ── 종목 강제 필터(매수 직전) ─────────────────────────────────────
         if not self._is_buy_allowed(code, name):
             return
 
+        _sector = ""
         try:
             from config import RISK as _RISK
             _mx = float(_RISK.get("max_change_pct", 15.0))
@@ -433,6 +449,7 @@ class OrderManager(QObject):
                 )
             else:
                 _pct = float(_info.get("change_pct", 0) or 0)
+                _sector = str(_info.get("sector", "")).strip()
             logger.debug("[매수 등락률 체크] %s — 현재 등락률: %.2f%% (상한: %.1f%%)", name, _pct, _mx)
             if _pct >= _mx:
                 msg = f"매수 차단 — 등락률 {_pct:.1f}% ≥ 상한 {_mx:.1f}% ({name})"
@@ -441,6 +458,36 @@ class OrderManager(QObject):
                 return
         except Exception as _e:
             logger.debug("등락률 사전 확인 실패(무시): %s", _e)
+
+        # ── [Zone 2] 섹터 쏠림 방지 체크 + 섹터 확인 로그 ──────────────────
+        if not _sector:
+            order_log.warning("[섹터확인] %s(%s) — 섹터 정보 없음 (opt10001 실패 또는 미제공)", name, code)
+        if _sector:
+            try:
+                from config import RISK as _RISK_s
+                _sec_max = int(_RISK_s.get("sector_max_positions", 2))
+                _same_cnt = sum(
+                    1 for p in self.positions.values()
+                    if getattr(p, "sector", "") == _sector
+                )
+                _sec_dist = {
+                    sec: sum(1 for p in self.positions.values() if getattr(p, "sector", "") == sec)
+                    for sec in {getattr(p, "sector", "") for p in self.positions.values()} | {_sector}
+                    if sec
+                }
+                order_log.info(
+                    "[섹터확인] %s(%s) 섹터=[%s] 동일섹터=%d/%d 전체분포=%s",
+                    name, code, _sector, _same_cnt, _sec_max, _sec_dist,
+                )
+                if _same_cnt >= _sec_max:
+                    msg = (f"매수 차단 — 섹터 쏠림 [{_sector}] 이미 {_same_cnt}개 보유 "
+                           f"(상한 {_sec_max}개) — {name}({code})")
+                    logger.warning(msg)
+                    order_log.warning("[섹터차단] %s", msg)
+                    self.order_failed.emit(msg)
+                    return
+            except Exception as _se:
+                logger.debug("섹터 쏠림 체크 실패(무시): %s", _se)
 
         # ── 안전 장치 ────────────────────────────────────────────────────
         if code in self._pending:
@@ -490,6 +537,7 @@ class OrderManager(QObject):
         self._pending_near_high[code] = (_near_high, _ctp)
         self._pending_eod[code] = bool(getattr(signal, "eod_trade", False))
         self._pending_entry_phase[code] = int(getattr(signal, "entry_phase", 0))
+        self._pending_sector[code] = _sector
 
         self.buy(code, name, qty, price=0)  # 시장가 매수
 
@@ -857,6 +905,7 @@ class OrderManager(QObject):
             self._pending.discard(code)
             self._pending_buy_time.pop(code, None)
             self._pending_buy_info.pop(code, None)
+            self._pending_sector.pop(code, None)      # 섹터 stale 방지
             self._app_pending_buys.pop(code, None)
 
     def sell(
@@ -1057,6 +1106,7 @@ class OrderManager(QObject):
             _near_high, _ctp = self._pending_near_high.pop(code, (False, 0.0))
             _eod_trade = self._pending_eod.pop(code, False)
             _entry_phase = self._pending_entry_phase.pop(code, 0)
+            _sector_fill = self._pending_sector.pop(code, "")
             if is_app_buy:
                 rem = self._app_pending_buys[code] - filled_qty
                 if rem <= 0:
@@ -1096,6 +1146,12 @@ class OrderManager(QObject):
                     custom_tp_pct=_ctp,
                     eod_trade=_eod_trade,
                     entry_phase=_entry_phase,
+                    sector=_sector_fill,
+                )
+                position_log.info(
+                    "[포지션생성] %s(%s) 체결가=%d 수량=%d 섹터=[%s] trend_lv=%d phase=%d",
+                    name, code, filled_price, filled_qty,
+                    _sector_fill or "-", int(trend_level), int(_entry_phase),
                 )
                 if _near_high:
                     logger.info("[신고가근처] %s(%s) — 일봉 신고가 근처 진입, TP 상향 적용 (custom_tp=%.1f%%)",
@@ -1157,6 +1213,11 @@ class OrderManager(QObject):
                 pos.qty_buy_today_app -= sell_from_today
                 pos.qty -= filled_qty
                 if pos.qty <= 0:
+                    _pnl_pct = (filled_price - avg_buy_for_log) / avg_buy_for_log * 100 if avg_buy_for_log else 0
+                    position_log.info(
+                        "[포지션청산] %s(%s) 매도가=%d 평균매입=%d 손익=%+.2f%% 실현손익=%+d",
+                        name, code, filled_price, avg_buy_for_log, _pnl_pct, realized,
+                    )
                     # [NEW] 포지션 실시간 해제
                     if self.on_position_closed:
                         self.on_position_closed(code)

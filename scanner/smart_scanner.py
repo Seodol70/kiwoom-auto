@@ -27,6 +27,7 @@ import logging.handlers
 import os
 import threading
 import time
+from collections import deque as _Deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
@@ -335,6 +336,15 @@ class SmartScannerConfig:
     trail_pct_tier2:      float = 1.2   # 수익 tier1_max ~ tier2_max 구간 — 2026-04-20: 1.5→1.2
     trail_tier2_max:      float = 4.0   # tier2/tier3 경계 (%) — 2026-04-20: 3.0→4.0
     trail_pct_tier3:      float = 2.0   # 수익 tier2_max 이상 구간 (크게 올랐을 때 여유)
+    # [NEW] 체결 가속도(Execution Velocity) 필터 — 10초 체결량 급증 확인
+    exec_velocity_enabled: bool  = True    # 체결 가속도 필터 활성화 (False면 전 종목 통과)
+    exec_velocity_mult:    float = 2.5     # 10초 체결량 ≥ 직전 1분 평균 10초량의 N배 요구
+    # [NEW] ATR 기반 트레일링 스탑
+    atr_trail_enabled:        bool  = True   # ATR 트레일 스탑 활성화
+    atr_trail_activation_pct: float = 1.5   # ATR 트레일 발동 최소 이익 (%, 기존 trail_activation_pct와 동일)
+    atr_trail_multiplier:     float = 1.5   # trail_line = peak_price - multiplier × ATR14
+    # [NEW] 섹터 쏠림 방지
+    sector_max_positions:     int   = 2     # 동일 업종명 최대 동시 보유 종목 수
     # [추세추종] JDM 진입 조건 추세 레벨 오버라이드 파라미터 (2026-04-20)
     jdm_candle_skip_trend_level:   int   = 2     # 이 이상 trend_level이면 캔들 반전패턴 스킵 (추세 계속 진행 중)
     jdm_rsi_high_trend:            float = 80.0  # trend_level≥2 시 RSI 상한 완화 (기본 70 → 80)
@@ -811,6 +821,10 @@ class StockSnapshot:
                                                  # ※ trade_audit_logger의 vol_ratio(1분봉 급증 배수)와
                                                  #   개념이 다름 — 해당 파일은 snap.volumes_1min을 직접
                                                  #   읽어 로컬 변수로 계산하므로 이 필드를 읽지 않음
+    # [NEW] 체결 가속도: 10초 체결량 / 직전 1분 평균 10초 체결량 (0=데이터 부족 → 필터 스킵)
+    exec_velocity_ratio: float           = 0.0
+    # [NEW] 업종명 (섹터 쏠림 방지용, SnapshotStore._sector_cache에서 제공)
+    sector:              str             = ""
 
 
 @dataclass
@@ -909,6 +923,10 @@ class SnapshotStore:
         self._inv_updated_at: dict[str, datetime] = {}
         self._trend_level: dict[str, int] = {}         # code → 현재 추세 단계(0~3)
         self._trend_prev_level: dict[str, int] = {}    # code → 직전 추세 단계
+        # [NEW] 체결 가속도 — 10초 슬라이딩 윈도우 (ts, cumvol) 튜플 저장
+        self._tick_ts_vol: dict[str, _Deque] = {}      # code → deque[(monotonic_ts, cumvol)]
+        # [NEW] 업종명 캐시 — opt10001 체결 시 update_sector()로 갱신
+        self._sector_cache: dict[str, str] = {}        # code → 업종명
         # _lock은 캐시 로드보다 먼저 초기화해야 함 (_load_1min_cache에서 self._lock 사용)
         self._lock = threading.Lock()
         # 일봉 디스크 캐시 — 재시작해도 당일 데이터 즉시 복구
@@ -986,7 +1004,8 @@ class SnapshotStore:
                     for d in (self._mins, self._min_opens, self._min_highs, self._min_lows,
                               self._min_vols, self._cur_open, self._cur_high, self._cur_low,
                               self._trend_level, self._trend_prev_level,
-                              self._inv_foreign, self._inv_inst, self._inv_score, self._inv_updated_at):
+                              self._inv_foreign, self._inv_inst, self._inv_score, self._inv_updated_at,
+                              self._tick_ts_vol, self._sector_cache):
                         d.pop(c, None)
                 self._df = self._df[keep]
             for code in new_df.index:
@@ -1034,6 +1053,15 @@ class SnapshotStore:
                 current_price, high_price, low_price, open_price,
                 volume, trade_amount, change_pct,
             ]
+            # [NEW] 체결 가속도 — 10초 슬라이딩 윈도우에 (ts, cumvol) 기록
+            _ts_now = time.monotonic()
+            if code not in self._tick_ts_vol:
+                self._tick_ts_vol[code] = _Deque()
+            _tq = self._tick_ts_vol[code]
+            _tq.append((_ts_now, volume))
+            _cutoff_70 = _ts_now - 70.0  # 1분봉 계산에 60초 필요, 여유 10초 확보
+            while _tq and _tq[0][0] < _cutoff_70:
+                _tq.popleft()
             # 1분봉 누적 — 분(minute)이 바뀔 때만 append (초당 수십 번 실행 최소화)
             cur_min = (datetime.now().hour * 60 +  # noqa: DTZ005
                        datetime.now().minute)
@@ -1135,6 +1163,34 @@ class SnapshotStore:
                 except Exception:
                     pass
 
+            # [NEW] 체결 가속도 비율 계산
+            # · 10초 체결량 = 지금 누적 거래량 - 10초 전 누적 거래량
+            # · 비교 기준 = 직전 5개 1분봉 평균량 / 6 (60s ÷ 10s = 6구간)
+            _exec_vel_ratio = 0.0
+            _tq_snap = self._tick_ts_vol.get(code)
+            if _tq_snap and len(_tq_snap) >= 2:
+                _now_ts = time.monotonic()
+                _cutoff_10s = _now_ts - 10.0
+                _vol_now = _tq_snap[-1][1]
+                _vol_before_10s = _tq_snap[0][1]  # 기본: 데크 최초값
+                for _ts_e, _vol_e in _tq_snap:
+                    if _ts_e < _cutoff_10s:
+                        _vol_before_10s = _vol_e
+                _vol_10s = max(0, _vol_now - _vol_before_10s)
+                _min_vols_snap = self._min_vols.get(code, [])
+                if _min_vols_snap and _vol_10s > 0:
+                    _recent_mv = _min_vols_snap[-min(5, len(_min_vols_snap)):]
+                    _avg_per_min = sum(_recent_mv) / len(_recent_mv) if _recent_mv else 0
+                    _avg_per_10s = _avg_per_min / 6.0
+                    if _avg_per_10s > 0:
+                        _exec_vel_ratio = _vol_10s / _avg_per_10s
+                        logger.debug(
+                            "[VEL계산] %s vol_10s=%d avg_per_10s=%.1f ratio=%.2f",
+                            code, _vol_10s, _avg_per_10s, _exec_vel_ratio,
+                        )
+
+            _sector_snap = self._sector_cache.get(code, "")
+
             return StockSnapshot(
                 code          = code,
                 name          = name_s,
@@ -1165,6 +1221,8 @@ class SnapshotStore:
                 rank             = safe_int_cell("rank", 0),
                 rsi              = _rsi_cached,
                 updated_at       = updated_at,
+                exec_velocity_ratio = _exec_vel_ratio,
+                sector              = _sector_snap,
             )
 
     def update_trend_level(self, code: str, trend_level: int) -> None:
@@ -1180,6 +1238,12 @@ class SnapshotStore:
         if strength > 0:
             with self._lock:
                 self._chejan_str[code] = strength
+
+    def update_sector(self, code: str, sector: str) -> None:
+        """[NEW] 업종명 캐시 갱신 — handle_signal()에서 opt10001 응답 후 호출."""
+        if sector:
+            with self._lock:
+                self._sector_cache[code] = sector
 
     def prefilter_candidates(self, max_change_pct: Optional[float] = None) -> list[str]:
         """
@@ -2870,6 +2934,24 @@ def check_jdm_entry(
     r_vol = check_volume_surge(snap, _eff_vol_mult, getattr(cfg, "volume_surge_lookback", 10))
     if r_vol is None:
         return None
+
+    # ── [NEW] 체결 가속도(Execution Velocity) 필터 ─────────────────────────────────
+    # 10초 체결량 ≥ 직전 1분 평균 10초량의 N배 — '지금 막 불붙은' 종목만 통과
+    # exec_velocity_ratio=0은 데이터 부족(장 초반) → 필터 스킵(fail-open)
+    if getattr(cfg, "exec_velocity_enabled", True):
+        _vel_mult = float(getattr(cfg, "exec_velocity_mult", 2.5))
+        if snap.exec_velocity_ratio > 0 and snap.exec_velocity_ratio < _vel_mult:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "JDM_EXEC_VEL",
+                f"[{_slot}] 체결 가속도 미달 — {snap.exec_velocity_ratio:.2f}배 < {_vel_mult:.1f}배 "
+                f"(10초 체결 가속 부족, 지지부진 종목 차단)",
+            )
+            return None
+        elif snap.exec_velocity_ratio > 0:
+            logger.debug(
+                "[EXEC_VEL 통과] %s(%s) ratio=%.2f ≥ %.1f배",
+                snap.code, snap.name, snap.exec_velocity_ratio, _vel_mult,
+            )
 
     r_chej = check_chejan_strength(snap, _eff_chejan)
     if r_chej is None:

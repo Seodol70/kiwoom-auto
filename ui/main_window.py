@@ -3705,6 +3705,12 @@ class MainWindow(QMainWindow):
 
         now_dt = _datetime.now()
 
+        # ATR 트레일 계산용 import — 루프 밖에서 1회만 (매 종목마다 호출 방지)
+        try:
+            from strategy.jang_dong_min import calc_atr as _calc_atr_fn
+        except Exception:
+            _calc_atr_fn = None
+
         # ━━━ 포지션별 청산 판정 ━━━
         for code, pos in positions:
             if self.order_mgr.is_pending(code):
@@ -3870,16 +3876,44 @@ class MainWindow(QMainWindow):
                             _trail_pct = cfg.trail_pct_tier3
 
                     _trail_price = int(pos.peak_price * (1 - _trail_pct / 100))
+
+                    # ── [NEW] ATR 기반 트레일 스탑 ──────────────────────────────────────
+                    # peak_price - 1.5×ATR14 선을 계산해 티어 트레일보다 촘촘하면 우선 적용
+                    # 데이터 부족 / 계산 실패 시 기존 티어 트레일 유지 (fail-safe)
+                    _atr_trail_tag = ""
+                    if getattr(cfg, "atr_trail_enabled", True):
+                        try:
+                            _snap_atr = (self._snap_store.get_snapshot(code)
+                                         if hasattr(self, "_snap_store") else None)
+                            if _snap_atr is not None:
+                                _h_atr = list(getattr(_snap_atr, "highs_1min",  []) or [])
+                                _l_atr = list(getattr(_snap_atr, "lows_1min",   []) or [])
+                                _c_atr = list(getattr(_snap_atr, "closes_1min", []) or [])
+                                if (_calc_atr_fn is not None
+                                        and len(_h_atr) >= 15
+                                        and len(_l_atr) >= 15
+                                        and len(_c_atr) >= 15):
+                                    _atr_v = _calc_atr_fn(_h_atr, _l_atr, _c_atr, 14)
+                                    if _atr_v and _atr_v > 0:
+                                        _atr_mult = float(getattr(cfg, "atr_trail_multiplier", 1.5))
+                                        _atr_line = int(pos.peak_price - _atr_v * _atr_mult)
+                                        if _atr_line > _trail_price:
+                                            _trail_price = _atr_line
+                                            _atr_trail_tag = f" ATR×{_atr_mult:.1f}({_atr_v:.0f}pt)"
+                        except Exception:
+                            pass  # fail-safe: 기존 티어 트레일 그대로 유지
+
                     if pos.current_price <= _trail_price:
                         _trend_tag = " [Strong홀딩]" if _is_strong_trend else ""
+                        _trail_label = f"트레일스탑{_trend_tag}{_atr_trail_tag}"
                         self.log_panel.append(
-                            f"🔻 [트레일스탑{_trend_tag}] {pos.name}({code}) "
+                            f"🔻 [{_trail_label}] {pos.name}({code}) "
                             f"현재가 {pos.current_price:,} ≤ 트레일가 {_trail_price:,} "
                             f"(고점 {pos.peak_price:,} - {_trail_pct:.1f}%) — {sell_qty}주 전량 청산"
                         )
                         self._audit.log_sell_decision(
                             code,
-                            f"트레일스탑{_trend_tag} 현재가 {pos.current_price:,} ≤ {_trail_price:,} "
+                            f"{_trail_label} 현재가 {pos.current_price:,} ≤ {_trail_price:,} "
                             f"(고점 {pos.peak_price:,}, trail {_trail_pct:.1f}%)",
                             pos.current_price,
                         )
