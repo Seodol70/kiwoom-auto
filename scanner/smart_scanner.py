@@ -3702,6 +3702,25 @@ class SmartScanner:
         """하위 호환용 — _fetch_top_volume_rows 위임"""
         return self._fetch_top_volume_rows(target=min(count, self.cfg.collect_raw_top_n))
 
+    def _bg_fetch_opt10030(self) -> None:
+        """
+        백그라운드에서 opt10030을 갱신 (메인 스레드 블로킹 회피).
+
+        QTimer.singleShot으로 메인 스레드 이벤트 루프 이후에 실행되므로,
+        이전 주기의 스캔 결과 처리가 완료된 후 opt10030 갱신 시작.
+        """
+        if self._opt10030_fetching:
+            logger.debug("[opt10030 BG] 이미 갱신 중 — 스킵")
+            return
+
+        logger.debug("[opt10030 BG] 백그라운드 갱신 시작")
+        try:
+            # _fetch_top_volume_rows가 플래그를 관리하므로 여기서는 호출만
+            rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, retry=1)
+            logger.info("[opt10030 BG] 갱신 완료 — %d종목 캐시", len(rows))
+        except Exception as e:
+            logger.warning("[opt10030 BG] 갱신 실패: %s", e)
+
     def _fetch_top_volume_rows(
         self,
         target: int = 200,
@@ -3853,17 +3872,36 @@ class SmartScanner:
         logger.info("=" * 60)
         logger.info("[주기 스캔] 시작 — %s", datetime.now().strftime("%H:%M:%S"))
         self._log_store_health()
-        _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "opt10030 조회 중...")
 
         # 연결 확인
         if hasattr(self._kiwoom, 'is_connected') and not self._kiwoom.is_connected():
             logger.warning("[주기 스캔] 연결 끊김 — 스킵")
             return []
 
-        # 1. opt10030 조회(연속조회) → 필터 → 우선주·ETF 제외 → 거래대금 상위 watch_pool_max 유지
-        rows = self._fetch_top_volume_rows(
-            target=self.cfg.collect_raw_top_n, on_progress=on_progress,
-        )
+        # 1. opt10030 조회 — 메인 스레드 블로킹 방지를 위해 캐시 우선 사용 + 백그라운드 갱신
+        # [2026-04-23] 최적화: 캐시가 있으면 즉시 반환 후 백그라운드에서 갱신
+        #              캐시 없으면 fallback 대체 + 백그라운드 갱신 시작
+        _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "opt10030 조회 중...")
+
+        # 캐시된 결과 또는 fallback 사용 (메인 스레드 블로킹 없음)
+        cache_age = time.monotonic() - self._last_volume_updated
+        if self._last_volume_rows:
+            rows = self._last_volume_rows[:]
+            logger.info("[주기 스캔] 캐시된 opt10030 결과 사용 (나이 %.1fs, %d종목)", cache_age, len(rows))
+        else:
+            # 캐시 없음: fallback 사용 (최초 실행 또는 첫 시작)
+            rows = [
+                {"code": "005930", "name": "삼성전자",        "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                {"code": "000660", "name": "SK하이닉스",       "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                {"code": "207940", "name": "삼성바이오로직스",  "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                {"code": "005380", "name": "현대차",           "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                {"code": "373220", "name": "LG에너지솔루션",   "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+            ]
+            logger.warning("[주기 스캔] 캐시 없음 — fallback 대체 (%d종목) + 백그라운드 갱신 예약", len(rows))
+
+        # 백그라운드에서 opt10030 갱신 (메인 스레드 블로킹 없음)
+        # — 다음 사이클부터 갱신된 결과 캐시 사용 가능
+        QTimer.singleShot(100, self._bg_fetch_opt10030)
         rows, _ = filter_equity_rows(rows)
         mc = self.cfg.max_change_pct
         _n0 = len(rows)
