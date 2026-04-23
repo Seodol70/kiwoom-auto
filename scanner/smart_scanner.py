@@ -193,7 +193,7 @@ class SmartScannerConfig:
     universe_chg_pct_weight:   float = 0.2   # 등락률 가중치
     pre_filter_time:      dtime = dtime(9, 0, 0)
     realtime_sub_max:     int   = 110         # SetRealReg 감시 상한( watch_pool_max 와 맞춤)
-    scan_interval:        float = 10.0  # 2026-04-16: 1→10초 (1분봉 기반 JDM은 1초 반복이 무의미)
+    scan_interval:        float = 60.0  # 2026-04-23: 10→60초 (메인 스레드 블로킹 해소, opt10030 TR 시간 여유)
     tr_delay:             float = 0.25        # TRRequestQueue 최소 간격
     breakout_ratio:       float = 0.015       # 2026-04-15: 3%→2%→1.5% (하루 3% 오르기 어려움, 진입 기회 확대)
     breakout_volume_mult: float = 0.8         # 2026-04-15: 1.0 → 0.8 (체결강도/추세/RSI 필터 강화로 거래량 중요도 낮아짐)
