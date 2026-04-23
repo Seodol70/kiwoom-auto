@@ -445,15 +445,19 @@ class OrderManager(QObject):
             from config import RISK as _RISK
             _mx = float(_RISK.get("max_change_pct", 15.0))
             _info = self._kiwoom.get_stock_info(code)
+
+            # [2026-04-23] opt10001 실패 → 매수 거절 (호가 부족 신호)
+            # 원인: opt10001 TR 실패 종목은 이미 호가가 줄어들고 있음
+            # 효과: 타임아웃 방지 + 자금 효율화 + 손실 차단
             if _info is None:
-                # opt10001 실패 — 스캐너가 검증한 스냅샷 등락률 재사용 (0% 가정 제거)
-                _pct = float(getattr(signal, "change_pct", 0) or 0)
-                logger.debug(
-                    "[handle_signal] %s opt10001 없음 — 스냅샷 등락률 %.2f%% 폴백", code, _pct
-                )
-            else:
-                _pct = float(_info.get("change_pct", 0) or 0)
-                _sector = str(_info.get("sector", "")).strip()
+                msg = f"매수 거절 — opt10001 실패 (스냅샷/섹터 정보 부족 = 호가 감소 징조)"
+                order_log.warning("[opt10001차단] %s(%s) — %s", name, code, msg)
+                logger.warning(msg)
+                self.order_failed.emit(msg)
+                return
+
+            _pct = float(_info.get("change_pct", 0) or 0)
+            _sector = str(_info.get("sector", "")).strip()
             logger.debug("[매수 등락률 체크] %s — 현재 등락률: %.2f%% (상한: %.1f%%)", name, _pct, _mx)
             if _pct >= _mx:
                 msg = f"매수 차단 — 등락률 {_pct:.1f}% ≥ 상한 {_mx:.1f}% ({name})"
