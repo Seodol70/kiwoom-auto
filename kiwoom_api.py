@@ -29,7 +29,46 @@ except Exception:
 from PyQt5.QtCore import QEventLoop, QTimer
 from PyQt5.QtWidgets import QApplication
 
+from logging_config import tr_log
+
 logger = logging.getLogger(__name__)
+
+
+class _TrFailCounter:
+    """TR 실패를 TR 코드별로 집계하고 일정 횟수 이상 누적 시 tr_log에 경고를 출력한다."""
+
+    _WARN_THRESHOLD = 3   # 연속 N회 실패 시 경고
+    _REPORT_EVERY   = 10  # N회마다 집계 로그
+
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = collections.defaultdict(int)
+        self._total:  dict[str, int] = collections.defaultdict(int)
+
+    def fail(self, tr_code: str, detail: str = "") -> None:
+        self._counts[tr_code] += 1
+        self._total[tr_code]  += 1
+        cnt = self._counts[tr_code]
+        tot = self._total[tr_code]
+        if cnt >= self._WARN_THRESHOLD:
+            tr_log.warning(
+                "[TR실패] %s 연속=%d회 누적=%d회%s",
+                tr_code, cnt, tot,
+                f" — {detail}" if detail else "",
+            )
+        elif tot % self._REPORT_EVERY == 0:
+            tr_log.info("[TR집계] %s 누적실패=%d회", tr_code, tot)
+
+    def ok(self, tr_code: str) -> None:
+        """성공 시 연속 실패 카운터 리셋."""
+        if self._counts.get(tr_code, 0) > 0:
+            tr_log.info(
+                "[TR회복] %s 연속실패 %d회 → 응답 정상화",
+                tr_code, self._counts[tr_code],
+            )
+        self._counts[tr_code] = 0
+
+
+_TR_FAIL = _TrFailCounter()
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +394,7 @@ class KiwoomManager:
                     round((current_price - base_price) / base_price * 100, 2)
                     if base_price else 0.0
                 )
+                _TR_FAIL.ok("opt10001")
                 return {
                     "code":          code,
                     "name":          str(d.get("종목명", "")).strip(),
@@ -375,6 +415,7 @@ class KiwoomManager:
 
         # 재시도도 실패
         logger.warning("[opt10001] %s 응답 없음 — 스냅샷 폴백", code)
+        _TR_FAIL.fail("opt10001", f"code={code}")
         return None
 
     def get_current_price(self, code: str) -> int:
@@ -580,6 +621,7 @@ class KiwoomManager:
         ok = self._comm_rq(TR_INDEX_INFO, "index_info", "9300", timeout_ms=1_000)
         if not ok:
             logger.debug("[opt20001] TR 차단 — 지수 조회 스킵 (code=%s)", index_code)
+            _TR_FAIL.fail("opt20001", f"TR차단 code={index_code}")
             return None
 
         d = self._tr_data
@@ -600,6 +642,7 @@ class KiwoomManager:
             change_pct = round((current - base) / base * 100, 2) if base else 0.0
             logger.info("[opt20001] 지수 — code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",
                         index_code, current, base, change_pct)
+            _TR_FAIL.ok("opt20001")
             return {"index_code": index_code, "current": current,
                     "base": base, "change_pct": change_pct}
 
@@ -608,6 +651,7 @@ class KiwoomManager:
         rows = d.get("rows", [])
         if not rows:
             logger.warning("[opt20001] 지수 응답 없음 — code=%s", index_code)
+            _TR_FAIL.fail("opt20001", f"응답없음 code={index_code}")
             return None
 
         today_str = datetime.now().strftime("%Y%m%d")
