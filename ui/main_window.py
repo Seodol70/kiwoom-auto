@@ -191,9 +191,51 @@ class ScannerWorker(QObject):
                 sig_type = None
                 reason = None
                 _trend_text = "데이터부족"
-                # 사전필터 탈락 종목은 신호 판단 생략 (watch_list에는 등락 상한 미만만 표시)
+
+                # ① 추세 계산 — 모든 감시 종목에서 시도 (candidate_codes 여부 무관)
+                snap = self._store.get_snapshot(code)
+                if snap is not None and getattr(self._cfg, "yosep_trend_enabled", True):
+                    from strategy.jang_dong_min import (
+                        get_trend_status as _gts, calc_ema as _cema, calc_atr as _catr
+                    )
+                    _ema_p  = int(getattr(self._cfg, "yosep_ema_period",      20))
+                    _atr_p  = int(getattr(self._cfg, "yosep_atr_period",      14))
+                    _vol_lb = int(getattr(self._cfg, "yosep_volume_lookback", 20))
+                    _need   = max(_ema_p + 1, _atr_p + 1)
+                    _cl = list(snap.closes_1min)
+                    _hi = list(snap.highs_1min)
+                    _lo = list(snap.lows_1min)
+                    _vl = list(snap.volumes_1min)
+                    if len(_cl) >= _need and len(_hi) >= _need and len(_lo) >= _need:
+                        _tlv = _gts(
+                            closes=_cl, highs=_hi, lows=_lo, volumes=_vl,
+                            ema_period=_ema_p, atr_period=_atr_p,
+                            volume_lookback=_vol_lb,
+                        )
+                        snap.trend_prev_level = snap.trend_level
+                        snap.trend_level = int(_tlv)
+                        self._store.update_trend_level(code, int(_tlv))
+
+                        # 방향 판단 — EMA20·ATR14 이용 (check_jdm_entry JDM_TREND_DOWN 동일 기준)
+                        _ema_now = _cema(_cl, _ema_p)
+                        _atr_now = _catr(_hi, _lo, _cl, _atr_p)
+                        _down_mult = float(getattr(self._cfg, "yosep_downtrend_block_atr", 0.8))
+                        if _ema_now is not None and _atr_now is not None and _atr_now > 0:
+                            if snap.current_price < (_ema_now - _atr_now * _down_mult):
+                                _trend_text = "하락"
+                            elif _tlv >= 3:
+                                _trend_text = "강세"
+                            elif _tlv == 2:
+                                _trend_text = "상승"
+                            elif _tlv == 1:
+                                _trend_text = "약세"
+                            else:
+                                _trend_text = "횡보"
+                        else:
+                            _trend_text = "횡보"
+
+                # ② 신호 판단 — candidate_codes에만 수행
                 if code in candidate_codes:
-                    snap = self._store.get_snapshot(code)
                     if snap is None:
                         _log.debug("[ScannerWorker] %s 스냅샷 없음", code)
                         self._signal_prev_active[code] = False
@@ -201,51 +243,6 @@ class ScannerWorker(QObject):
                         # 신호 판단 (메모리 연산만)
                         sig_type = None
                         reason   = None
-
-                        # ── 추세 레벨 + 방향 계산 ────────────────────────────
-                        # trend_level(0~3): 상승 강도 / trend_text: 상승·하락·횡보 표시용
-                        _trend_text = "데이터부족"
-                        if getattr(self._cfg, "yosep_trend_enabled", True):
-                            from strategy.jang_dong_min import (
-                                get_trend_status as _gts, calc_ema as _cema, calc_atr as _catr
-                            )
-                            _ema_p  = int(getattr(self._cfg, "yosep_ema_period",      20))
-                            _atr_p  = int(getattr(self._cfg, "yosep_atr_period",      14))
-                            _vol_lb = int(getattr(self._cfg, "yosep_volume_lookback", 20))
-                            _need   = max(_ema_p + 1, _atr_p + 1)
-                            _cl = list(snap.closes_1min)
-                            _hi = list(snap.highs_1min)
-                            _lo = list(snap.lows_1min)
-                            _vl = list(snap.volumes_1min)
-                            if len(_cl) >= _need and len(_hi) >= _need and len(_lo) >= _need:
-                                _tlv = _gts(
-                                    closes=_cl, highs=_hi, lows=_lo, volumes=_vl,
-                                    ema_period=_ema_p, atr_period=_atr_p,
-                                    volume_lookback=_vol_lb,
-                                )
-                                snap.trend_prev_level = snap.trend_level
-                                snap.trend_level = int(_tlv)
-                                self._store.update_trend_level(code, int(_tlv))
-
-                                # 방향 판단 — EMA20·ATR14 이용 (check_jdm_entry JDM_TREND_DOWN 동일 기준)
-                                _ema_now = _cema(_cl, _ema_p)
-                                _atr_now = _catr(_hi, _lo, _cl, _atr_p)
-                                _down_mult = float(getattr(self._cfg, "yosep_downtrend_block_atr", 0.8))
-                                if _ema_now is not None and _atr_now is not None and _atr_now > 0:
-                                    if snap.current_price < (_ema_now - _atr_now * _down_mult):
-                                        _trend_text = "하락"
-                                    elif _tlv >= 3:
-                                        _trend_text = "강세"
-                                    elif _tlv == 2:
-                                        _trend_text = "상승"
-                                    elif _tlv == 1:
-                                        _trend_text = "약세"
-                                    else:
-                                        _trend_text = "횡보"
-                                else:
-                                    _trend_text = "횡보"
-                            else:
-                                _trend_text = "데이터부족"
 
                         # ── 슬롯별 신호 라우팅 ────────────────────────────────
                         # EOD 종가매매 창(14:40~14:55) — overnight_mode_enabled 시 우선 체크
@@ -551,7 +548,7 @@ class ScannerWorker(QObject):
                     "trend_level":    getattr(_snap, "trend_level",      0) if _snap else 0,
                     "trend_prev":     getattr(_snap, "trend_prev_level", 0) if _snap else 0,
                     "chejan":         getattr(_snap, "chejan_strength", 0.0) if _snap else 0.0,
-                    "trend_text":     _trend_text if code in candidate_codes else "데이터부족",
+                    "trend_text":     _trend_text,  # candidate 여부와 무관, 스냅샷 있으면 추세 계산
                 })
 
             for _c in list(self._signal_prev_active.keys()):
