@@ -3400,36 +3400,43 @@ class MainWindow(QMainWindow):
                 on_progress=self.scan_status.update
             )
 
-            # 스캔 완료 후 SnapshotStore 상태 진단 (거래대금 상위 N종 샘플 — 전체 감시와 무관)
-            top_df = self._snap_store.top_by_trade_amount(
-                max(1, int(self._scan_cfg.diagnostic_sample_n))
-            )
-            sample_names = []
-            for code_s, row_s in top_df.iterrows():
-                sample_names.append(
-                    f"{row_s.get('name','?')}({code_s}) "
-                    f"{int(row_s.get('current_price',0)):,}원"
-                )
-            sample_str = " / ".join(sample_names) if sample_names else "없음"
-
-            self.log_panel.append(
-                f"[스캔] 완료 — Store={len(self._snap_store)}종목 갱신 | "
-                f"진단샘플(거래대금상위 {self._scan_cfg.diagnostic_sample_n}종): {sample_str}"
-            )
-            self.log_panel.append(
-                f"[스캔] 유니버스 — 감시·스냅샷 상한 {self._scan_cfg.watch_pool_max}종, "
-                f"Worker 신호판단 상위 {self._scan_cfg.display_top_n}종 "
-                f"(max_positions={_STR.get('max_positions', 5)} 는 동시 보유 한도)"
-            )
-            self.scan_status.done(
-                f"데이터 갱신 완료 / 전체 {len(self._snap_store)}종목 모니터링"
-            )
+            # 스캔 완료 — 결과 처리는 QTimer로 비동기 (메인 스레드 블로킹 방지)
             # 일봉 갱신 대기 목록이 있으면 QTimer 체인으로 비동기 처리
-            # (메인 스레드 블로킹 없이 350ms 간격으로 1종목씩 처리)
             _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))
-            if _pending:
-                self._smart_scanner._daily_refresh_pending = []
-                QTimer.singleShot(500, lambda codes=_pending: self._daily_candle_chain(codes, 0))
+
+            def _process_scan_results():
+                """스캔 결과 처리 (비동기) — 진단 로그 + 일봉 갱신"""
+                # SnapshotStore 상태 진단 (거래대금 상위 N종 샘플)
+                top_df = self._snap_store.top_by_trade_amount(
+                    max(1, int(self._scan_cfg.diagnostic_sample_n))
+                )
+                sample_names = []
+                for code_s, row_s in top_df.iterrows():
+                    sample_names.append(
+                        f"{row_s.get('name','?')}({code_s}) "
+                        f"{int(row_s.get('current_price',0)):,}원"
+                    )
+                sample_str = " / ".join(sample_names) if sample_names else "없음"
+
+                self.log_panel.append(
+                    f"[스캔] 완료 — Store={len(self._snap_store)}종목 갱신 | "
+                    f"진단샘플(거래대금상위 {self._scan_cfg.diagnostic_sample_n}종): {sample_str}"
+                )
+                self.log_panel.append(
+                    f"[스캔] 유니버스 — 감시·스냅샷 상한 {self._scan_cfg.watch_pool_max}종, "
+                    f"Worker 신호판단 상위 {self._scan_cfg.display_top_n}종 "
+                    f"(max_positions={_STR.get('max_positions', 5)} 는 동시 보유 한도)"
+                )
+                self.scan_status.done(
+                    f"데이터 갱신 완료 / 전체 {len(self._snap_store)}종목 모니터링"
+                )
+
+                # 일봉 갱신 체인 시작 (350ms 간격)
+                if _pending:
+                    QTimer.singleShot(500, lambda codes=_pending: self._daily_candle_chain(codes, 0))
+
+            # 결과 처리를 QTimer로 예약 (메인 루프가 처리할 여유 생김)
+            QTimer.singleShot(10, _process_scan_results)  # 다음 틱에 처리
         except Exception as e:
             self.log_panel.append(f"[스캔 오류] {e}")
             self.scan_status.done(f"오류: {e}")
