@@ -338,7 +338,8 @@ class SmartScannerConfig:
     trail_pct_tier3:      float = 2.0   # 수익 tier2_max 이상 구간 (크게 올랐을 때 여유)
     # [NEW] 체결 가속도(Execution Velocity) 필터 — 10초 체결량 급증 확인
     exec_velocity_enabled: bool  = True    # 체결 가속도 필터 활성화 (False면 전 종목 통과)
-    exec_velocity_mult:    float = 2.5     # 10초 체결량 ≥ 직전 1분 평균 10초량의 N배 요구
+    exec_velocity_mult:    float = 1.8     # 10초 체결량 ≥ 직전 1분 평균 10초량의 N배 요구 (2026-04-22: 2.5→1.8, 장초반 체결 안정성)
+    exec_velocity_disabled_opening: bool = False  # OPENING 슬롯(09:05~09:30)에서 체결 속도 필터 비활성화
     # [NEW] ATR 기반 트레일링 스탑
     atr_trail_enabled:        bool  = True   # ATR 트레일 스탑 활성화
     atr_trail_activation_pct: float = 1.5   # ATR 트레일 발동 최소 이익 (%, 기존 trail_activation_pct와 동일)
@@ -2938,8 +2939,13 @@ def check_jdm_entry(
     # ── [NEW] 체결 가속도(Execution Velocity) 필터 ─────────────────────────────────
     # 10초 체결량 ≥ 직전 1분 평균 10초량의 N배 — '지금 막 불붙은' 종목만 통과
     # exec_velocity_ratio=0은 데이터 부족(장 초반) → 필터 스킵(fail-open)
-    if getattr(cfg, "exec_velocity_enabled", True):
-        _vel_mult = float(getattr(cfg, "exec_velocity_mult", 2.5))
+    # OPENING 슬롯에서 exec_velocity_disabled_opening=True면 필터 비활성화
+    _skip_exec_vel = (
+        _slot == "OPENING" and
+        getattr(cfg, "exec_velocity_disabled_opening", False)
+    )
+    if getattr(cfg, "exec_velocity_enabled", True) and not _skip_exec_vel:
+        _vel_mult = float(getattr(cfg, "exec_velocity_mult", 1.8))
         if snap.exec_velocity_ratio > 0 and snap.exec_velocity_ratio < _vel_mult:
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM_EXEC_VEL",
@@ -2952,6 +2958,11 @@ def check_jdm_entry(
                 "[EXEC_VEL 통과] %s(%s) ratio=%.2f ≥ %.1f배",
                 snap.code, snap.name, snap.exec_velocity_ratio, _vel_mult,
             )
+    elif _skip_exec_vel and snap.exec_velocity_ratio > 0:
+        logger.debug(
+            "[EXEC_VEL SKIPPED] %s(%s) OPENING 슬롯 비활성화 — ratio=%.2f (필터 우회)",
+            snap.code, snap.name, snap.exec_velocity_ratio,
+        )
 
     r_chej = check_chejan_strength(snap, _eff_chejan)
     if r_chej is None:
@@ -3749,6 +3760,34 @@ class SmartScanner:
         logger.debug("[opt10030] 응답 %d행", len(rows))
         return rows
 
+    def _log_store_health(self) -> None:
+        """SnapshotStore 상태를 5분마다 한 번 로깅 (Zone 6)."""
+        _now = time.monotonic()
+        if _now - getattr(self, "_store_health_last", 0.0) < 300.0:
+            return
+        self._store_health_last = _now
+
+        try:
+            with self.store._lock:
+                _codes_idx   = list(self.store._df.index)   # DataFrame index = 등록 종목
+                _n_codes     = len(_codes_idx)
+                _n_mins      = len(self.store._mins)        # 1분봉 데이터 보유 종목 수
+                _n_tick_vols = len(getattr(self.store, "_tick_ts_vol", {}))
+                _n_sectors   = len(getattr(self.store, "_sector_cache", {}))
+                _codes_no_1m = [
+                    c for c in _codes_idx
+                    if len(self.store._mins.get(c, [])) < 5
+                ]
+            logger.info(
+                "[스토어헬스] 종목=%d 1분봉보유=%d 틱Vel=%d 섹터캐시=%d "
+                "1분봉5개미만=%d개%s",
+                _n_codes, _n_mins, _n_tick_vols, _n_sectors,
+                len(_codes_no_1m),
+                f" {_codes_no_1m[:5]}" if _codes_no_1m else "",
+            )
+        except Exception as _e:
+            logger.debug("[스토어헬스] 수집 실패: %s", _e)
+
     def run_periodic_scan(self, on_progress=None) -> list:
         """
         1분마다 호출하는 전체 스캔 사이클.
@@ -3768,10 +3807,12 @@ class SmartScanner:
         # ① WATCH 모드(포지션 풀)이면 opt10030 호출 자체를 스킵
         if self._universe_paused:
             logger.info("[주기 스캔] WATCH 모드 — opt10030 스캔 스킵 (SetRealReg 감시 중)")
+            self._log_store_health()
             return []
 
         logger.info("=" * 60)
         logger.info("[주기 스캔] 시작 — %s", datetime.now().strftime("%H:%M:%S"))
+        self._log_store_health()
         _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "opt10030 조회 중...")
 
         # 연결 확인
