@@ -3492,11 +3492,21 @@ class SmartScanner:
 
     def _build_breakout_signal(self, snap: StockSnapshot) -> Optional[ScanSignal]:
         """BREAKOUT 전략 평가 후 통과 시 ScanSignal을 반환한다."""
+        # trend_level에 따라 고점 필터 동적 조정 (2026-04-23)
+        # 상승 추세 종목은 고점에서 조금 하락해도 진입 허용, 약한 추세는 엄격하게
+        trend_level = int(getattr(snap, "trend_level", 0))
+        if trend_level >= 2:  # 상승 추세
+            pullback_threshold = 5.0   # 고점 대비 5% 하락까지만 차단
+        elif trend_level == 1:  # 중간 추세
+            pullback_threshold = 3.0   # 고점 대비 3% 하락까지만 차단
+        else:  # trend_level == 0 (약한 추세)
+            pullback_threshold = self.cfg.breakout_pullback_from_high_pct  # 기본값 2.5%
+
         r_breakout = check_breakout(
             snap,
             breakout_ratio=self.cfg.breakout_ratio,
             volume_mult=self.cfg.breakout_volume_mult,
-            pullback_from_high_pct=self.cfg.breakout_pullback_from_high_pct,
+            pullback_from_high_pct=pullback_threshold,
             min_rising_bars=self.cfg.breakout_min_rising_bars,
         )
         if not r_breakout:
