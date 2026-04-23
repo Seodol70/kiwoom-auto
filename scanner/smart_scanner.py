@@ -350,7 +350,7 @@ class SmartScannerConfig:
     jdm_candle_skip_trend_level:   int   = 2     # 이 이상 trend_level이면 캔들 반전패턴 스킵 (추세 계속 진행 중)
     jdm_rsi_high_trend:            float = 80.0  # trend_level≥2 시 RSI 상한 완화 (기본 70 → 80)
     jdm_rsi_high_breakout:         float = 82.0  # ATR1.5 돌파 확인 시 RSI 상한 추가 완화 (82)
-    jdm_rsi_high_opening_trend3:   float = 95.0  # OPENING 슬롯 + 추세Lv3 — 장초반 강세 종목 RSI 상한 완화
+    jdm_rsi_high_opening_trend3:   float = 83.0  # OPENING + 추세Lv3 RSI 상한 (2026-04-23: 95→83, RSI=92 고점 진입 차단)
     jdm_rsi_entry_min_trend:       float = 45.0  # trend_level≥2 시 RSI 하한 완화 (슬롯 기준값 → 45)
     ema_disp_max_pct_trend:        float = 7.0   # trend_level≥2 EMA10/EMA20 이격 상한 완화
     price_ema_disp_max_pct_trend:  float = 6.0   # trend_level≥2 현재가/EMA10 이격 상한 완화

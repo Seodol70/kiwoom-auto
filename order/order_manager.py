@@ -209,6 +209,10 @@ class OrderManager(QObject):
         self._pending_buy_time: dict[str, datetime] = {}   # code → 접수 시각
         self._pending_buy_info: dict[str, dict] = {}       # code → {qty, name, order_no}
 
+        # [취소 후 뒤늦은 체결 방어] 취소한 매수 주문 order_no 추적
+        # 취소 확인 후에도 체결이 오면 즉시 시장가 청산
+        self._cancelled_buy_orders: set[str] = set()
+
         # 분할익절 체결 대기 — 이 코드의 다음 sell 체결은 is_partial=True 로 기록
         self._partial_pending_codes: set[str] = set()
 
@@ -898,6 +902,8 @@ class OrderManager(QObject):
                         "[매수취소] %s(%s) order_no=%s → ret=%s",
                         name, code, order_no, cancel_ret
                     )
+                    # 취소 후 뒤늦게 체결이 오면 즉시 청산하도록 order_no 기록
+                    self._cancelled_buy_orders.add(order_no)
                 except Exception as _e:
                     logger.warning("[매수취소 오류] %s: %s", code, _e)
 
@@ -1094,6 +1100,26 @@ class OrderManager(QObject):
             rec.filled_at    = datetime.now()
 
         is_app_buy = order_type == OrderType.BUY and code in self._app_pending_buys
+
+        # [취소 후 뒤늦은 체결 방어] 이미 취소한 매수 주문이 뒤늦게 체결된 경우 즉시 청산
+        if order_type == OrderType.BUY and order_no in self._cancelled_buy_orders:
+            self._cancelled_buy_orders.discard(order_no)
+            logger.warning(
+                "[취소후체결] %s(%s) 취소 주문 %s 이 뒤늦게 체결됨 (%d주 @%d) — 즉시 시장가 청산",
+                name, code, order_no, filled_qty, filled_price,
+            )
+            # 포지션에 반영한 뒤 즉시 청산
+            if code in self.positions:
+                _pos = self.positions[code]
+                _pos.qty += filled_qty
+            else:
+                self.positions[code] = Position(
+                    code=code, name=name,
+                    qty=filled_qty, avg_price=filled_price,
+                    current_price=filled_price,
+                )
+            self.sell(code, name, self.positions[code].qty)
+            return
 
         avg_buy_for_log: Optional[int] = None  # 매도 체결 로그용 (포지션 갱신 전 평단)
 
