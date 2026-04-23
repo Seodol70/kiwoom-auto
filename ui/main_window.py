@@ -2624,9 +2624,8 @@ class MainWindow(QMainWindow):
         from datetime import datetime as _dt, time as _time_cls
         from config import RISK as _RISK
 
-        # 다른 TR 진행 중이면 5초 후 재시도 — 단순 return 시 다음 60s 틱까지 대기
+        # 다른 TR 진행 중이면 스킵 — 다음 60s 틱에서 재시도 (QTimer 재귀 호출 방지)
         if getattr(self._kiwoom, "_tr_busy", False):
-            QTimer.singleShot(5_000, self._check_market_crash)
             return
 
         # 이 함수 자체 재진입 방지
