@@ -3031,9 +3031,10 @@ def check_jdm_entry(
                 if (_ema20_b is not None and _atr14_b is not None and _atr14_b > 0
                         and snap.current_price > _ema20_b + _atr14_b * 1.5):
                     _eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_breakout", 82.0))
-            # OPENING 슬롯 추세Lv3: 장초반 강세 종목 RSI 상한 95%로 완화
+            # OPENING 슬롯 추세Lv3: 장초반 강세 종목도 RSI 상한 제한 (83.0)
+            # — RSI=92 같은 극단 고점 진입 방지 (2026-04-23 신성이엔지 사례)
             if _slot == "OPENING" and _trend_snap_lv >= 3:
-                _eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_opening_trend3", 95.0))
+                _eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_opening_trend3", 83.0))
 
         rsi_ok = _eff_rsi_min <= rsi < _eff_rsi_high
         if not rsi_ok:
