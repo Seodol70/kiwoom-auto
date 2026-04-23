@@ -3197,6 +3197,8 @@ class SmartScanner:
         self._amt_baseline: dict[str, int] = {}
         # opt10030 직전 성공 결과 캐시 — 실패 시 하드코딩 대체 대신 이전 결과 재사용
         self._last_volume_rows: list[dict] = []
+        self._last_volume_updated: float = 0.0  # 마지막 캐시 갱신 시각 (time.monotonic)
+        self._opt10030_fetching: bool = False   # opt10030 중복 호출 방지 플래그
         # 전일 거래량 캐시 — hybrid universe score vol_ratio 계산용
         # {code: prev_volume}; 매일 장 마감(15:20) save_prev_volumes() 로 갱신
         self._prev_volumes: dict[str, int] = {}
@@ -3710,36 +3712,64 @@ class SmartScanner:
         거래대금 상위 조회 — opt10030 (KiwoomManager.fetch_opt10030_top_volume).
 
         target=400 기준 TR 약 4회(연속조회) + 레이트리미터 각 0.25s → 합계 ~1~2s 수준.
+
+        [2026-04-23] 최적화:
+        - 중복 호출 방지: 이미 fetching 중이면 캐시 우선 반환
+        - 캐시 우선: 5분 이내 갱신된 캐시는 즉시 반환 (메인 스레드 블로킹 회피)
         """
-        logger.info("[opt10030] 거래대금 상위 조회 시작 (목표 %d종목)", target)
+        now = time.monotonic()
+        cache_age = now - self._last_volume_updated
+
+        # ① 이미 fetching 중이면 캐시 우선 (중복 호출 차단)
+        if self._opt10030_fetching:
+            if self._last_volume_rows:
+                logger.info("[opt10030] 진행 중 — 캐시 %d종목 (나이 %.1fs)",
+                           len(self._last_volume_rows), cache_age)
+                return self._last_volume_rows[:target]
+            else:
+                logger.warning("[opt10030] 진행 중인데 캐시 없음 — 대기")
+                # 캐시가 없으면 fallback까지 기다림 (밑으로 진행)
+
+        # ② 최근 5분 이내 갱신된 캐시 있으면 즉시 반환 (메인 스레드 블로킹 회피)
+        if self._last_volume_rows and cache_age < 300.0:  # 5분
+            logger.info("[opt10030] 캐시 재사용 (나이 %.1fs, %d종목)", cache_age, len(self._last_volume_rows))
+            return self._last_volume_rows[:target]
+
+        # ③ 실제 조회 필요 — 플래그 설정 후 진행
+        logger.info("[opt10030] 거래대금 상위 조회 시작 (목표 %d종목, 캐시나이 %.1fs)", target, cache_age)
         if on_progress:
             on_progress("거래대금 상위 조회", 0, target, "opt10030 조회 중...")
 
-        for attempt in range(retry):
-            try:
-                if hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
-                    rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
-                else:
-                    rows = self._tr_q.call(self._do_fetch_opt10030)
-                    rows = rows[:target]
-                logger.info("[opt10030] 응답 %d행 (목표 %d)", len(rows), target)
+        self._opt10030_fetching = True
+        try:
+            for attempt in range(retry):
+                try:
+                    if hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
+                        rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
+                    else:
+                        rows = self._tr_q.call(self._do_fetch_opt10030)
+                        rows = rows[:target]
+                    logger.info("[opt10030] 응답 %d행 (목표 %d)", len(rows), target)
 
-                if rows:
-                    result = rows[:target]
-                    logger.info("[opt10030] 최종 %d종목 확보", len(result))
-                    self._last_volume_rows = result  # 성공 결과 캐시 — 다음 실패 시 재사용
-                    if on_progress:
-                        on_progress("거래대금 상위 조회", len(result), target,
-                                    f"{len(result)}종목 확보")
-                    return result
+                    if rows:
+                        result = rows[:target]
+                        logger.info("[opt10030] 최종 %d종목 확보", len(result))
+                        self._last_volume_rows = result
+                        self._last_volume_updated = time.monotonic()
+                        if on_progress:
+                            on_progress("거래대금 상위 조회", len(result), target,
+                                        f"{len(result)}종목 확보")
+                        return result
 
-            except Exception as e:
-                logger.warning("[opt10030] 조회 실패 (attempt %d): %s", attempt + 1, e)
+                except Exception as e:
+                    logger.warning("[opt10030] 조회 실패 (attempt %d): %s", attempt + 1, e)
+        finally:
+            self._opt10030_fetching = False
 
         # opt10030 결과 없을 때 — 직전 성공 결과 재사용 (캐시 없을 때만 하드코딩 대체)
         if self._last_volume_rows:
-            logger.warning("[opt10030] 실패 — 직전 스캔 결과 %d종목 재사용 (실시간 데이터 유지)",
-                           len(self._last_volume_rows))
+            logger.warning("[opt10030] 실패 — 직전 스캔 결과 %d종목 재사용 (나이 %.1fs)",
+                           len(self._last_volume_rows), cache_age)
             return self._last_volume_rows[:target]
 
         logger.warning("[opt10030] 실제 조회 실패 — 시총 상위 종목으로 대체 (캐시 없음, 최초 실패)")
