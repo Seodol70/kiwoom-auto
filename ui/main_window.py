@@ -2305,7 +2305,7 @@ class MainWindow(QMainWindow):
         self._chart_timer = QTimer(self)
         self._chart_timer.timeout.connect(self._refresh_chart)
         self._chart_timer.timeout.connect(self._refresh_portfolio_prices)
-        self._chart_timer.start(2000)
+        self._chart_timer.start(5000)  # 2026-04-23: 2s→5s (메인 스레드 이벤트 루프 부하 감소, Watchdog ACK 우선순위)
 
         # 잔고 동기화 (1분) — scan_refresh_timer(60s)와 발화 시간 어긋나도록 5s 지연 시작
         self._balance_timer = QTimer(self)
@@ -2313,10 +2313,10 @@ class MainWindow(QMainWindow):
         # QTimer.singleShot으로 첫 발화를 5s 늦춰 scan timer와 충돌 방지
         QTimer.singleShot(5_000, lambda: self._balance_timer.start(60_000))
 
-        # 시장 시간 스케줄러 (1분마다 체크)
+        # 시장 시간 스케줄러 (1분마다 체크) — 지수 체크(35s 뒤)와 시간차 확보
         self._schedule_timer = QTimer(self)
         self._schedule_timer.timeout.connect(self._check_market_time)
-        self._schedule_timer.start(60_000)
+        QTimer.singleShot(20_000, lambda: self._schedule_timer.start(60_000))
 
         # 연결 상태 확인 (15분마다) — 자동 재로그인
         self._connection_timer = QTimer(self)
@@ -2326,7 +2326,7 @@ class MainWindow(QMainWindow):
         # 지수 급락 감지 (60초마다) — 헤더 지수 표시 + 급락 감지
         self._crash_check_timer = QTimer(self)
         self._crash_check_timer.timeout.connect(self._check_market_crash)
-        self._crash_check_timer.start(60_000)  # 60초
+        QTimer.singleShot(35_000, lambda: self._crash_check_timer.start(60_000))  # 35s 뒤 시작
 
         # opt10030 주기 스캔 (1분마다) — 메인 스레드에서 호출 (Kiwoom TR은 메인 스레드만 지원)
         # 타임아웃 2초로 설정하여 응답 없으면 빨리 폴백
