@@ -51,6 +51,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from logging_config import position_log
 from config import TELEGRAM as _TG
 from telegram_bot import TelegramBot
 from scanner.smart_scanner import format_trade_amount_korean
@@ -2268,7 +2269,7 @@ class MainWindow(QMainWindow):
 
         # ── HealthMonitor — 자가 진단/자기 진화 ──────────────────────────────
         from analysis.health_monitor import HealthMonitor as _HealthMonitor
-        # on_freeze: force_unfreeze (TR EventLoop 강제 해제) + 스캔 상태 리셋 + auto_reconnect
+        # on_freeze: force_unfreeze (TR EventLoop 강제 해제) + 스캔 상태 리셋 + 비동기 재연결
         def _on_freeze_handler():
             import logging as _lg
             _freeze_log = _lg.getLogger(__name__)
@@ -2280,13 +2281,15 @@ class MainWindow(QMainWindow):
             # ② 스캔 진행 상태 플래그 리셋 (이후 스캔 사이클 차단 방지)
             self._scan_in_progress = False
             _freeze_log.warning("[on_freeze] _scan_in_progress 리셋 완료")
-            # ③ 재연결 (연결 끊긴 경우 대비)
-            if hasattr(self, "login_mgr") and self.login_mgr:
-                self.login_mgr.reconnect_silent()
-            else:
-                recon_fn = getattr(self._kiwoom, "auto_reconnect", None)
-                if recon_fn:
-                    recon_fn()
+            # ③ 재연결 — QTimer.singleShot으로 비동기 처리 (동기 호출 금지! UI 블로킹 유발)
+            def _do_reconnect():
+                if hasattr(self, "login_mgr") and self.login_mgr:
+                    self.login_mgr.reconnect_silent()
+                else:
+                    recon_fn = getattr(self._kiwoom, "auto_reconnect", None)
+                    if recon_fn:
+                        recon_fn()
+            QTimer.singleShot(500, _do_reconnect)  # 500ms 후 비동기로 재연결 시도
 
         self._health_monitor = _HealthMonitor(
             scan_cfg       = self._scan_cfg,
@@ -3700,7 +3703,8 @@ class MainWindow(QMainWindow):
                 for code, pos in positions:
                     chg = float(pos.price_change_pct_vs_avg)
                     peak_mark = f" [고점{pos.peak_price:,}]" if pos.peak_price > 0 else ""
-                    pos_summary.append(f"{pos.name}({code}):{chg:+.2f}%{peak_mark}")
+                    _sec_tag = f" [섹터:{getattr(pos, 'sector', '')[:4]}]" if getattr(pos, "sector", "") else ""
+                    pos_summary.append(f"{pos.name}({code}):{chg:+.2f}%{peak_mark}{_sec_tag}")
                 logger.info(f"[포지션현황] 보유 {len(positions)}개 | {' | '.join(pos_summary)}")
 
         now_dt = _datetime.now()
@@ -3767,6 +3771,10 @@ class MainWindow(QMainWindow):
 
             # ━━━ 손절 ━━━
             if chg <= self._auto_sl_pct:
+                position_log.info(
+                    "[청산결정:손절] %s(%s) 현재가=%d 평단=%d 수익률=%+.2f%% peak=%d",
+                    pos.name, code, pos.current_price, pos.avg_price, chg, pos.peak_price,
+                )
                 self.log_panel.append(
                     f"🔴 [손절] {pos.name}({code}) 하락률 {chg:+.2f}% — {sell_qty}주 매도"
                 )
@@ -3897,15 +3905,34 @@ class MainWindow(QMainWindow):
                                     if _atr_v and _atr_v > 0:
                                         _atr_mult = float(getattr(cfg, "atr_trail_multiplier", 1.5))
                                         _atr_line = int(pos.peak_price - _atr_v * _atr_mult)
-                                        if _atr_line > _trail_price:
+                                        _applied = _atr_line > _trail_price
+                                        logger.debug(
+                                            "[ATR Trail] %s(%s) peak=%d ATR=%.1f "
+                                            "atr_line=%d tier_line=%d → 적용=%s",
+                                            pos.name, code, pos.peak_price, _atr_v,
+                                            _atr_line, _trail_price,
+                                            "ATR" if _applied else "tier",
+                                        )
+                                        if _applied:
                                             _trail_price = _atr_line
                                             _atr_trail_tag = f" ATR×{_atr_mult:.1f}({_atr_v:.0f}pt)"
-                        except Exception:
-                            pass  # fail-safe: 기존 티어 트레일 그대로 유지
+                                else:
+                                    logger.debug(
+                                        "[ATR Trail] %s(%s) 데이터 부족 — bars=%d (min 15 필요)",
+                                        pos.name, code, min(len(_h_atr), len(_l_atr), len(_c_atr)),
+                                    )
+                        except Exception as _atr_ex:
+                            logger.debug("[ATR Trail] %s(%s) 계산 예외 — %s", pos.name, code, _atr_ex)
 
                     if pos.current_price <= _trail_price:
                         _trend_tag = " [Strong홀딩]" if _is_strong_trend else ""
                         _trail_label = f"트레일스탑{_trend_tag}{_atr_trail_tag}"
+                        position_log.info(
+                            "[청산결정:트레일] %s(%s) 현재가=%d peak=%d trail_가격=%d "
+                            "trail_pct=%.1f%% 수익률=%+.2f%%%s",
+                            pos.name, code, pos.current_price, pos.peak_price,
+                            _trail_price, _trail_pct, chg, _atr_trail_tag,
+                        )
                         self.log_panel.append(
                             f"🔻 [{_trail_label}] {pos.name}({code}) "
                             f"현재가 {pos.current_price:,} ≤ 트레일가 {_trail_price:,} "
@@ -3979,6 +4006,10 @@ class MainWindow(QMainWindow):
             if entry_time:
                 elapsed_min = (now_dt - entry_time).total_seconds() / 60
                 if elapsed_min >= _time_cut_min:
+                    position_log.info(
+                        "[청산결정:타임컷] %s(%s) 경과=%d분 현재가=%d 수익률=%+.2f%% peak=%d",
+                        pos.name, code, int(elapsed_min), pos.current_price, chg, pos.peak_price,
+                    )
                     self.log_panel.append(
                         f"⏱️ [Time-cut] {pos.name}({code}) {elapsed_min:.0f}분 경과, 수익 {chg:+.2f}% — {sell_qty}주 강제 청산"
                     )
