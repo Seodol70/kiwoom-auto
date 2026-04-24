@@ -1572,6 +1572,9 @@ class ScannerLogger:
     _csv_date   = None          # date | None
     _csv_lock   = threading.Lock()
 
+    # ── 거절 로그 샘플링 (대시보드 속도 개선) ───────────────────────────────────
+    _reject_counter = 0         # rejected() 호출 카운터 (10개마다 1개만 로그)
+
     @classmethod
     def _ensure_csv(cls) -> None:
         """오늘 날짜의 CSV 파일이 열려 있는지 확인하고, 필요하면 열거나 교체한다."""
@@ -1616,10 +1619,14 @@ class ScannerLogger:
     def passed(code: str, name: str, step: str, reason: str) -> None:
         scan_log.info("PASS\t%s\t%s\t%s\t%s", code, name, step, reason)
 
-    @staticmethod
-    def rejected(code: str, name: str, step: str, reason: str) -> None:
-        """일반 탈락 — scanner.log(DEBUG) + 일별 CSV 에 기록."""
-        scan_log.debug("FAIL\t%s\t%s\t%s\t%s", code, name, step, reason)
+    @classmethod
+    def rejected(cls, code: str, name: str, step: str, reason: str) -> None:
+        """일반 탈락 — scanner.log(DEBUG, 10개마다 1개만) + 일별 CSV 에 모두 기록."""
+        # [개선] 거절 로그 샘플링: 10개마다 1개만 scanner.log에 기록 (대시보드 속도 개선)
+        cls._reject_counter += 1
+        if cls._reject_counter % 10 == 0:
+            scan_log.debug("FAIL\t%s\t%s\t%s\t%s", code, name, step, reason)
+        # CSV는 모든 거절 기록 (분석용)
         ScannerLogger._write_csv(code, name, step, reason, near_miss=False)
 
     @staticmethod
