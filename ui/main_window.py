@@ -3264,14 +3264,13 @@ class MainWindow(QMainWindow):
         try:
             # 메인 스레드에서 직접 호출 (QTimer 사용 필요)
             # Fix 2,3으로 락 범위 최소화되어 메인 스레드 블로킹 최소
-            self._smart_scanner.run_periodic_scan(
-                on_progress=self.scan_status.update
-            )
+            # on_progress=None으로 진행 상황 로그 억제 — B안: 신호 발생 시에만 로그 표시
+            self._smart_scanner.run_periodic_scan(on_progress=None)
 
-            # 스캔 완료
-            self.scan_status.done(
-                f"데이터 갱신 완료 / 전체 {len(self._snap_store)}종목 모니터링"
-            )
+            # 스캔 완료 요약 메시지 (진행 상황은 신호 발생 시에만 표시)
+            total_watched = len(self._snap_store)
+            self.log_panel.append(f"[스캔] 완료 — 전체 {total_watched}종목 모니터링")
+            self.scan_status.done(f"완료 / {total_watched}종목")
 
             # 일봉 갱신 대기 목록 처리 — QTimer 체인
             _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))
