@@ -3560,6 +3560,23 @@ class MainWindow(QMainWindow):
         except Exception:
             _calc_atr_fn = None
 
+        # ── 현재 시간 슬롯 감지 (청산 파라미터 오버라이드용) ─────────────────────
+        _now_min = now_dt.hour * 60 + now_dt.minute
+        _is_midday = (11 * 60) <= _now_min < (13 * 60)
+
+        if _is_midday:
+            _eff_sl_pct      = float(getattr(self._scan_cfg, "stop_loss_pct_midday",        self._auto_sl_pct))
+            _eff_trail_act   = float(getattr(self._scan_cfg, "trail_activation_pct_midday",  self._scan_cfg.trail_activation_pct))
+            _eff_trail_tier1 = float(getattr(self._scan_cfg, "trail_pct_tier1_midday",       self._scan_cfg.trail_pct_tier1))
+            _eff_trail_tier2 = float(getattr(self._scan_cfg, "trail_pct_tier2_midday",       self._scan_cfg.trail_pct_tier2))
+            _eff_time_cut    = int(getattr(self._scan_cfg,   "time_cut_minutes_midday",      self._scan_cfg.time_cut_minutes))
+        else:
+            _eff_sl_pct      = self._auto_sl_pct
+            _eff_trail_act   = self._scan_cfg.trail_activation_pct
+            _eff_trail_tier1 = self._scan_cfg.trail_pct_tier1
+            _eff_trail_tier2 = self._scan_cfg.trail_pct_tier2
+            _eff_time_cut    = self._scan_cfg.time_cut_minutes
+
         # ━━━ 포지션별 청산 판정 ━━━
         for code, pos in positions:
             if self.order_mgr.is_pending(code):
@@ -3615,7 +3632,7 @@ class MainWindow(QMainWindow):
                 continue
 
             # ━━━ 손절 ━━━
-            if chg <= self._auto_sl_pct:
+            if chg <= _eff_sl_pct:
                 position_log.info(
                     "[청산결정:손절] %s(%s) 현재가=%d 평단=%d 수익률=%+.2f%% peak=%d",
                     pos.name, code, pos.current_price, pos.avg_price, chg, pos.peak_price,
@@ -3624,7 +3641,7 @@ class MainWindow(QMainWindow):
                     f"🔴 [손절] {pos.name}({code}) 하락률 {chg:+.2f}% — {sell_qty}주 매도"
                 )
                 self._audit.log_sell_decision(
-                    code, f"손절 {chg:+.2f}% (기준 {self._auto_sl_pct:.1f}%)",
+                    code, f"손절 {chg:+.2f}% (기준 {_eff_sl_pct:.1f}%)",
                     pos.current_price,
                 )
                 self.order_mgr.mark_stop_loss(code)
@@ -3696,7 +3713,7 @@ class MainWindow(QMainWindow):
             if pos.peak_price > 0:
                 _peak_chg = (pos.peak_price - pos.avg_price) / pos.avg_price * 100
                 # 신고가 근처 진입 종목의 트레일 활성화 기준도 슬롯별 차등 적용
-                _trail_activation = self._scan_cfg.trail_activation_pct
+                _trail_activation = _eff_trail_act
                 if getattr(pos, "near_daily_high", False):
                     _entry_t = getattr(pos, "entry_time", None)
                     _entry_h = _entry_t.hour * 60 + _entry_t.minute if _entry_t else 0
@@ -3717,14 +3734,14 @@ class MainWindow(QMainWindow):
                         # Strong Trend 포지션: tier1(1.5%) 건너뛰고 tier2(2.5%)부터 시작
                         # → 추세 상승 중 조기 청산 방지, 더 큰 수익 구간 허용
                         if _peak_chg < cfg.trail_tier2_max:
-                            _trail_pct = cfg.trail_pct_tier2
+                            _trail_pct = _eff_trail_tier2
                         else:
                             _trail_pct = cfg.trail_pct_tier3
                     else:
                         if _peak_chg < cfg.trail_tier1_max:
-                            _trail_pct = cfg.trail_pct_tier1
+                            _trail_pct = _eff_trail_tier1
                         elif _peak_chg < cfg.trail_tier2_max:
-                            _trail_pct = cfg.trail_pct_tier2
+                            _trail_pct = _eff_trail_tier2
                         else:
                             _trail_pct = cfg.trail_pct_tier3
 
@@ -3846,7 +3863,7 @@ class MainWindow(QMainWindow):
             )
             if _timecut_exempt:
                 continue
-            _time_cut_min = getattr(self._scan_cfg, "time_cut_minutes", 25)
+            _time_cut_min = _eff_time_cut
             entry_time = getattr(pos, "entry_time", None)
             if entry_time:
                 elapsed_min = (now_dt - entry_time).total_seconds() / 60

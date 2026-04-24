@@ -357,6 +357,12 @@ class SmartScannerConfig:
     ema20_exit_enabled:            bool  = False  # 분봉 EMA20 이탈 시 추세 소멸 청산 (기본 OFF)
     # [NEW] 보유 시간 상한 (타임컷)
     time_cut_minutes:     int   = 25   # 2026-04-13: 40→25 (타임컷 단축 — 추세 꺾인 종목 조기 청산)
+    # [NEW] 시간대별 청산 파라미터 — 점심시간(MIDDAY 11:00~13:00) 저변동성 구간 대응
+    trail_activation_pct_midday: float = 2.5   # 트레일 활성화 기준 완화 (기본 1.5%)
+    trail_pct_tier1_midday:      float = 1.2   # 트레일 Tier1 폭 확대 (기본 0.8%)
+    trail_pct_tier2_midday:      float = 1.8   # 트레일 Tier2 폭 확대 (기본 1.2%)
+    time_cut_minutes_midday:     int   = 30    # 타임컷 완화 (기본 25분)
+    stop_loss_pct_midday:        float = -1.5  # 손절 완화 (기본 -1.2%)
     # [NEW] 전략 실험 옵션
     # 활성 전략 목록: "BREAKOUT", "JDM_ENTRY" 중 선택
     enabled_strategies: tuple[str, ...] = ("BREAKOUT", "JDM_ENTRY")
