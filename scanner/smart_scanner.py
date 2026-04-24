@@ -984,31 +984,48 @@ class SnapshotStore:
                      first.get("volume"), first.get("trade_amount"),
                      first.get("prev_close"), first.get("change_pct"))
 
+        # ① 락 밖에서 DataFrame 준비 및 필터링 (무거운 연산)
         new_df = pd.DataFrame(rows).set_index("code")
         new_df["updated_at"] = datetime.now()
         # 숫자 컬럼 타입 보장
         for col in self._NUM_COLS:
             if col in new_df.columns:
                 new_df[col] = pd.to_numeric(new_df[col], errors="coerce").fillna(0)
+
+        # 중복 인덱스 제거 (락 밖)
+        if not new_df.empty and new_df.index.duplicated().any():
+            new_df = new_df[~new_df.index.duplicated(keep='last')]
+
+        # 제거할 코드 사전 필터링 (락 밖 — map은 느림)
+        codes_to_remove = []
+        if not new_df.empty and "name" in new_df.columns:
+            keep = new_df["name"].astype(str).map(is_pure_equity_name)
+            codes_to_remove = new_df.index[~keep].tolist()
+            new_df = new_df[keep]
+
+        # ② 락 내에서는 병합 + 정리만 (최소 범위)
         with self._lock:
+            # 기존 DataFrame과 병합
             self._df = new_df.combine_first(self._df)
-            for col in self._NUM_COLS:
-                if col in self._df.columns:
-                    self._df[col] = pd.to_numeric(self._df[col], errors="coerce").fillna(0)
-            # [2026-04-03] 중복 인덱스 제거 (같은 code가 여러 줄이면 최신 것만 유지)
-            if not self._df.empty and self._df.index.duplicated().any():
-                self._df = self._df[~self._df.index.duplicated(keep='last')]
-            # 이전 세션에서 남은 ETF 행 제거 (combine_first 로 잔존 가능)
+
+            # 기존 DataFrame에 남은 ETF 행 제거 (combine_first로 잔존 가능)
             if not self._df.empty and "name" in self._df.columns:
                 keep = self._df["name"].astype(str).map(is_pure_equity_name)
-                for c in self._df.index[~keep].tolist():
-                    for d in (self._mins, self._min_opens, self._min_highs, self._min_lows,
-                              self._min_vols, self._cur_open, self._cur_high, self._cur_low,
-                              self._trend_level, self._trend_prev_level,
-                              self._inv_foreign, self._inv_inst, self._inv_score, self._inv_updated_at,
-                              self._tick_ts_vol, self._sector_cache):
-                        d.pop(c, None)
-                self._df = self._df[keep]
+                codes_to_remove.extend(self._df.index[~keep].tolist())
+                if codes_to_remove:
+                    codes_to_remove = list(set(codes_to_remove))  # 중복 제거
+                    self._df = self._df[keep]
+
+            # 제거 코드의 캐시 정리
+            for c in codes_to_remove:
+                for d in (self._mins, self._min_opens, self._min_highs, self._min_lows,
+                          self._min_vols, self._cur_open, self._cur_high, self._cur_low,
+                          self._trend_level, self._trend_prev_level,
+                          self._inv_foreign, self._inv_inst, self._inv_score, self._inv_updated_at,
+                          self._tick_ts_vol, self._sector_cache):
+                    d.pop(c, None)
+
+            # 새 코드에 대한 분봉 초기화
             for code in new_df.index:
                 if code not in self._mins:
                     self._mins[code] = []
@@ -1103,128 +1120,137 @@ class SnapshotStore:
     # ── 조회 ──────────────────────────────────────────────────────────────
 
     def get_snapshot(self, code: str) -> Optional[StockSnapshot]:
-        """단일 종목 스냅샷을 반환한다 (API 호출 없음)."""
+        """단일 종목 스냅샷을 반환한다 (API 호출 없음). 락 범위 최소화 버전."""
+        # ① 락 내에서 필요한 데이터만 복사 (최소 시간)
         with self._lock:
             if code not in self._df.index:
                 return None
             row = self._df.loc[code]
 
-            def safe_int_cell(key: str, default: int = 0) -> int:
-                v = _df_cell_scalar(row.get(key, default), None)
-                if v is None:
-                    return default
-                try:
-                    iv = int(float(v))
-                except (TypeError, ValueError):
-                    return default
-                return iv if iv != 0 else default
+            # 필요한 모든 데이터를 락 내에서 복사
+            row_copy = {k: _df_cell_scalar(row.get(k), None) for k in row.index}
+            closes_list = list(self._mins.get(code, []))
+            opens_list = list(self._min_opens.get(code, []))
+            highs_list = list(self._min_highs.get(code, []))
+            lows_list = list(self._min_lows.get(code, []))
+            vols_list = list(self._min_vols.get(code, []))
+            daily_data_copy = list(self._daily_data.get(code, []))
+            chejan_str = self._chejan_str.get(code, 100.0)
+            sector = self._sector_cache.get(code, "")
+            trend_lv = int(self._trend_level.get(code, 0))
+            trend_prev_lv = int(self._trend_prev_level.get(code, 0))
+            tick_data = dict(self._tick_ts_vol.get(code, {}))
+            inv_foreign = int(self._inv_foreign.get(code, 0))
+            inv_inst = int(self._inv_inst.get(code, 0))
+            inv_score = int(self._inv_score.get(code, 0))
+            inv_updated = self._inv_updated_at.get(code)
 
-            def safe_float_cell(key: str, default: float = 0.0) -> float:
-                v = _df_cell_scalar(row.get(key, default), None)
-                if v is None:
-                    return default
-                try:
-                    fv = float(v)
-                except (TypeError, ValueError):
-                    return default
-                return fv if fv != 0 else default
+        # ② 락 해제 후 무거운 연산 수행
+        def safe_int_cell(key: str, default: int = 0) -> int:
+            v = row_copy.get(key, default)
+            if v is None:
+                return default
+            try:
+                iv = int(float(v))
+            except (TypeError, ValueError):
+                return default
+            return iv if iv != 0 else default
 
-            nm = _df_cell_scalar(row.get("name", ""), "")
-            name_s = str(nm) if nm is not None else ""
+        def safe_float_cell(key: str, default: float = 0.0) -> float:
+            v = row_copy.get(key, default)
+            if v is None:
+                return default
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                return default
+            return fv if fv != 0 else default
 
-            ua_raw = _df_cell_scalar(row.get("updated_at"), None)
-            if isinstance(ua_raw, datetime):
-                updated_at = ua_raw
-            elif ua_raw is not None:
-                try:
-                    updated_at = pd.Timestamp(ua_raw).to_pydatetime()
-                except Exception:
-                    updated_at = datetime.now()
-            else:
+        nm = row_copy.get("name", "")
+        name_s = str(nm) if nm is not None else ""
+
+        ua_raw = row_copy.get("updated_at", None)
+        if isinstance(ua_raw, datetime):
+            updated_at = ua_raw
+        elif ua_raw is not None:
+            try:
+                updated_at = pd.Timestamp(ua_raw).to_pydatetime()
+            except Exception:
                 updated_at = datetime.now()
+        else:
+            updated_at = datetime.now()
 
-            # [NEW] 일봉 데이터 추출 (2026-04-03)
-            daily_data = self._daily_data.get(code, [])
-            daily_closes = [float(c["close"]) for c in daily_data if c.get("close", 0) > 0]
-            daily_high_prev = daily_data[0].get("high", 0) if daily_data else 0
-            daily_low_prev = daily_data[0].get("low", 0) if daily_data else 0
+        # 일봉 데이터 처리
+        daily_closes = [float(c["close"]) for c in daily_data_copy if c.get("close", 0) > 0]
+        daily_high_prev = daily_data_copy[0].get("high", 0) if daily_data_copy else 0
+        daily_low_prev = daily_data_copy[0].get("low", 0) if daily_data_copy else 0
 
-            # 일봉 정배열 캐시 (5MA>10MA>20MA) — prefilter에서 재계산 없이 바로 사용
-            from strategy.jang_dong_min import check_daily_alignment as _cda, calc_rsi as _calc_rsi
-            _is_daily_bull = _cda(daily_closes) if len(daily_closes) >= 20 else False
+        # 일봉 정배열 판정 (락 해제 후)
+        from strategy.jang_dong_min import check_daily_alignment as _cda, calc_rsi as _calc_rsi
+        _is_daily_bull = _cda(daily_closes) if len(daily_closes) >= 20 else False
 
-            # RSI14 캐시 — closes_1min 15개 이상일 때만 계산 (부족 시 0.0 → 필터 스킵)
-            _closes_now = list(self._mins.get(code, []))
-            _rsi_cached = 0.0
-            if len(_closes_now) >= 15:
-                try:
-                    _r = _calc_rsi(_closes_now, 14)
-                    if _r is not None and _r > 0:
-                        _rsi_cached = float(_r)
-                except Exception:
-                    pass
+        # RSI14 계산 (락 해제 후)
+        _rsi_cached = 0.0
+        if len(closes_list) >= 15:
+            try:
+                _r = _calc_rsi(closes_list, 14)
+                if _r is not None and _r > 0:
+                    _rsi_cached = float(_r)
+            except Exception:
+                pass
 
-            # [NEW] 체결 가속도 비율 계산
-            # · 10초 체결량 = 지금 누적 거래량 - 10초 전 누적 거래량
-            # · 비교 기준 = 직전 5개 1분봉 평균량 / 6 (60s ÷ 10s = 6구간)
-            _exec_vel_ratio = 0.0
-            _tq_snap = self._tick_ts_vol.get(code)
-            if _tq_snap and len(_tq_snap) >= 2:
-                _now_ts = time.monotonic()
-                _cutoff_10s = _now_ts - 10.0
-                _vol_now = _tq_snap[-1][1]
-                _vol_before_10s = _tq_snap[0][1]  # 기본: 데크 최초값
-                for _ts_e, _vol_e in _tq_snap:
-                    if _ts_e < _cutoff_10s:
-                        _vol_before_10s = _vol_e
-                _vol_10s = max(0, _vol_now - _vol_before_10s)
-                _min_vols_snap = self._min_vols.get(code, [])
-                if _min_vols_snap and _vol_10s > 0:
-                    _recent_mv = _min_vols_snap[-min(5, len(_min_vols_snap)):]
-                    _avg_per_min = sum(_recent_mv) / len(_recent_mv) if _recent_mv else 0
-                    _avg_per_10s = _avg_per_min / 6.0
-                    if _avg_per_10s > 0:
-                        _exec_vel_ratio = _vol_10s / _avg_per_10s
-                        logger.debug(
-                            "[VEL계산] %s vol_10s=%d avg_per_10s=%.1f ratio=%.2f",
-                            code, _vol_10s, _avg_per_10s, _exec_vel_ratio,
-                        )
+        # 체결 가속도 비율 계산 (락 해제 후)
+        _exec_vel_ratio = 0.0
+        if tick_data and len(tick_data) >= 2:
+            _now_ts = time.monotonic()
+            _cutoff_10s = _now_ts - 10.0
+            _tick_list = list(tick_data.items())
+            _vol_now = _tick_list[-1][1]
+            _vol_before_10s = _tick_list[0][1]
+            for _ts_e, _vol_e in _tick_list:
+                if _ts_e < _cutoff_10s:
+                    _vol_before_10s = _vol_e
+            _vol_10s = max(0, _vol_now - _vol_before_10s)
+            if vols_list and _vol_10s > 0:
+                _recent_mv = vols_list[-min(5, len(vols_list)):]
+                _avg_per_min = sum(_recent_mv) / len(_recent_mv) if _recent_mv else 0
+                _avg_per_10s = _avg_per_min / 6.0
+                if _avg_per_10s > 0:
+                    _exec_vel_ratio = _vol_10s / _avg_per_10s
 
-            _sector_snap = self._sector_cache.get(code, "")
-
-            return StockSnapshot(
-                code          = code,
-                name          = name_s,
-                current_price = safe_int_cell("current_price", 0),
-                open_price    = safe_int_cell("open_price",    0),
-                high_price    = safe_int_cell("high_price",    0),
-                low_price     = safe_int_cell("low_price",     0),
-                volume        = safe_int_cell("volume",        0),
-                trade_amount  = safe_int_cell("trade_amount",  0),
-                prev_close    = safe_int_cell("prev_close",    0),
-                change_pct    = safe_float_cell("change_pct",  0.0),
-                closes_1min   = list(self._mins.get(code, [])),
-                opens_1min    = list(self._min_opens.get(code, [])),
-                highs_1min    = list(self._min_highs.get(code, [])),
-                lows_1min     = list(self._min_lows.get(code,  [])),
-                chejan_strength = self._chejan_str.get(code, 100.0),  # [NEW]
-                volumes_1min    = list(self._min_vols.get(code, [])),  # [NEW]
-                daily_closes  = daily_closes,  # [NEW] 일봉 종가 리스트 (최신순)
-                daily_high_prev = daily_high_prev,  # [NEW] 전일 고가
-                daily_low_prev  = daily_low_prev,   # [NEW] 전일 저가
-                foreign_net_buy = int(self._inv_foreign.get(code, 0)),
-                inst_net_buy    = int(self._inv_inst.get(code, 0)),
-                investor_score  = int(self._inv_score.get(code, 0)),
-                investor_updated_at = self._inv_updated_at.get(code),
-                trend_level      = int(self._trend_level.get(code, 0)),
-                trend_prev_level = int(self._trend_prev_level.get(code, 0)),
-                is_daily_bull    = _is_daily_bull,
-                rank             = safe_int_cell("rank", 0),
-                rsi              = _rsi_cached,
-                updated_at       = updated_at,
-                exec_velocity_ratio = _exec_vel_ratio,
-                sector              = _sector_snap,
-            )
+        return StockSnapshot(
+            code          = code,
+            name          = name_s,
+            current_price = safe_int_cell("current_price", 0),
+            open_price    = safe_int_cell("open_price",    0),
+            high_price    = safe_int_cell("high_price",    0),
+            low_price     = safe_int_cell("low_price",     0),
+            volume        = safe_int_cell("volume",        0),
+            trade_amount  = safe_int_cell("trade_amount",  0),
+            prev_close    = safe_int_cell("prev_close",    0),
+            change_pct    = safe_float_cell("change_pct",  0.0),
+            closes_1min   = closes_list,
+            opens_1min    = opens_list,
+            highs_1min    = highs_list,
+            lows_1min     = lows_list,
+            chejan_strength = chejan_str,
+            volumes_1min    = vols_list,
+            daily_closes  = daily_closes,
+            daily_high_prev = daily_high_prev,
+            daily_low_prev  = daily_low_prev,
+            foreign_net_buy = inv_foreign,
+            inst_net_buy    = inv_inst,
+            investor_score  = inv_score,
+            investor_updated_at = inv_updated,
+            trend_level      = trend_lv,
+            trend_prev_level = trend_prev_lv,
+            is_daily_bull    = _is_daily_bull,
+            rank             = safe_int_cell("rank", 0),
+            rsi              = _rsi_cached,
+            updated_at       = updated_at,
+            exec_velocity_ratio = _exec_vel_ratio,
+            sector              = sector,
+        )
 
     def update_trend_level(self, code: str, trend_level: int) -> None:
         """요셉 시그널 추세 레벨 갱신(0~3). 직전 단계도 함께 보관."""
@@ -3506,7 +3532,11 @@ class SmartScanner:
         self.display.alert(sig)
 
         if self.on_signal:
-            self.on_signal(sig)
+            if threading.current_thread() is threading.main_thread():
+                self.on_signal(sig)
+            else:
+                # ScanLoop 스레드 → 메인 스레드로 안전 위임
+                QTimer.singleShot(0, lambda s=sig: self.on_signal(s))
 
     # -----------------------------------------------------------------------
     # 실시간 데이터 콜백
