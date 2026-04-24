@@ -3632,7 +3632,10 @@ class MainWindow(QMainWindow):
                 continue
 
             # ━━━ 손절 ━━━
-            if chg <= _eff_sl_pct:
+            # EOD 포지션은 당일 손절 제외 — 익일 갭 체크(09:00) 및 타임컷(09:30)으로 관리
+            _is_eod_pre_gap = (getattr(pos, "eod_trade", False)
+                               and not getattr(pos, "overnight_held", False))
+            if not _is_eod_pre_gap and chg <= _eff_sl_pct:
                 position_log.info(
                     "[청산결정:손절] %s(%s) 현재가=%d 평단=%d 수익률=%+.2f%% peak=%d",
                     pos.name, code, pos.current_price, pos.avg_price, chg, pos.peak_price,
@@ -3710,7 +3713,10 @@ class MainWindow(QMainWindow):
                     continue
 
             # ━━━ 트레일 스탑: 고점 대비 하락 시 전량 청산 ━━━
-            if pos.peak_price > 0:
+            # EOD 포지션은 당일 트레일 제외 — 익일 갭 체크(09:00) 및 타임컷(09:30)으로 관리
+            _is_eod_pre_gap_trail = (getattr(pos, "eod_trade", False)
+                                     and not getattr(pos, "overnight_held", False))
+            if not _is_eod_pre_gap_trail and pos.peak_price > 0:
                 _peak_chg = (pos.peak_price - pos.avg_price) / pos.avg_price * 100
                 # 신고가 근처 진입 종목의 트레일 활성화 기준도 슬롯별 차등 적용
                 _trail_activation = _eff_trail_act
