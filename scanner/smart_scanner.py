@@ -3813,25 +3813,28 @@ class SmartScanner:
         #              캐시 없으면 fallback 대체 + 백그라운드 갱신 시작
         _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "opt10030 조회 중...")
 
-        # 캐시된 결과 또는 fallback 사용 (메인 스레드 블로킹 없음)
+        # 캐시된 결과 또는 즉시 조회 (run_periodic_scan은 백그라운드 스레드이므로 동기 OK)
         cache_age = time.monotonic() - self._last_volume_updated
-        if self._last_volume_rows:
+        if self._last_volume_rows and cache_age < 300.0:  # 5분 이내 캐시
             rows = self._last_volume_rows[:]
             logger.info("[주기 스캔] 캐시된 opt10030 결과 사용 (나이 %.1fs, %d종목)", cache_age, len(rows))
         else:
-            # 캐시 없음: fallback 사용 (최초 실행 또는 첫 시작)
-            rows = [
-                {"code": "005930", "name": "삼성전자",        "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                {"code": "000660", "name": "SK하이닉스",       "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                {"code": "207940", "name": "삼성바이오로직스",  "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                {"code": "005380", "name": "현대차",           "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                {"code": "373220", "name": "LG에너지솔루션",   "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            ]
-            logger.warning("[주기 스캔] 캐시 없음 — fallback 대체 (%d종목) + 백그라운드 갱신 예약", len(rows))
-
-        # 백그라운드에서 opt10030 갱신 (메인 스레드 블로킹 없음)
-        # — 다음 사이클부터 갱신된 결과 캐시 사용 가능
-        QTimer.singleShot(100, self._bg_fetch_opt10030)
+            # 캐시 없음 또는 만료: 즉시 opt10030 조회 (백그라운드 스레드이므로 블로킹 무해)
+            logger.info("[주기 스캔] opt10030 즉시 조회 (캐시나이 %.1fs)", cache_age)
+            rows = self._fetch_top_volume_rows(
+                target=self.cfg.collect_raw_top_n,
+                on_progress=_prog
+            )
+            if not rows:
+                # 조회 실패 시에만 fallback (최후의 수단)
+                logger.warning("[주기 스캔] opt10030 조회 실패 — fallback 5대장 대체")
+                rows = [
+                    {"code": "005930", "name": "삼성전자",        "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                    {"code": "000660", "name": "SK하이닉스",       "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                    {"code": "207940", "name": "삼성바이오로직스",  "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                    {"code": "005380", "name": "현대차",           "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                    {"code": "373220", "name": "LG에너지솔루션",   "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+                ]
         rows, _ = filter_equity_rows(rows)
         mc = self.cfg.max_change_pct
         _n0 = len(rows)
