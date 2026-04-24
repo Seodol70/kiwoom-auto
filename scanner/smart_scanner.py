@@ -2208,20 +2208,7 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: SmartScannerConfig) -> Optio
         None   → 진입 거부 (ScannerLogger 에 이유 기록됨)
         reason → 거부 없음 (추가 필터 통과 이유 문자열)
     """
-    # ① 지수 등락률 완전 차단
-    _block_pct  = getattr(cfg, "index_block_pct", -1.5)
-    _kospi_chg  = getattr(cfg, "kospi_chg_pct",   0.0)
-    _kosdaq_chg = getattr(cfg, "kosdaq_chg_pct",  0.0)
-    if _kospi_chg <= _block_pct:
-        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_INDEX",
-            f"코스피 하락 차단 — {_kospi_chg:+.2f}% ≤ {_block_pct:.1f}%")
-        return None
-    if _kosdaq_chg <= _block_pct:
-        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_INDEX",
-            f"코스닥 하락 차단 — {_kosdaq_chg:+.2f}% ≤ {_block_pct:.1f}%")
-        return None
-
-    # ② 진입 허용 시각
+    # ① 진입 허용 시각
     now = datetime.now().time()
     if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
         ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_TIME",
@@ -2237,14 +2224,8 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: SmartScannerConfig) -> Optio
             f"[{_slot}] 등락률 {_snap_chg:.2f}% ≥ 구간 상한 {_eff_ch_max:.0f}%")
         return None
 
-    # ④ 시간대 슬롯 기반 체결강도 (공포 장세 상향 포함)
+    # ④ 시간대 슬롯 기반 체결강도
     _eff_chejan = _get_slot_value(_slot, cfg, "min_chejan_strength", cfg.min_chejan_strength)
-    _fear_pct    = getattr(cfg, "market_fear_pct",    -1.0)
-    _fear_chejan = getattr(cfg, "market_fear_chejan", 140.0)
-    if (_kospi_chg <= _fear_pct or _kosdaq_chg <= _fear_pct) and _eff_chejan < _fear_chejan:
-        logger.debug("[BREAKOUT_GATE] %s(%s) 공포 장세 → 체결강도 기준 %.0f%% → %.0f%%",
-                     snap.name, snap.code, _eff_chejan, _fear_chejan)
-        _eff_chejan = _fear_chejan
     if snap.chejan_strength < _eff_chejan:
         ScannerLogger.near_miss(
             snap.code, snap.name, "BREAKOUT_CHEJAN",
@@ -2329,18 +2310,6 @@ def check_pre_surge(
       ③ 체결강도 ≥ pre_surge_chejan_min
       ④ 거래량 > 0
     """
-    _block_pct  = getattr(cfg, "index_block_pct",   -1.5)
-    _kospi_chg  = getattr(cfg, "kospi_chg_pct",      0.0)
-    _kosdaq_chg = getattr(cfg, "kosdaq_chg_pct",     0.0)
-    if _kospi_chg <= _block_pct:
-        ScannerLogger.rejected(snap.code, snap.name, "PRE_SURGE",
-            f"코스피 하락 차단 — {_kospi_chg:+.2f}% ≤ {_block_pct:.1f}%")
-        return None
-    if _kosdaq_chg <= _block_pct:
-        ScannerLogger.rejected(snap.code, snap.name, "PRE_SURGE",
-            f"코스닥 하락 차단 — {_kosdaq_chg:+.2f}% ≤ {_block_pct:.1f}%")
-        return None
-
     chg     = float(snap.change_pct or 0)
     chg_min = getattr(cfg, "pre_surge_chg_min",  2.0)
     chg_max = getattr(cfg, "pre_surge_chg_max", 20.0)
@@ -2406,18 +2375,6 @@ def check_opening_surge(
       ④ 체결강도 ≥ opening_surge_chejan_min
       ⑤ 최근 1분 거래량 ≥ 직전 평균 × opening_surge_vol_mult (데이터 있을 때만)
     """
-    _block_pct  = getattr(cfg, "index_block_pct",   -1.5)
-    _kospi_chg  = getattr(cfg, "kospi_chg_pct",      0.0)
-    _kosdaq_chg = getattr(cfg, "kosdaq_chg_pct",     0.0)
-    if _kospi_chg <= _block_pct:
-        ScannerLogger.rejected(snap.code, snap.name, "OPENING_SURGE",
-            f"코스피 하락 차단 — {_kospi_chg:+.2f}%")
-        return None
-    if _kosdaq_chg <= _block_pct:
-        ScannerLogger.rejected(snap.code, snap.name, "OPENING_SURGE",
-            f"코스닥 하락 차단 — {_kosdaq_chg:+.2f}%")
-        return None
-
     # 시가 대비 상승 상한 (OPENING 전용 완화값)
     surge_max = getattr(cfg, "entry_open_surge_max_opening",
                         getattr(cfg, "entry_open_surge_max", 7.0))
@@ -2653,22 +2610,6 @@ def check_jdm_entry(
     ⑤ MA 골든크로스 + 단·장기 이격 jdm_min_ma_spread_abs 원 이상
     ⑥ RSI ∈ [jdm_rsi_entry_min, jdm_rsi_high)
     """
-    # [NEW] 2026-04-07 지수 등락률 차단 — 시장 전체 하락 시 신규 진입 금지
-    _block_pct   = getattr(cfg, "index_block_pct",  -1.5)
-    _kospi_chg   = getattr(cfg, "kospi_chg_pct",     0.0)
-    _kosdaq_chg  = getattr(cfg, "kosdaq_chg_pct",    0.0)
-    if _kospi_chg <= _block_pct:
-        ScannerLogger.rejected(
-            snap.code, snap.name, "JDM_INDEX",
-            f"코스피 하락 차단 — {_kospi_chg:+.2f}% ≤ {_block_pct:.1f}%",
-        )
-        return None
-    if _kosdaq_chg <= _block_pct:
-        ScannerLogger.rejected(
-            snap.code, snap.name, "JDM_INDEX",
-            f"코스닥 하락 차단 — {_kosdaq_chg:+.2f}% ≤ {_block_pct:.1f}%",
-        )
-        return None
 
     # [NEW] 2026-04-03 수급 절대치 필터 — 소외주 거르기
     # 조건 A: 거래대금 상위 50위 이내 (rank 우선)
@@ -2750,23 +2691,6 @@ def check_jdm_entry(
     if _scoring_bonus:
         _eff_rsi_min = min(_eff_rsi_min, 40.0)  # 스코어링: RSI 하한 40.0% 로 완화
         _eff_ma_spread = min(_eff_ma_spread, 0.10) # 스코어링: 이격도 0.10% 로 완화
-
-    # ── Safety Filter ① 공포 장세 체결강도 상향 ────────────────────────────
-    # 지수가 market_fear_pct(기본 -1%) 이하로 하락 중이면 체결강도 기준을 강화.
-    # index_block_pct(-1.5%)까지는 차단하지 않고 조건만 더 까다롭게 적용.
-    _fear_pct    = getattr(cfg, "market_fear_pct",    -1.0)
-    _fear_chejan = getattr(cfg, "market_fear_chejan", 140.0)
-    _is_fear = (_kospi_chg <= _fear_pct) or (_kosdaq_chg <= _fear_pct)
-    if _is_fear and _eff_chejan < _fear_chejan:
-        _prev_chejan = _eff_chejan
-        _eff_chejan  = _fear_chejan
-        # 차단은 하지 않고 기준 상향만 — 이후 체결강도 체크에서 판정
-        # FEAR 상황 자체는 INFO 로 기록해 튜닝 데이터에 포함
-        scan_log.info(
-            "FEAR\t%s\t%s\tJDM_FEAR\t공포 장세 감지 (코스피 %+.2f%% / 코스닥 %+.2f%%) "
-            "→ 체결강도 기준 %.0f%% → %.0f%% 상향",
-            snap.code, snap.name, _kospi_chg, _kosdaq_chg, _prev_chejan, _eff_chejan,
-        )
 
     # 구간별 등락률 상한 체크 (prefilter 이후 2차 보호)
     # 단, 추세 레벨 ≥ surge_trend_override_level 이면 surge_trend_max_pct까지 완화
@@ -3590,24 +3514,10 @@ class SmartScanner:
 
     def _connect_realtime_signal(self) -> None:
         self._kiwoom._ocx.OnReceiveRealData.connect(self._on_receive_real_data)
-        # 코스피(001)/코스닥(101) 업종지수 실시간 구독 — opt20001 TR 폴링 의존 제거
-        try:
-            self._kiwoom._ocx.dynamicCall(
-                "SetRealReg(QString, QString, QString, QString)",
-                ["9050", "001;101", "10;11;12;25", "0"],
-            )
-            logger.info("[업종지수 실시간] 코스피·코스닥 SetRealReg 등록 완료")
-        except Exception as _e:
-            logger.warning("[업종지수 실시간] SetRealReg 실패 — opt20001 폴백 유지: %s", _e)
 
     def _on_receive_real_data(
         self, code: str, real_type: str, real_data: str
     ) -> None:
-        # ── 업종지수 실시간 (코스피 001 / 코스닥 101) ─────────────────────────
-        if real_type == "업종지수":
-            self._handle_index_realtime(code)
-            return
-
         if real_type not in ("주식체결",):
             return
 
@@ -3668,23 +3578,8 @@ class SmartScanner:
             logger.debug("실시간 파싱 오류 — %s: %s", code, e)
 
     def _handle_index_realtime(self, idx_code: str) -> None:
-        """업종지수 실시간 틱 처리 — TR 호출 없이 헤더 지수를 즉시 갱신한다."""
-        try:
-            from kiwoom_api import safe_float
-            def fid(n: int) -> str:
-                return self._kiwoom._ocx.dynamicCall(
-                    "GetCommRealData(QString, int)", [idx_code, n]
-                )
-            raw_cur = safe_float(fid(10))
-            # 키움 opt20001과 동일: 10,000 초과 시 ×100 보정 (소수점 2자리 정수화)
-            current = raw_cur / 100.0 if raw_cur > 10_000 else raw_cur
-            chg_pct = safe_float(fid(12))
-            if current <= 0:
-                return
-            if self.on_index_update:
-                self.on_index_update(idx_code, current, chg_pct)
-        except Exception as e:
-            logger.debug("[업종지수 실시간] %s 파싱 오류: %s", idx_code, e)
+        """지수 로직 비활성화 — 장초반 TR 부하 제거"""
+        return
 
     # -----------------------------------------------------------------------
     # 헬퍼

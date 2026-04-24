@@ -2381,7 +2381,6 @@ class MainWindow(QMainWindow):
         self._kiwoom._account   = self.login_mgr.account
         self.order_mgr._account = self.login_mgr.account
 
-        # 업종지수 실시간 콜백 연결 — opt20001 TR 폴링 대신 SetRealReg 구독 결과를 받음
         self._smart_scanner.on_index_update = self._on_realtime_index
 
         # [NEW] 포지션 실시간 현재가 갱신 + 동적 감시 중단/재개 콜백 연결
@@ -2572,143 +2571,13 @@ class MainWindow(QMainWindow):
                 self._kiwoom.auto_reconnect()
 
     def _on_realtime_index(self, idx_code: str, current: float, chg_pct: float) -> None:
-        """
-        SmartScanner._handle_index_realtime → 업종지수 실시간 틱 콜백.
-        TR 호출 없이 헤더 지수를 즉시 갱신하고 급락 감지 cfg를 업데이트한다.
-        """
-        if not hasattr(self, "_realtime_index"):
-            self._realtime_index: dict = {}
-        self._realtime_index[idx_code] = (current, chg_pct)
-
-        # cfg 등락률 갱신 — check_jdm_entry / check_breakout 급락 차단에 사용
-        if idx_code == "001":
-            self._scan_cfg.kospi_chg_pct  = chg_pct
-        else:
-            self._scan_cfg.kosdaq_chg_pct = chg_pct
-
-        # 헤더 지수 표시 — 코스피·코스닥 둘 다 수신된 후 갱신
-        if "001" in self._realtime_index and "101" in self._realtime_index:
-            k_cur, k_chg = self._realtime_index["001"]
-            d_cur, d_chg = self._realtime_index["101"]
-            self.header.set_index(k_cur, k_chg, d_cur, d_chg)
-
-        # 급락 감지 — 자동매매 ON + 장중에만 수행
-        from datetime import datetime as _dt2, time as _tc2
-        from config import RISK as _RISK2
-        import time as _time2
-        now_t = _dt2.now().time()
-        in_market = _tc2(9, 1) <= now_t < _tc2(15, 20)
-        if (in_market and self._auto_trading and not self._market_crash_off
-                and _time2.monotonic() >= getattr(self, "_sl_tp_warmup_end", 0.0)):
-            crash_threshold = float(_RISK2.get("market_crash_pct", -2.0))
-            if chg_pct <= crash_threshold:
-                idx_name = "코스피" if idx_code == "001" else "코스닥"
-                self.header._btn_auto.setChecked(False)
-                self.header._on_auto_clicked(False)
-                self._market_crash_off = True
-                msg = (f"[급락감지] {idx_name} {chg_pct:+.2f}% ≤ {crash_threshold:.1f}%\n"
-                       f"→ 자동매매 OFF (수동으로 재개하세요)")
-                self.log_panel.append(f"🚨 {msg}")
-                logger.warning(msg)
-                if self._tg:
-                    self._tg.send(f"🚨 {msg}")
+        """지수 로직 비활성화 — TR 부하 제거"""
+        return
 
     @pyqtSlot()
     def _check_market_crash(self) -> None:
-        """
-        60초마다 코스피·코스닥 지수 조회.
-        - 헤더 지수 표시: 자동매매 OFF 상태에서도 항상 갱신
-        - 급락 감지(crash) 및 cfg 등락률 갱신: 자동매매 ON + 장중에만 수행
-        """
-        import time as _time
-        from datetime import datetime as _dt, time as _time_cls
-        from config import RISK as _RISK
-
-        # 다른 TR 진행 중이면 스킵 — 다음 60s 틱에서 재시도 (QTimer 재귀 호출 방지)
-        if getattr(self._kiwoom, "_tr_busy", False):
-            return
-
-        # 이 함수 자체 재진입 방지
-        if getattr(self, "_crash_checking", False):
-            return
-        self._crash_checking = True
-        try:
-            now_t = _dt.now().time()
-            in_market = _time_cls(9, 1) <= now_t < _time_cls(15, 20)
-
-            # 급락 감지 조건 (자동매매 ON + 장중 + warmup 종료 + 이미 OFF 아닐 때)
-            do_crash_check = (
-                in_market
-                and self._auto_trading
-                and not self._market_crash_off
-                and _time.monotonic() >= getattr(self, "_sl_tp_warmup_end", 0.0)
-            )
-
-            crash_threshold: float = float(_RISK.get("market_crash_pct", -2.0))
-
-            # 헤더 표시용 수집 변수
-            _idx_display: dict = {}  # idx_code → (current, chg_pct)
-
-            # 코스피(001), 코스닥(101) 순서로 조회
-            for idx_code, idx_name in (("001", "코스피"), ("101", "코스닥")):
-                try:
-                    info = self._kiwoom.get_index_info(idx_code)
-                except Exception as e:
-                    logger.warning("[지수조회] %s 실패: %s", idx_name, e)
-                    continue
-
-                if info is None:
-                    logger.debug("[지수조회] %s(%s) 응답 없음 — 스킵", idx_name, idx_code)
-                    continue
-
-                chg_pct: float = info["change_pct"]
-                _idx_display[idx_code] = (info.get("current", 0.0), chg_pct)
-
-                if do_crash_check:
-                    # ── cfg에 최신 등락률 갱신 → check_jdm_entry()가 읽어 신호 차단에 사용 ──
-                    if idx_code == "001":
-                        self._scan_cfg.kospi_chg_pct  = chg_pct
-                    else:
-                        self._scan_cfg.kosdaq_chg_pct = chg_pct
-
-                    block_threshold: float = float(_RISK.get("market_index_block_pct", -1.5))
-                    logger.debug(
-                        "[지수모니터] %s(%s) %.2f%% (진입차단=%.1f%% / OFF기준=%.1f%%)",
-                        idx_name, idx_code, chg_pct, block_threshold, crash_threshold,
-                    )
-
-                    if block_threshold < chg_pct <= 0 and chg_pct <= block_threshold + 0.5:
-                        logger.info(
-                            "[지수모니터] %s %.2f%% — 진입 차단 구간 접근 중 (차단: %.1f%%)",
-                            idx_name, chg_pct, block_threshold,
-                        )
-
-                    if chg_pct <= crash_threshold:
-                        self.header._btn_auto.setChecked(False)
-                        self.header._on_auto_clicked(False)
-                        self._market_crash_off = True
-
-                        msg = (
-                            f"[급락감지] {idx_name} {chg_pct:+.2f}% ≤ {crash_threshold:.1f}%\n"
-                            f"→ 자동매매 OFF (수동으로 재개하세요)"
-                        )
-                        self.log_panel.append(f"🚨 {msg}")
-                        logger.warning(msg)
-
-                        if self._tg:
-                            self._tg.send(f"🚨 {msg}")
-
-                        break  # 코스피·코스닥 중복 OFF 방지
-
-            # 헤더 지수 표시는 실시간 콜백(_on_realtime_index)이 담당.
-            # 여기서는 실시간 구독이 아직 없는 경우(예: 장 전)에만 fallback 갱신.
-            if "001" in _idx_display and "101" in _idx_display:
-                if not getattr(self, "_realtime_index", {}):
-                    k_cur, k_chg = _idx_display["001"]
-                    d_cur, d_chg = _idx_display["101"]
-                    self.header.set_index(k_cur, k_chg, d_cur, d_chg)
-        finally:
-            self._crash_checking = False
+        """지수 조회 비활성화 — TR 부하 제거. 급락 감지 미사용."""
+        return
 
     @pyqtSlot()
     def _check_market_time(self) -> None:
