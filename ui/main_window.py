@@ -3261,10 +3261,16 @@ class MainWindow(QMainWindow):
         self.log_panel.append(f"[스캔] 주기 스캔 시작 — {datetime.now():%H:%M:%S}")
         self.scan_status.reset()
 
-        # on_progress 콜백을 메인 스레드로 안전하게 위임
+        # on_progress 콜백을 메인 스레드로 안전하게 처리
+        # — 메인 스레드면 직접 호출 (빠름), 백그라운드면 QTimer.singleShot 위임
         def _safe_progress(phase, current, total, detail=""):
-            QTimer.singleShot(0,
-                lambda: self.scan_status.update(phase, current, total, detail))
+            if threading.current_thread() is threading.main_thread():
+                # 메인 스레드: 직접 호출 (UI 즉시 업데이트)
+                self.scan_status.update(phase, current, total, detail)
+            else:
+                # 백그라운드 스레드: Qt 큐에 넣기
+                QTimer.singleShot(0,
+                    lambda: self.scan_status.update(phase, current, total, detail))
 
         def _bg_scan():
             try:
