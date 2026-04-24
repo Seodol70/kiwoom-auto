@@ -571,7 +571,9 @@ class ScannerWorker(QObject):
                 _log.debug("[ScannerWorker] watch_list_updated %d종목 (신호 %d개)", len(rows), signal_cnt)
 
             elapsed = time.monotonic() - t0
-            time.sleep(max(0.0, self._cfg.scan_interval - elapsed))
+            # scan_interval은 opt10030 주기 스캔 간격 (60s) — 신호 감지 루프와 무관
+            # ScannerWorker는 1초마다 실행하여 신호/추세 판단을 빠르게 유지
+            time.sleep(max(0.0, 1.0 - elapsed))
 
     def stop(self) -> None:
         self._running = False
