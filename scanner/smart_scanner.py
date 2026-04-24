@@ -388,7 +388,7 @@ class SmartScannerConfig:
     surge_trend_max_pct:        float = 15.0  # 추세 확인 시 허용 상한 (%) — 기본 15%
 
     # ── 수급 필터 (외국인/기관 순매수, opt10059) ──────────────────────────────
-    investor_filter_enabled: bool  = True   # 수급 필터 활성화 여부
+    investor_filter_enabled: bool  = False  # 수급 필터 비활성화 — opt10059 TR이 메인스레드 30초 블로킹 유발 (15종목×2s)
     investor_refresh_min:    int   = 10     # opt10059 갱신 주기 (분)
     investor_top_n:          int   = 15     # 수급 조회 대상 상위 N종목 (30→15, TR 부하 절반)
     # score +1 종목: 쿨다운 유지 (우선 처리)
