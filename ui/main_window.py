@@ -3261,44 +3261,29 @@ class MainWindow(QMainWindow):
         self.log_panel.append(f"[스캔] 주기 스캔 시작 — {datetime.now():%H:%M:%S}")
         self.scan_status.reset()
 
-        # on_progress 콜백을 메인 스레드로 안전하게 처리
-        # — 메인 스레드면 직접 호출 (빠름), 백그라운드면 QTimer.singleShot 위임
-        def _safe_progress(phase, current, total, detail=""):
-            if threading.current_thread() is threading.main_thread():
-                # 메인 스레드: 직접 호출 (UI 즉시 업데이트)
-                self.scan_status.update(phase, current, total, detail)
-            else:
-                # 백그라운드 스레드: Qt 큐에 넣기
-                QTimer.singleShot(0,
-                    lambda: self.scan_status.update(phase, current, total, detail))
+        try:
+            # 메인 스레드에서 직접 호출 (QTimer 사용 필요)
+            # Fix 2,3으로 락 범위 최소화되어 메인 스레드 블로킹 최소
+            self._smart_scanner.run_periodic_scan(
+                on_progress=self.scan_status.update
+            )
 
-        def _bg_scan():
-            try:
-                self._smart_scanner.run_periodic_scan(
-                    on_progress=_safe_progress
-                )
-                # 스캔 완료 메시지 — 메인 스레드에서 처리
-                QTimer.singleShot(0, lambda: self.scan_status.done(
-                    f"데이터 갱신 완료 / 전체 {len(self._snap_store)}종목 모니터링"
-                ))
+            # 스캔 완료
+            self.scan_status.done(
+                f"데이터 갱신 완료 / 전체 {len(self._snap_store)}종목 모니터링"
+            )
 
-                # 일봉 갱신 대기 목록 처리 — 메인 스레드로 위임
-                _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))
-                if _pending:
-                    self._smart_scanner._daily_refresh_pending = []
-                    QTimer.singleShot(500, lambda codes=_pending: self._daily_candle_chain(codes, 0))
-            except Exception as e:
-                _logger.exception("[스캔] run_periodic_scan 오류")
-                QTimer.singleShot(0, lambda: (
-                    self.log_panel.append(f"[스캔 오류] {e}"),
-                    self.scan_status.done(f"오류: {e}")
-                ))
-            finally:
-                self._scan_in_progress = False
-
-        # 백그라운드 스레드에서 스캔 실행 (메인 스레드 블로킹 없음)
-        t = threading.Thread(target=_bg_scan, daemon=True, name="PeriodicScan")
-        t.start()
+            # 일봉 갱신 대기 목록 처리 — QTimer 체인
+            _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))
+            if _pending:
+                self._smart_scanner._daily_refresh_pending = []
+                QTimer.singleShot(500, lambda codes=_pending: self._daily_candle_chain(codes, 0))
+        except Exception as e:
+            _logger.exception("[스캔] run_periodic_scan 오류")
+            self.log_panel.append(f"[스캔 오류] {e}")
+            self.scan_status.done(f"오류: {e}")
+        finally:
+            self._scan_in_progress = False
 
     def _daily_candle_chain(self, codes: list, idx: int) -> None:
         """
