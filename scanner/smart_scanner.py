@@ -3337,9 +3337,8 @@ class SmartScanner:
                 f"현재가 {row.get('current_price', 0):,}원"
             )
 
-            ScannerLogger.passed(
-                row["code"], row.get("name", ""), "PRE_FILTER", log_msg
-            )
+            # ScannerLogger.passed() 로그 억제 — 통과 종목 로그로 대시보드 과부하 방지 (2026-04-24)
+            # 신호 발생/탈락만 기록 (SIGNAL/NEAR/FAIL 로그는 유지)
 
             if idx % 10 == 0 or idx <= 5:
                 logger.info("  ✓ [%3d] %s(%s) %s",
