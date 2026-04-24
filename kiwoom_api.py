@@ -830,12 +830,15 @@ class KiwoomManager:
                 logger.error("CommRqData 실패 — tr=%s ret=%d", tr_code, ret)
                 return False
             self._tr_loop = QEventLoop()
-            timer = QTimer()
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._tr_loop.quit)
-            timer.start(timeout_ms)  # 타임아웃 (호출자 지정, 기본 2초)
+            # QTimer를 _tr_loop 자식으로 생성 → Python GC 수집 방지 + Qt 수명 관리
+            # timer = QTimer() 로컬 변수는 exec_() 대기 중 GC 수집 위험 → timeout 무효화 가능
+            self._tr_timeout_timer = QTimer(self._tr_loop)
+            self._tr_timeout_timer.setSingleShot(True)
+            self._tr_timeout_timer.timeout.connect(self._tr_loop.quit)
+            self._tr_timeout_timer.start(timeout_ms)
             self._tr_loop.exec_()
-            timer.stop()
+            self._tr_timeout_timer.stop()
+            self._tr_timeout_timer = None
             self._tr_loop = None
         finally:
             self._tr_busy = False

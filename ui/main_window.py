@@ -2278,7 +2278,10 @@ class MainWindow(QMainWindow):
             # ② 스캔 진행 상태 플래그 리셋 (이후 스캔 사이클 차단 방지)
             self._scan_in_progress = False
             _freeze_log.warning("[on_freeze] _scan_in_progress 리셋 완료")
-            # ③ 재연결 — QTimer.singleShot으로 비동기 처리 (동기 호출 금지! UI 블로킹 유발)
+            # ③ 재연결 — threading.Timer로 비동기 처리
+            # QTimer.singleShot은 QThread에서만 사용 가능하나,
+            # on_freeze_handler는 Watchdog daemon thread(Python threading.Thread)에서 실행됨
+            # → QTimer 사용 시 "Timers can only be used with threads started with QThread" 에러 발생
             def _do_reconnect():
                 if hasattr(self, "login_mgr") and self.login_mgr:
                     self.login_mgr.reconnect_silent()
@@ -2286,7 +2289,10 @@ class MainWindow(QMainWindow):
                     recon_fn = getattr(self._kiwoom, "auto_reconnect", None)
                     if recon_fn:
                         recon_fn()
-            QTimer.singleShot(500, _do_reconnect)  # 500ms 후 비동기로 재연결 시도
+            import threading as _threading
+            _t = _threading.Timer(0.5, _do_reconnect)
+            _t.daemon = True
+            _t.start()
 
         self._health_monitor = _HealthMonitor(
             scan_cfg       = self._scan_cfg,
