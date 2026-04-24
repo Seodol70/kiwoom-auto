@@ -388,7 +388,7 @@ class SmartScannerConfig:
     surge_trend_max_pct:        float = 15.0  # 추세 확인 시 허용 상한 (%) — 기본 15%
 
     # ── 수급 필터 (외국인/기관 순매수, opt10059) ──────────────────────────────
-    investor_filter_enabled: bool  = False  # 수급 필터 활성화 여부 — QTimer 에러 임시 비활성화
+    investor_filter_enabled: bool  = True   # 수급 필터 활성화 여부
     investor_refresh_min:    int   = 10     # opt10059 갱신 주기 (분)
     investor_top_n:          int   = 15     # 수급 조회 대상 상위 N종목 (30→15, TR 부하 절반)
     # score +1 종목: 쿨다운 유지 (우선 처리)
@@ -3611,9 +3611,13 @@ class SmartScanner:
 
         logger.debug("[opt10030 BG] 백그라운드 갱신 시작")
         try:
-            # _fetch_top_volume_rows가 플래그를 관리하므로 여기서는 호출만
+            was_empty = not self._last_volume_rows  # 최초 캐시 여부
             rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, retry=1)
             logger.info("[opt10030 BG] 갱신 완료 — %d종목 캐시", len(rows))
+            # 시작 시 캐시가 비어있다가 처음 채워졌으면 즉시 재스캔 — 5종목 → 400종목 즉시 반영
+            if was_empty and rows:
+                logger.info("[opt10030 BG] 최초 캐시 완료 → 즉시 재스캔 예약")
+                QTimer.singleShot(200, self.run_periodic_scan)
         except Exception as e:
             logger.warning("[opt10030 BG] 갱신 실패: %s", e)
 
