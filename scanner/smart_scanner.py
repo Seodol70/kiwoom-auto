@@ -350,7 +350,7 @@ class SmartScannerConfig:
     jdm_candle_skip_trend_level:   int   = 2     # 이 이상 trend_level이면 캔들 반전패턴 스킵 (추세 계속 진행 중)
     jdm_rsi_high_trend:            float = 80.0  # trend_level≥2 시 RSI 상한 완화 (기본 70 → 80)
     jdm_rsi_high_breakout:         float = 82.0  # ATR1.5 돌파 확인 시 RSI 상한 추가 완화 (82)
-    jdm_rsi_high_opening_trend3:   float = 83.0  # OPENING + 추세Lv3 RSI 상한 (2026-04-23: 95→83, RSI=92 고점 진입 차단)
+    jdm_rsi_high_opening_trend3:   float = 78.0  # OPENING + 추세Lv3 RSI 상한 (2026-04-27: 83→78, 과열 진입 차단)
     jdm_rsi_entry_min_trend:       float = 45.0  # trend_level≥2 시 RSI 하한 완화 (슬롯 기준값 → 45)
     ema_disp_max_pct_trend:        float = 7.0   # trend_level≥2 EMA10/EMA20 이격 상한 완화
     price_ema_disp_max_pct_trend:  float = 6.0   # trend_level≥2 현재가/EMA10 이격 상한 완화
@@ -363,6 +363,8 @@ class SmartScannerConfig:
     trail_pct_tier2_midday:      float = 1.8   # 트레일 Tier2 폭 확대 (기본 1.2%)
     time_cut_minutes_midday:     int   = 30    # 타임컷 완화 (기본 25분)
     stop_loss_pct_midday:        float = -1.5  # 손절 완화 (기본 -1.2%)
+    # [NEW] 시간대별 청산 파라미터 — 장초반(OPENING 09:00~09:30) 과열 구간 대응
+    stop_loss_pct_opening:       float = -1.5  # 손절 완화 (기본 -1.2%)
     # [NEW] 전략 실험 옵션
     # 활성 전략 목록: "BREAKOUT", "JDM_ENTRY" 중 선택
     enabled_strategies: tuple[str, ...] = ("BREAKOUT", "JDM_ENTRY")
@@ -1574,6 +1576,7 @@ class ScannerLogger:
 
     # ── 거절 로그 샘플링 (대시보드 속도 개선) ───────────────────────────────────
     _reject_counter = 0         # rejected() 호출 카운터 (10개마다 1개만 로그)
+    _reject_counter_lock = threading.Lock()  # 스레드 안전성
 
     @classmethod
     def _ensure_csv(cls) -> None:
@@ -1623,8 +1626,11 @@ class ScannerLogger:
     def rejected(cls, code: str, name: str, step: str, reason: str) -> None:
         """일반 탈락 — scanner.log(DEBUG, 10개마다 1개만) + 일별 CSV 에 모두 기록."""
         # [개선] 거절 로그 샘플링: 10개마다 1개만 scanner.log에 기록 (대시보드 속도 개선)
-        cls._reject_counter += 1
-        if cls._reject_counter % 10 == 0:
+        # 스레드 안전성: 카운터 increment 시 lock 사용
+        with cls._reject_counter_lock:
+            cls._reject_counter += 1
+            _should_log = (cls._reject_counter % 10 == 0)
+        if _should_log:
             scan_log.debug("FAIL\t%s\t%s\t%s\t%s", code, name, step, reason)
         # CSV는 모든 거절 기록 (분석용)
         ScannerLogger._write_csv(code, name, step, reason, near_miss=False)

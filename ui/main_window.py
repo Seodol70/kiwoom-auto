@@ -3561,9 +3561,16 @@ class MainWindow(QMainWindow):
 
         # ── 현재 시간 슬롯 감지 (청산 파라미터 오버라이드용) ─────────────────────
         _now_min = now_dt.hour * 60 + now_dt.minute
-        _is_midday = (11 * 60) <= _now_min < (13 * 60)
+        _is_opening = (9 * 60) <= _now_min < (9.5 * 60)    # 09:00~09:30
+        _is_midday = (11 * 60) <= _now_min < (13 * 60)     # 11:00~13:00
 
-        if _is_midday:
+        if _is_opening:
+            _eff_sl_pct      = float(getattr(self._scan_cfg, "stop_loss_pct_opening",        self._auto_sl_pct))
+            _eff_trail_act   = self._scan_cfg.trail_activation_pct
+            _eff_trail_tier1 = self._scan_cfg.trail_pct_tier1
+            _eff_trail_tier2 = self._scan_cfg.trail_pct_tier2
+            _eff_time_cut    = self._scan_cfg.time_cut_minutes
+        elif _is_midday:
             _eff_sl_pct      = float(getattr(self._scan_cfg, "stop_loss_pct_midday",        self._auto_sl_pct))
             _eff_trail_act   = float(getattr(self._scan_cfg, "trail_activation_pct_midday",  self._scan_cfg.trail_activation_pct))
             _eff_trail_tier1 = float(getattr(self._scan_cfg, "trail_pct_tier1_midday",       self._scan_cfg.trail_pct_tier1))
