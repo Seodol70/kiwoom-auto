@@ -502,8 +502,9 @@ class KiwoomManager:
         self._set_input("비밀번호",    "")
         self._set_input("비밀번호입력매체구분", "00")
         self._set_input("조회구분",    "2")
-        # opw00001은 서버 부하 시 4~6초 소요 → 타임아웃 6초로 늘림
-        ok = self._comm_rq(TR_ACCOUNT, "balance", "2000", timeout_ms=6_000)
+        # opw00001은 서버 부하 시 4~6초 소요 — 타임아웃 6s→3s (2026-04-27: 스캔 충돌 해소)
+        # 3초 이내 응답 안 오면 빠른 포기 → _tr_busy 점유 시간 단축 → scan TR 충돌 최소화
+        ok = self._comm_rq(TR_ACCOUNT, "balance", "2000", timeout_ms=3_000)
         if not ok:
             logger.warning("get_balance TR 차단됨 — 잔고 동기화 스킵 (기존값 유지)")
             return {}   # 빈 dict → sync_balance가 if not balance: 로 스킵, 기존 self.cash 유지
@@ -688,7 +689,8 @@ class KiwoomManager:
         self._set_input("비밀번호",    "")
         self._set_input("비밀번호입력매체구분", "00")
         self._set_input("조회구분",    "1")
-        ok = self._comm_rq(TR_HOLDINGS, "holdings", "2001")
+        # timeout_ms 명시 — 기본값 2s 유지, Part 3의 2-step 분리 패턴과 함께 동작
+        ok = self._comm_rq(TR_HOLDINGS, "holdings", "2001", timeout_ms=2_000)
         if not ok:
             logger.warning("get_holdings TR 차단됨 — 보유잔고 조회 생략")
             return []

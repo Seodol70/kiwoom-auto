@@ -357,6 +357,68 @@ class OrderManager(QObject):
             logger.error("잔고 동기화 실패: %s", e)
         return self.cash
 
+    def _sync_with_balance(self, balance: dict) -> int:
+        """
+        이미 조회된 balance dict로 holdings TR만 실행하여 포지션 갱신.
+        PortfolioWorker의 2-step 비동기 잔고 동기화(Part 3)에서 사용.
+        balance가 비어 있으면 self.cash 반환 (기존값 유지).
+        """
+        try:
+            server_cash = balance.get("cash", 0)
+            if not balance:
+                return self.cash
+
+            holdings = self._kiwoom.get_holdings()
+            if not holdings and self.positions:
+                invested = sum(p.avg_price * p.qty for p in self.positions.values())
+                self.cash = max(0, server_cash - invested)
+                return self.cash
+
+            # sync_balance()와 동일 — opw00018 응답 기반 포지션 재구성
+            new_positions: dict[str, Position] = {}
+            for h in holdings:
+                qty = h.get("qty", 0)
+                if qty <= 0:
+                    logger.warning("_sync_with_balance: 보유수량 0 또는 누락 — %s(%s) 스킵",
+                                   h.get("name", "?"), h.get("code", "?"))
+                    continue
+                code = h["code"]
+                avg = h.get("avg_price", 0)
+                if avg == 0 and code in self.positions:
+                    avg = self.positions[code].avg_price
+                old = self.positions.get(code)
+                qty_today = min(old.qty_buy_today_app, qty) if old else 0
+                new_positions[code] = Position(
+                    code              = code,
+                    name              = h.get("name", ""),
+                    qty               = qty,
+                    avg_price         = avg,
+                    current_price     = h.get("current_price", 0),
+                    buy_date          = old.buy_date if old else None,
+                    entry_time        = old.entry_time if old else None,
+                    opened_by_app     = old.opened_by_app if old else False,
+                    qty_buy_today_app = qty_today,
+                    candle_stop_price = old.candle_stop_price if old else 0,
+                    break_even_done   = old.break_even_done if old else False,
+                    half_exited       = old.half_exited if old else False,
+                    peak_price        = old.peak_price        if old else 0,
+                    partial_sold      = old.partial_sold      if old else False,
+                    qty_partial_sold  = old.qty_partial_sold  if old else 0,
+                    trend_level       = old.trend_level       if old else 0,
+                    trend_prev_level  = old.trend_prev_level  if old else 0,
+                    entry_phase       = old.entry_phase       if old else 0,
+                    sector            = old.sector            if old else "",
+                )
+            self.positions = new_positions
+            invested = sum(p.avg_price * p.qty for p in self.positions.values())
+            self.cash = max(0, server_cash - invested)
+            logger.info("잔고 동기화(2단계) 완료 — 예수금 %s원 / 보유 %d종목",
+                        f"{self.cash:,}", len(self.positions))
+            self._sync_daily_realized_from_broker()
+        except Exception as e:
+            logger.error("_sync_with_balance 실패: %s", e)
+        return self.cash
+
     # -----------------------------------------------------------------------
     # 자금 회전 헬퍼 (2026-04-03)
     # -----------------------------------------------------------------------

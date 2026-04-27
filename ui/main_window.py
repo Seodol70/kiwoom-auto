@@ -583,7 +583,11 @@ class ScannerWorker(QObject):
 
 
 class PortfolioWorker(QObject):
-    """잔고 동기화 워커 — 메인 스레드 QTimer 방식 (Kiwoom OCX 스레드 규칙 준수)"""
+    """
+    잔고 동기화 워커 — 메인 스레드 QTimer 방식 (Kiwoom OCX 스레드 규칙 준수)
+    Part 3: balance + holdings를 350ms 간격 2-step으로 분리 (2026-04-27)
+    → 연속 블로킹 8초(6+2) → 분리 블로킹 3+350ms+2초
+    """
 
     refresh_done = pyqtSignal(dict)
     log_message  = pyqtSignal(str)
@@ -591,22 +595,53 @@ class PortfolioWorker(QObject):
     def __init__(self, order_manager, parent=None) -> None:
         super().__init__(parent)
         self._om = order_manager
+        self._balance_result: dict = {}  # Step 1 결과 임시 저장
 
     @pyqtSlot()
     def sync(self) -> None:
-        """메인 스레드에서 QTimer 로 호출된다."""
+        """Step 1: balance TR만 실행 → 350ms 후 Step 2 (holdings) 실행."""
         # _tr_busy 중이면 스킵 — scan/crash 등 다른 TR 진행 중 (다음 틱에 자동 재시도)
         _kw = getattr(self._om, "_kiwoom", None)
         if _kw and getattr(_kw, "_tr_busy", False):
             return
+        # [NEW] 스캔 진행 중이면 balance 스킵 — scan/balance 충돌 방지
+        _mw = self.parent()
+        if _mw and getattr(_mw, "_scan_in_progress", False):
+            return
         try:
-            cash = self._om.sync_balance()
+            self._om._roll_daily_state_if_needed()
+            balance = self._om._kiwoom.get_balance()
+            if not balance:
+                return  # TR 차단 또는 서버 응답 없음
+            self._balance_result = balance
+            # 350ms 뒤 Step 2 실행 — event loop이 다른 이벤트 처리 가능
+            QTimer.singleShot(350, self._sync_step2)
+        except Exception as e:
+            self.log_message.emit(f"[잔고갱신 오류 step1] {e}")
+
+    @pyqtSlot()
+    def _sync_step2(self) -> None:
+        """Step 2: holdings TR → 포지션 갱신 → UI 시그널."""
+        _kw = getattr(self._om, "_kiwoom", None)
+        if _kw and getattr(_kw, "_tr_busy", False):
+            # 다른 TR이 끼어든 경우 — 예수금만 반영, 포지션 갱신 스킵
+            server_cash = self._balance_result.get("cash", 0)
+            if server_cash:
+                invested = sum(p.avg_price * p.qty for p in self._om.positions.values())
+                self._om.cash = max(0, server_cash - invested)
             self.refresh_done.emit({
-                "cash":      cash,
+                "cash": self._om.cash,
+                "positions": dict(self._om.positions),
+            })
+            return
+        try:
+            cash = self._om._sync_with_balance(self._balance_result)
+            self.refresh_done.emit({
+                "cash": cash,
                 "positions": dict(self._om.positions),
             })
         except Exception as e:
-            self.log_message.emit(f"[잔고갱신 오류] {e}")
+            self.log_message.emit(f"[잔고갱신 오류 step2] {e}")
 
     def stop(self) -> None:
         pass   # QTimer 정지는 MainWindow에서 처리
@@ -3255,6 +3290,13 @@ class MainWindow(QMainWindow):
         # 이전 스캔이 아직 진행 중이면 스킵 (블로킹 방지)
         if getattr(self, '_scan_in_progress', False):
             _logger.debug("[스캔] 이전 스캔 진행 중 — 스킵")
+            return
+
+        # [NEW] balance TR 처리 중이면 3초 후 재시도 — scan/balance 충돌 방지 (2026-04-27)
+        if getattr(self._kiwoom, '_tr_busy', False):
+            _logger.info("[스캔] TR 처리 중 (%s) — 3s 후 재시도",
+                        getattr(self._kiwoom, '_tr_current_rq', '?'))
+            QTimer.singleShot(3_000, self._run_scanner_scan)
             return
 
         self._scan_in_progress = True
