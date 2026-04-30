@@ -128,12 +128,13 @@ class TRRateLimiter:
 
     @staticmethod
     def _nonblocking_wait(wait_sec: float) -> None:
-        """TR 속도 제한 대기. time.sleep() 사용 — processEvents() 금지.
-        processEvents()는 타이머 콜백을 발화시켜 nested event loop cascade를 유발함.
-        _comm_rq의 QEventLoop.exec_() 안에서 watchdog/UI 타이머가 정상 처리되므로
-        rate limiter 대기 중에 processEvents를 호출할 필요 없음.
-        최대 대기: MIN_INTERVAL=0.25s 또는 슬라이딩 윈도우=~1s — Windows '응답없음' 미발생."""
-        time.sleep(wait_sec)
+        """TR 속도 제한 대기. processEvents로 Qt 이벤트(Watchdog ACK 등) 허용.
+        _tr_busy + _scan_in_progress 보호가 추가된 이후 cascade 위험 없음.
+        (이전 '금지' 주석은 이 보호 추가 전 _load_candles_async 경로 기준이었음)
+        최대 대기: MIN_INTERVAL=0.25s 또는 슬라이딩 윈도우=~1s."""
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import QEventLoop
+        QApplication.processEvents(QEventLoop.AllEvents, max(1, int(wait_sec * 1000)))
 
     def acquire(self) -> None:
         """TR 호출 전 반드시 호출. 필요 시 비블로킹 대기 후 반환한다."""

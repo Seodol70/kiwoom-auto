@@ -377,8 +377,11 @@ class ScannerWorker(QObject):
                                                 elif _tlevel >= 2:
                                                     _eff_secs = float(getattr(self._cfg,
                                                         "breakout_confirm_minutes_trend2", 1.0)) * 60.0
+                                                elif _tlevel >= 1:
+                                                    _eff_secs = float(getattr(self._cfg,
+                                                        "breakout_confirm_minutes_trend1", 0.0)) * 60.0
                                                 else:
-                                                    _eff_secs = _confirm_secs
+                                                    _eff_secs = _confirm_secs  # lv0만 2분 (상승 추세 미확인)
                                                 # [Fix] 생성 시점에 gate 사전 체크
                                                 # — gate 실패 시 pending 등록 자체를 차단
                                                 # — 성공 시 gate_reason 저장 → Lv3(0분) 확정 때 재확인 스킵
@@ -3304,18 +3307,24 @@ class MainWindow(QMainWindow):
         self.scan_status.reset()
 
         try:
-            # 메인 스레드에서 직접 호출 (QTimer 사용 필요)
-            # Fix 2,3으로 락 범위 최소화되어 메인 스레드 블로킹 최소
-            # on_progress=None으로 진행 상황 로그 억제 — B안: 신호 발생 시에만 로그 표시
+            # 스캔 시작 전 ACK — run_periodic_scan이 수십 초 걸릴 수 있어 미리 리셋
+            _hm = getattr(self, "_health_monitor", None)
+            if _hm:
+                _hm.ack()
+
             self._smart_scanner.run_periodic_scan(on_progress=None)
+
+            # 스캔 완료 후 ACK — 스캔이 길었더라도 즉시 Watchdog 안심
+            if _hm:
+                _hm.ack()
 
             # 스캔 완료 요약 메시지 (진행 상황은 신호 발생 시에만 표시)
             total_watched = len(self._snap_store)
             self.log_panel.append(f"[스캔] 완료 — 전체 {total_watched}종목 모니터링")
             self.scan_status.done(f"완료 / {total_watched}종목")
 
-            # 일봉 갱신 대기 목록 처리 — QTimer 체인
-            _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))
+            # 일봉 갱신 대기 목록 처리 — QTimer 체인 (최대 10개, 각 350ms 간격)
+            _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))[:10]
             if _pending:
                 self._smart_scanner._daily_refresh_pending = []
                 QTimer.singleShot(500, lambda codes=_pending: self._daily_candle_chain(codes, 0))

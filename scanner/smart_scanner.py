@@ -201,9 +201,11 @@ class SmartScannerConfig:
     # 추세 강도별 관찰 시간 단축 — yosep trend_level 기준 (2026-04-15)
     # trend_level=3(Strong): 즉시 진입 (다음 틱에 gate 확인 후 신호)
     # trend_level=2(Medium): 절반 관찰 (기본 2분의 50%)
-    # trend_level=0~1: 기본 breakout_confirm_minutes 유지
-    breakout_confirm_minutes_trend3: float = 0.0   # Strong 추세 — 관찰 시간 0 (즉시)
+    # trend_level=1(Weak): 즉시 진입 — 종목 상승 추세(현재가>EMA, EMA 상승) 확인됨 (2026-04-30)
+    # trend_level=0: 기본 breakout_confirm_minutes 유지
+    breakout_confirm_minutes_trend3: float = 0.0   # Strong 추세 — 즉시
     breakout_confirm_minutes_trend2: float = 1.0   # Medium 추세 — 1분 관찰
+    breakout_confirm_minutes_trend1: float = 0.0   # Weak 추세 — 즉시 (종목 상승 추세 확인됨)
     breakout_cancel_drawdown_pct: float = -0.8  # 2026-04-08: -0.5% → -0.8% (완화된 ratio 노이즈 흡수)
     breakout_pullback_from_high_pct: float = 2.5  # 당일 고점 대비 N% 이상 하락 중이면 BREAKOUT 차단 (완화: 1.5→2.5)
     breakout_min_rising_bars: int = 1         # 최근 N개 1분봉이 연속 상승이어야 BREAKOUT 통과 (완화: 2→1)
@@ -213,7 +215,7 @@ class SmartScannerConfig:
     jdm_rsi_high:         float = 70.0       # RSI 상한(과열 차단) — 과매수 구간 진입 금지
     jdm_rsi_entry_min:    float = 52.0       # JDM 진입 RSI 하한 — 2026-04-13: 60→52 (상승 시작점 타점)
     jdm_min_ma_spread_abs: int = 30          # [deprecated] MA 이격(원) — 레거시 호환성 유지
-    jdm_ma_spread_pct:    float = 0.15       # MA 이격 비율(%) 하한 — 골든크로스 직후 확인 (기존 0.3에서 완화)
+    jdm_ma_spread_pct:    float = 0.20       # MA 이격 비율(%) 하한 — 교차 직전(0.03%) 진입 차단 (0.15→0.20, 2026-04-30)
     jdm_ma_spread_max_pct: float = 3.5      # MA 이격 비율(%) 상한 — 2026-04-13: 2.5→3.5 (골든크로스 직후 허용 범위 확장)
     jdm_take_profit_pct:  float = 3.0        # 익절 목표 (최적화됨: 4.0%→3.0%)
     jdm_stop_loss_pct:    float = -1.2       # 손절 기준 — config RISK.stop_loss_pct 와 동기화 (2026-04-07)
@@ -244,7 +246,7 @@ class SmartScannerConfig:
     breakout_chejan_max:         float = 800.0  # BREAKOUT 체결강도 상한 — OPENING/기본 슬롯 (2026-04-15 분석)
     breakout_chejan_max_morning: float = 950.0  # MORNING 슬롯 상한 완화 — 갭업 후 과열 정상화 허용 (삼성SDI 패턴)
     jdm_chejan_max:         float = 700.0   # JDM_ENTRY 체결강도 상한 (MORNING 이후) — 극과열 고점 차단
-    jdm_chejan_max_opening: float = 1200.0  # OPENING 슬롯 전용 상한 — 장 초반 단일가 직후 900%+ 왜곡 허용
+    jdm_chejan_max_opening: float = 800.0   # OPENING 슬롯 체결강도 상한 — gap-up 고점 차단 (1200→800, 일승 902% 패턴, 2026-04-30)
     breakout_rsi_max:     float = 80.0   # BREAKOUT RSI 상한 — 과매수 진입 차단 (2026-04-15 분석)
     # OPENING_SURGE 파라미터 (09:00~09:16 정규장 초반, 캔들 부족 구간)
     opening_surge_chg_min:    float = 1.0    # OPENING 최소 등락률 (%)
@@ -767,14 +769,8 @@ class TRRequestQueue:
     def call(self, fn: Callable, *args):
         """fn(*args)를 최소 간격 보장 후 실행하고 결과를 반환한다.
 
-        ⚠️ 대기 구간에 processEvents()를 쓰면 다른 QTimer 콜백이 재귀 발화해
-        cascading nested event loop 으로 16초+ 프리징이 발생한다.
-        (실측: _load_candles_async → processEvents → scan timer → fetch_opt10030 4페이지
-         → get_balance 6초 → get_holdings 2초 총 16초 블로킹)
-
-        따라서 대기는 time.sleep(wait) 으로만 처리한다. 최대 대기는 0.25초이므로
-        UI 체감 영향 없음. _comm_rq 내 TRRateLimiter.acquire() 가 별도로
-        processEvents를 사용해 그 구간의 UI 응답성을 보장한다.
+        _tr_busy + _scan_in_progress 보호가 추가된 이후 cascade 위험 없음.
+        processEvents로 Watchdog ACK 발화 허용. 최대 대기: 0.25초.
         """
         with self._lock:
             now = time.monotonic()
@@ -782,7 +778,9 @@ class TRRequestQueue:
             wait = max(0.0, self._MIN_INTERVAL - elapsed)
             self._last_call = now + wait
         if wait > 0:
-            time.sleep(wait)   # 최대 0.25초 — cascade 방지를 위해 processEvents 사용 금지
+            from PyQt5.QtWidgets import QApplication
+            from PyQt5.QtCore import QEventLoop
+            QApplication.processEvents(QEventLoop.AllEvents, max(1, int(wait * 1000)))
         return fn(*args)
 
 
