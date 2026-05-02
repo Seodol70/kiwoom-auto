@@ -149,7 +149,10 @@ def test_stop_loss():
         trail_activation=1.0,
         trail_tier1=1.5,
         trail_tier2=2.5,
+        trail_tier3=3.5,
         time_cut_min=25,
+        partial_profit_pct=3.0,
+        atr_trail_enabled=False,
     )
 
     # 손절 테스트: -1.5% 손실
@@ -181,7 +184,10 @@ def test_trail_stop():
         trail_activation=1.0,
         trail_tier1=1.5,
         trail_tier2=2.5,
+        trail_tier3=3.5,
         time_cut_min=25,
+        partial_profit_pct=3.0,
+        atr_trail_enabled=False,
     )
 
     # 트레일 스탑 테스트:

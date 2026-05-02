@@ -53,14 +53,20 @@ def test_exit_context_dataclass():
         trail_activation=1.0,
         trail_tier1=1.5,
         trail_tier2=2.5,
+        trail_tier3=3.5,
         time_cut_min=25,
+        partial_profit_pct=3.0,
+        atr_trail_enabled=False,
     )
 
     assert ctx.sl_pct == -1.2
     assert ctx.trail_activation == 1.0
     assert ctx.trail_tier1 == 1.5
     assert ctx.trail_tier2 == 2.5
+    assert ctx.trail_tier3 == 3.5
     assert ctx.time_cut_min == 25
+    assert ctx.partial_profit_pct == 3.0
+    assert ctx.atr_trail_enabled is False
 
     print("[OK] ExitContext 테스트 통과")
 

@@ -26,8 +26,9 @@ class TestPhase4PartialProfit:
         mock_order_mgr.should_exit_on_trend_decay = MagicMock(return_value=False)
         mock_scan_cfg = SmartScannerConfig()
         mock_scan_cfg.partial_profit_enabled = False  # 비활성
+        mock_risk_mgr = MagicMock()
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, mock_risk_mgr)
 
         pos = Position(
             code="005930",
@@ -58,7 +59,7 @@ class TestPhase4PartialProfit:
         mock_scan_cfg = SmartScannerConfig()
         mock_scan_cfg.partial_profit_enabled = True
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, MagicMock())
 
         pos = Position(
             code="005930",
@@ -89,7 +90,7 @@ class TestPhase4PartialProfit:
         mock_scan_cfg = SmartScannerConfig()
         mock_scan_cfg.partial_profit_enabled = True
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, MagicMock())
 
         pos = Position(
             code="005930",
@@ -123,7 +124,7 @@ class TestPhase4BreakevenStop:
         mock_scan_cfg = SmartScannerConfig()
         mock_scan_cfg.breakeven_stop_enabled = False
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, MagicMock())
 
         pos = Position(
             code="005930",
@@ -142,7 +143,7 @@ class TestPhase4BreakevenStop:
         mock_scan_cfg = SmartScannerConfig()
         mock_scan_cfg.breakeven_stop_enabled = True
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, MagicMock())
 
         pos = Position(
             code="005930",
@@ -166,7 +167,7 @@ class TestPhase4EMA20Exit:
         mock_scan_cfg = SmartScannerConfig()
         mock_scan_cfg.ema20_exit_enabled = False
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, MagicMock())
 
         pos = Position(
             code="005930",
@@ -188,7 +189,7 @@ class TestPhase4TrendDecay:
         mock_order_mgr = MagicMock()
         mock_scan_cfg = SmartScannerConfig()
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, MagicMock())
 
         pos = Position(
             code="005930",
@@ -207,7 +208,7 @@ class TestPhase4TrendDecay:
         mock_order_mgr = MagicMock()
         mock_scan_cfg = SmartScannerConfig()
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, MagicMock())
 
         pos = Position(
             code="005930",
@@ -226,7 +227,7 @@ class TestPhase4TrendDecay:
         mock_order_mgr.should_exit_on_trend_decay = MagicMock(return_value=False)
         mock_scan_cfg = SmartScannerConfig()
 
-        controller = TradingController(mock_order_mgr, mock_scan_cfg)
+        controller = TradingController(mock_order_mgr, mock_scan_cfg, MagicMock())
 
         pos = Position(
             code="005930",
