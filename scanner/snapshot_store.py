@@ -138,6 +138,10 @@ class SnapshotStore:
         self._trend_prev_level: dict[str, int] = {}    # code → 직전 추세 단계
         self._tick_ts_vol: dict[str, _Deque] = {}      # code → deque[(monotonic_ts, cumvol)]
         self._sector_cache: dict[str, str] = {}        # code → 업종명
+        self._prices: dict[str, int] = {}              # code → 현재가 (고속 캐시)
+        self._chg_pcts: dict[str, float] = {}          # code → 등락률 (고속 캐시)
+        self._vols: dict[str, int] = {}                # code → 누적 거래량
+        self._amt: dict[str, int] = {}                 # code → 누적 거래대금
         self._lock = threading.Lock()
         self._daily_cache_path: Path = self._get_daily_cache_path()
         self._load_daily_cache()
@@ -221,6 +225,11 @@ class SnapshotStore:
             for code in new_df.index:
                 if code not in self._mins:
                     self._mins[code] = []
+                # 고속 캐시 초기화
+                self._prices[code] = int(new_df.at[code, "current_price"])
+                self._chg_pcts[code] = float(new_df.at[code, "change_pct"])
+                self._vols[code] = int(new_df.at[code, "volume"])
+                self._amt[code] = int(new_df.at[code, "trade_amount"])
 
         logger.debug("[SnapshotStore.bulk_update] 적재 완료 — df 행수=%d", len(self._df))
 
@@ -245,19 +254,15 @@ class SnapshotStore:
         (FID 14는 현재 틱만 포함하므로)
         """
         with self._lock:
-            if code not in self._df.index:
-                return
+            # 1. 고속 dict 캐시 업데이트 (DataFrame 수정보다 훨씬 빠름)
+            self._prices[code] = current_price
+            self._chg_pcts[code] = change_pct if change_pct is not None else self._chg_pcts.get(code, 0.0)
+            self._vols[code] = volume
+            if trade_amount is not None:
+                self._amt[code] = trade_amount
 
-            if trade_amount is None:
-                trade_amount = self._df.loc[code, "trade_amount"]
-
-            if change_pct is None:
-                change_pct = self._df.loc[code, "change_pct"]
-
-            self._df.loc[code, self._TICK_COLS] = [
-                current_price, high_price, low_price, open_price,
-                volume, trade_amount, change_pct,
-            ]
+            # 2. DataFrame 갱신 지연 (필요할 때만 _sync_df_prices() 호출)
+            # 여기서는 틱 데이터 보관용 deque와 분봉 로직만 수행
             _ts_now = time.monotonic()
             if code not in self._tick_ts_vol:
                 self._tick_ts_vol[code] = _Deque()
@@ -321,6 +326,12 @@ class SnapshotStore:
             inv_inst = int(self._inv_inst.get(code, 0))
             inv_score = int(self._inv_score.get(code, 0))
             inv_updated = self._inv_updated_at.get(code)
+            
+            # [Optimization] DataFrame 대신 고속 dict에서 최신가 가져오기
+            current_price_cached = self._prices.get(code, 0)
+            volume_cached = self._vols.get(code, 0)
+            amt_cached = self._amt.get(code, 0)
+            chg_pct_cached = self._chg_pcts.get(code, 0.0)
 
         def safe_int_cell(key: str, default: int = 0) -> int:
             v = row_copy.get(key, default)
@@ -396,14 +407,14 @@ class SnapshotStore:
         return StockSnapshot(
             code          = code,
             name          = name_s,
-            current_price = safe_int_cell("current_price", 0),
+            current_price = current_price_cached if current_price_cached > 0 else safe_int_cell("current_price", 0),
             open_price    = safe_int_cell("open_price",    0),
             high_price    = safe_int_cell("high_price",    0),
             low_price     = safe_int_cell("low_price",     0),
-            volume        = safe_int_cell("volume",        0),
-            trade_amount  = safe_int_cell("trade_amount",  0),
+            volume        = volume_cached if volume_cached > 0 else safe_int_cell("volume", 0),
+            trade_amount  = amt_cached if amt_cached > 0 else safe_int_cell("trade_amount", 0),
             prev_close    = safe_int_cell("prev_close",    0),
-            change_pct    = safe_float_cell("change_pct",  0.0),
+            change_pct    = chg_pct_cached if chg_pct_cached != 0 else safe_float_cell("change_pct",  0.0),
             closes_1min   = closes_list,
             volumes_1min  = vols_list,
             daily_closes  = daily_closes,
@@ -454,6 +465,10 @@ class SnapshotStore:
         with self._lock:
             if self._df.empty:
                 return []
+            
+            # 조회 전 시세 동기화
+            self._sync_df_prices()
+            
             df = self._df
             ch = df.get("change_pct", pd.Series(0, index=df.index))
             mask = (
@@ -664,6 +679,20 @@ class SnapshotStore:
         if candles:
             self._save_daily_cache()
 
+    def _sync_df_prices(self) -> None:
+        """고속 캐시(dict)에 저장된 시세를 DataFrame에 일괄 반영한다."""
+        if not self._prices:
+            return
+        # 주의: 락(lock) 안에서 호출되어야 함
+        for code, price in self._prices.items():
+            if code in self._df.index:
+                self._df.at[code, "current_price"] = price
+                self._df.at[code, "volume"] = self._vols.get(code, 0)
+                if code in self._chg_pcts:
+                    self._df.at[code, "change_pct"] = self._chg_pcts[code]
+                if code in self._amt:
+                    self._df.at[code, "trade_amount"] = self._amt[code]
+
     def top_by_trade_amount(self, n: int = 20) -> pd.DataFrame:
         """
         거래대금 상위 n 종목 DataFrame 반환 (복사본).
@@ -673,6 +702,10 @@ class SnapshotStore:
         with self._lock:
             if self._df.empty:
                 return pd.DataFrame()
+            
+            # 조회 전 시세 동기화
+            self._sync_df_prices()
+            
             df = self._df[~self._df.index.duplicated(keep='last')]
 
             non_zero_amt = df[df["trade_amount"] > 0]

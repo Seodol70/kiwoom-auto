@@ -3,6 +3,7 @@ import os, sys, time, threading, logging, logging.handlers
 from datetime import datetime
 from typing import Optional
 
+
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QEvent, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QColor, QFont, QTextCursor
@@ -13,13 +14,17 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QComboBox, QGroupBox, QAction, QMenu
 )
 
+
 from config import TELEGRAM as _TG
 from scanner.smart_scanner import format_trade_amount_korean
 from ui.components.common import _hline
 
 
+
+
 class HeaderBar(QWidget):
     """상단 상태 바 — Safety Switch 포함"""
+
 
     # 자동매매 ON/OFF 상태 변경 시 MainWindow 로 전달
     auto_trade_toggled = pyqtSignal(bool)      # True = 시작, False = 정지
@@ -27,6 +32,7 @@ class HeaderBar(QWidget):
     unlock_requested = pyqtSignal()            # 일일 손익 락 수동 해제 요청
     overnight_mode_toggled = pyqtSignal(bool)  # True = 야간보유 ON, False = OFF
     switch_real_requested = pyqtSignal()       # 실전투자 전환 버튼
+
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -36,9 +42,11 @@ class HeaderBar(QWidget):
         lay.setContentsMargins(16, 0, 16, 0)
         lay.setSpacing(16)
 
+
         self._lbl_title = QLabel("📈 키움 자동매매")
         self._lbl_title.setFont(QFont("Malgun Gothic", 12, QFont.Bold))
         self._lbl_title.setObjectName("lbl_title")
+
 
         self._lbl_account = self._make("계좌: —")
         self._lbl_mode    = self._make("—")
@@ -47,6 +55,7 @@ class HeaderBar(QWidget):
         self._lbl_pnl     = self._make("당일 실현손익: —")
         self._lbl_kospi   = self._make("코스피: —")
         self._lbl_kosdaq  = self._make("코스닥: —")
+
 
         # ── Safety Switch ───────────────────────────────────────────────
         self._btn_auto = QPushButton("▶ 자동매매 시작")
@@ -57,12 +66,14 @@ class HeaderBar(QWidget):
         self._btn_auto.setFixedSize(140, 30)
         self._btn_auto.clicked.connect(self._on_auto_clicked)
 
+
         # ── 재시작 버튼 ────────────────────────────────────────────────
         self._btn_restart = QPushButton("🔄 재시작")
         self._btn_restart.setObjectName("btn_restart")
         self._btn_restart.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
         self._btn_restart.setFixedSize(75, 30)
         self._btn_restart.clicked.connect(self._on_restart_clicked)
+
 
         # ── 종료 버튼 ─────────────────────────────────────────────────
         self._btn_exit = QPushButton("⏻ 종료")
@@ -71,12 +82,14 @@ class HeaderBar(QWidget):
         self._btn_exit.setFixedSize(75, 30)
         self._btn_exit.clicked.connect(self._on_exit_clicked)
 
+
         # ── 일일 손익 락 해제 버튼 ─────────────────────────────────────
         self._btn_unlock = QPushButton("🔓 락 해제")
         self._btn_unlock.setObjectName("btn_unlock")
         self._btn_unlock.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
         self._btn_unlock.setFixedSize(85, 30)
         self._btn_unlock.clicked.connect(self._on_unlock_clicked)
+
 
         # ── 야간보유 모드 토글 버튼 ────────────────────────────────────
         self._btn_overnight = QPushButton("🌙 야간보유 OFF")
@@ -91,6 +104,7 @@ class HeaderBar(QWidget):
         )
         self._btn_overnight.clicked.connect(self._on_overnight_clicked)
 
+
         # ── 실전투자 전환 버튼 ────────────────────────────────────────────────
         self._btn_switch_real = QPushButton("💎 실전투자 전환")
         self._btn_switch_real.setObjectName("btn_switch_real")
@@ -98,6 +112,7 @@ class HeaderBar(QWidget):
         self._btn_switch_real.setFixedSize(120, 30)
         self._btn_switch_real.setVisible(False)
         self._btn_switch_real.clicked.connect(self._on_switch_real_clicked)
+
 
         lay.addWidget(self._lbl_title)
         lay.addStretch()
@@ -121,16 +136,19 @@ class HeaderBar(QWidget):
         lay.addWidget(self._btn_restart)
         lay.addWidget(self._btn_exit)
 
+
     def _make(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setFont(QFont("Malgun Gothic", 9))
         return lbl
+
 
     def _divider(self) -> QFrame:
         f = QFrame()
         f.setFrameShape(QFrame.VLine)
         f.setObjectName("v_divider")
         return f
+
 
     def _on_auto_clicked(self, checked: bool) -> None:
         if checked:
@@ -144,8 +162,10 @@ class HeaderBar(QWidget):
         self._btn_auto.style().polish(self._btn_auto)
         self.auto_trade_toggled.emit(checked)
 
+
     def _on_switch_real_clicked(self) -> None:
         self.switch_real_requested.emit()
+
 
     def _on_overnight_clicked(self, checked: bool) -> None:
         if checked:
@@ -157,6 +177,7 @@ class HeaderBar(QWidget):
         self._btn_overnight.style().unpolish(self._btn_overnight)
         self._btn_overnight.style().polish(self._btn_overnight)
         self.overnight_mode_toggled.emit(checked)
+
 
     def _on_restart_clicked(self) -> None:
         """프로그램 재시작 버튼 클릭 — 소스 변경사항 반영"""
@@ -170,13 +191,16 @@ class HeaderBar(QWidget):
         # 현재 프로세스 종료
         self.exit_requested.emit()
 
+
     def _on_exit_clicked(self) -> None:
         """프로그램 종료 버튼 클릭"""
         self.exit_requested.emit()
 
+
     def _on_unlock_clicked(self) -> None:
         """일일 손익 락 수동 해제 요청."""
         self.unlock_requested.emit()
+
 
     def set_connected(self, account: str, mode: str) -> None:
         self._lbl_account.setText(f"계좌: {account}")
@@ -187,6 +211,7 @@ class HeaderBar(QWidget):
         self._lbl_conn.style().polish(self._lbl_conn)
         self._btn_switch_real.setVisible(mode != "실전투자")
 
+
     def set_pnl(self, pnl: int) -> None:
         sign = "+" if pnl >= 0 else ""
         self._lbl_pnl.setText(f"당일 실현손익: {sign}{pnl:,}원")
@@ -196,6 +221,7 @@ class HeaderBar(QWidget):
             "잔고 동기화 시 opt10074 계좌 당일 실현손익에, 그 이후 앱에서 받은 매도 체결 손익을 더한 값입니다."
         )
 
+
     def set_index(self, kospi_current: float, kospi_chg: float,
                   kosdaq_current: float, kosdaq_chg: float) -> None:
         """코스피·코스닥 현재가 및 등락률 표시."""
@@ -203,8 +229,10 @@ class HeaderBar(QWidget):
             arrow = "▲" if chg >= 0 else "▼"
             return f"{name} {cur:,.2f} {arrow}{abs(chg):.2f}%"
 
+
         self._lbl_kospi.setText(_fmt("코스피", kospi_current, kospi_chg))
         self._lbl_kosdaq.setText(_fmt("코스닥", kosdaq_current, kosdaq_chg))
+
 
         kospi_color  = "#f38ba8" if kospi_chg  < 0 else "#a6e3a1"
         kosdaq_color = "#f38ba8" if kosdaq_chg < 0 else "#a6e3a1"
@@ -212,8 +240,11 @@ class HeaderBar(QWidget):
         self._lbl_kosdaq.setStyleSheet(f"color: {kosdaq_color};")
 
 
+
+
 class ManualBuyDialog(QDialog):
     """수동 매수 확인 다이얼로그 — 시장가/지정가, 수량 입력."""
+
 
     def __init__(self, code: str, name: str, price: int, parent=None) -> None:
         super().__init__(parent)
@@ -221,32 +252,40 @@ class ManualBuyDialog(QDialog):
         self.setFixedWidth(280)
         self.setModal(True)
 
+
         self._code  = code
         self._price = price
 
+
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
+
 
         # ── 종목 정보 ──────────────────────────────────────────────────
         info = QLabel(f"<b>{name}</b>  ({code})")
         info.setAlignment(Qt.AlignCenter)
         lay.addWidget(info)
 
+
         self._lbl_price = QLabel(f"현재가: {price:,} 원")
         self._lbl_price.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._lbl_price)
 
+
         lay.addWidget(_hline())
+
 
         # ── 주문유형 ──────────────────────────────────────────────────
         g = QGridLayout()
         g.setColumnStretch(1, 1)
+
 
         g.addWidget(QLabel("주문유형"), 0, 0)
         self._combo_type = QComboBox()
         self._combo_type.addItems(["시장가", "지정가"])
         self._combo_type.currentTextChanged.connect(self._on_type_changed)
         g.addWidget(self._combo_type, 0, 1)
+
 
         g.addWidget(QLabel("수량"), 1, 0)
         self._spin_qty = QSpinBox()
@@ -255,6 +294,7 @@ class ManualBuyDialog(QDialog):
         self._spin_qty.setSuffix(" 주")
         self._spin_qty.valueChanged.connect(self._update_estimate)
         g.addWidget(self._spin_qty, 1, 1)
+
 
         g.addWidget(QLabel("지정가"), 2, 0)
         self._spin_lmt = QSpinBox()
@@ -266,7 +306,9 @@ class ManualBuyDialog(QDialog):
         self._spin_lmt.valueChanged.connect(self._update_estimate)
         g.addWidget(self._spin_lmt, 2, 1)
 
+
         lay.addLayout(g)
+
 
         # ── 예상금액 ──────────────────────────────────────────────────
         self._lbl_est = QLabel()
@@ -275,7 +317,9 @@ class ManualBuyDialog(QDialog):
         lay.addWidget(self._lbl_est)
         self._update_estimate()
 
+
         lay.addWidget(_hline())
+
 
         # ── 버튼 ──────────────────────────────────────────────────────
         btns = QDialogButtonBox()
@@ -286,11 +330,13 @@ class ManualBuyDialog(QDialog):
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
 
+
     # ── 내부 슬롯 ────────────────────────────────────────────────────
     def _on_type_changed(self, t: str) -> None:
         is_limit = (t == "지정가")
         self._spin_lmt.setEnabled(is_limit)
         self._update_estimate()
+
 
     def _update_estimate(self) -> None:
         qty = self._spin_qty.value()
@@ -299,6 +345,7 @@ class ManualBuyDialog(QDialog):
         else:
             p = self._price
         self._lbl_est.setText(f"예상금액: {qty * p:,} 원")
+
 
     # ── 결과 접근 ────────────────────────────────────────────────────
     def result_values(self) -> tuple[int, str, int]:
@@ -311,5 +358,7 @@ class ManualBuyDialog(QDialog):
             otype  = "03"
             oprice = 0
         return qty, otype, oprice
+
+
 
 

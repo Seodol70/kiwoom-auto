@@ -3,6 +3,7 @@ import os, sys, time, threading, logging, logging.handlers
 from datetime import datetime
 from typing import Optional
 
+
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QEvent, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QColor, QFont, QTextCursor
@@ -13,18 +14,23 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QComboBox, QGroupBox, QAction, QMenu
 )
 
+
 from config import TELEGRAM as _TG
 from telegram_bot import TelegramBot
 from scanner.smart_scanner import format_trade_amount_korean
 
+
 class ScannerPanel(QWidget):
     """좌측 — 스캐너 포착 종목 리스트"""
+
 
     row_clicked          = pyqtSignal(str)           # 선택 종목코드
     manual_buy_requested = pyqtSignal(str, str, int)  # code, name, price
 
+
     # 스캐너: 전일 대비 당일 등락률(%) — 보유현황의 '수익률'(평단 대비)과 구분
     _HEADERS = ["종목코드", "종목명", "현재가", "당일등락률", "거래대금", "신호", "추세", "수급", "매수"]
+
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -32,9 +38,11 @@ class ScannerPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
 
+
         title = QLabel("  🔍 스캐너 감시 종목")
         title.setObjectName("panel_title")
         lay.addWidget(title)
+
 
         self._table = QTableWidget(0, len(self._HEADERS))
         self._table.setHorizontalHeaderLabels(self._HEADERS)
@@ -53,17 +61,20 @@ class ScannerPanel(QWidget):
         self._table.cellClicked.connect(self._on_click)
         lay.addWidget(self._table)
 
+
     @pyqtSlot(list)
     def refresh(self, rows: list[dict]) -> None:
         # 행 수가 다를 때만 setRowCount (비싼 작업)
         if self._table.rowCount() != len(rows):
             self._table.setRowCount(len(rows))
 
+
         for r, row in enumerate(rows):
             change = row["change_pct"]
             color  = QColor("#f38ba8") if change < 0 else QColor("#a6e3a1")
             has_sig = bool(row.get("signal"))
             bg_color = QColor("#2a1a2e") if has_sig else None
+
 
             # [진단] 거래대금 단위 확인
             trade_amt = int(row.get("trade_amount") or 0)
@@ -73,6 +84,7 @@ class ScannerPanel(QWidget):
                     "[ScannerPanel] %s 거래대금: raw=%d 포맷=%s",
                     row["code"], trade_amt, format_trade_amount_korean(trade_amt)
                 )
+
 
             iscore   = row.get("investor_score", 0)
             f_net    = row.get("foreign_net", 0)
@@ -97,6 +109,7 @@ class ScannerPanel(QWidget):
                 if (f_net or i_net) else "수급 미조회"
             )
 
+
             # 추세 표시
             trend_text  = row.get("trend_text", "데이터부족")
             tlevel      = int(row.get("trend_level", 0))
@@ -114,6 +127,7 @@ class ScannerPanel(QWidget):
             else:
                 trend_color = QColor("#585b70")   # 어두운 회색 (데이터부족)
             trend_tip = f"추세Lv {tlevel} | 체결강도 {chejan:.0f}%"
+
 
             texts = [
                 row["code"],
@@ -149,6 +163,7 @@ class ScannerPanel(QWidget):
                     item.setBackground(bg_color)
                 self._table.setItem(r, c, item)
 
+
             # ── 매수 버튼 (마지막 컬럼) — 종목마다 1개 ──────────────
             _code  = row["code"]
             _name  = row["name"]
@@ -170,9 +185,12 @@ class ScannerPanel(QWidget):
                 )
                 self._table.setCellWidget(r, 8, btn)
 
+
     def _on_click(self, row: int, _col: int) -> None:
         item = self._table.item(row, 0)
         if item:
             self.row_clicked.emit(item.text())
+
+
 
 

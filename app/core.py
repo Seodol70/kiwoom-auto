@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from PyQt5.QtCore import QObject
+
+from auth.login_manager import LoginManager
+from order.order_manager import OrderManager
+from scanner.smart_scanner import SmartScanner, SmartScannerConfig, SnapshotStore
+from scanner.news_analyzer import NewsAnalyzer
+from app.market_scheduler import MarketScheduler
+from app.risk_manager import RiskManager
+from app.trading_controller import TradingController
+from analysis.health_monitor import HealthMonitor
+from trade_audit_logger import TradeAuditLogger
+from config import STRATEGY, RISK as _RISK, TELEGRAM as _TG
+
+logger = logging.getLogger(__name__)
+
+class ApplicationContext(QObject):
+    """
+    백엔드 모듈 조립(Bootstrap) 및 관리를 담당하는 애플리케이션 컨텍스트.
+    UI 클래스(MainWindow)는 화면 표시에만 집중하고,
+    비즈니스 로직과 객체 수명 주기는 여기서 관리합니다.
+    """
+    def __init__(self, kiwoom, parent=None):
+        super().__init__(parent)
+        self.kiwoom = kiwoom
+        
+        # 기본 스토어 및 로거
+        self.audit = TradeAuditLogger(log_dir="logs")
+        self.snap_store = SnapshotStore()
+        
+        # ── LoginManager ──
+        self.login_mgr = LoginManager(self.kiwoom, parent=self)
+        
+        # ── OrderManager ──
+        self.order_mgr = OrderManager(
+            self.kiwoom,
+            max_positions=STRATEGY.get("max_positions", 5),
+            parent=self
+        )
+        self.order_mgr._audit = self.audit
+        self.kiwoom._on_order_msg_cb = self.order_mgr.on_order_msg
+        
+        # ── SmartScanner Config ──
+        self.scan_cfg = SmartScannerConfig.from_adaptive("config/adaptive_params.json")
+        _yosep_preset = str(STRATEGY.get("yosep_preset", "") or "").strip().lower()
+        if _yosep_preset:
+            self.scan_cfg.apply_yosep_preset(_yosep_preset)
+        self.scan_cfg.max_change_pct = float(_RISK.get("max_change_pct", 15.0))
+        self.scan_cfg.signal_cooldown_sec = float(_RISK.get("signal_cooldown_sec", 45.0))
+        self.scan_cfg.index_block_pct = float(_RISK.get("market_index_block_pct", -1.5))
+        
+        _wpm = STRATEGY.get("watch_pool_max")
+        if _wpm is not None:
+            wpm = max(1, int(_wpm))
+            self.scan_cfg.watch_pool_max = wpm
+            self.scan_cfg.realtime_sub_max = wpm
+            self.scan_cfg.display_top_n = wpm
+            
+        # ── SmartScanner ──
+        self.smart_scanner = SmartScanner(self.kiwoom, self.scan_cfg)
+        self.smart_scanner.store = self.snap_store
+        
+        # ── Application Layer ──
+        self.market_scheduler = MarketScheduler(self)
+        self.risk_manager = RiskManager(self.order_mgr, self.scan_cfg, self)
+        self.trading_controller = TradingController(
+            self.order_mgr, self.scan_cfg, self.risk_manager,
+            snap_store=self.snap_store, parent=self
+        )
+        
+        # ── HealthMonitor ──
+        def _on_freeze_handler():
+            force_fn = getattr(self.kiwoom, "force_unfreeze", None)
+            if force_fn:
+                force_fn()
+            
+        self.health_monitor = HealthMonitor(
+            scan_cfg=self.scan_cfg,
+            on_param_relax=lambda *args: None, # UI 델리게이트 필요
+            on_freeze=_on_freeze_handler,
+            on_reconnect=self.login_mgr.reconnect_silent
+        )
+        
+        # ── 텔레그램 ──
+        self.tg_bot = None
+        if _TG.get("enabled") and _TG.get("token"):
+            try:
+                # TelegramBot 임포트는 지연
+                from telegram_bot import TelegramBot
+                self.tg_bot = TelegramBot(_TG["token"], _TG["chat_id"], parent=self)
+            except Exception as e:
+                logger.warning("[텔레그램] 봇 초기화 실패: %s", e)
+                
+    def start_services(self):
+        """백그라운드 서비스 시작"""
+        if self.tg_bot:
+            self.tg_bot.start()
+        self.market_scheduler.start()
