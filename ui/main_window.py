@@ -1639,18 +1639,6 @@ class MainWindow(QMainWindow):
         self.portfolio_panel.sl_changed.connect(self._on_sl_changed)
         self.log_panel.append("[스캐너] SmartScanner 초기화 완료")
 
-        # TradingEngine MVC Controller
-        from engine.trading_engine import TradingEngine
-        self._engine = TradingEngine(
-            kiwoom=self._kiwoom,
-            order_manager=self.order_mgr,
-            snap_store=self._snap_store,
-            scan_cfg=self._scan_cfg,
-            audit=self._audit,
-            parent=self
-        )
-        self._engine.log_message.connect(self.log_panel.append)
-
         # ── ScannerLogHandler — scanner.audit → 대시보드 패널 중계 ─────────
         from scanner.smart_scanner import scan_log as _scan_audit_log
         self._scan_log_handler = ScannerLogHandler(self)
@@ -1787,6 +1775,9 @@ class MainWindow(QMainWindow):
         self.trading_controller.signal_rejected.connect(
             lambda msg: logger.debug(f"[신호 거절] {msg}")
         )
+
+        # TradingController → 청산 판정 로그
+        self.trading_controller.log_message.connect(self.log_panel.append)
 
         # HeaderBar 신호 → TradingController
         self.header.auto_trade_toggled.connect(self.trading_controller.set_auto_trading)

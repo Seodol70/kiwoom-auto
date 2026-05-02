@@ -26,6 +26,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from config import COST as _COST
 from logging_config import order_log, position_log
+from order.position_repository import PositionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +178,13 @@ class OrderManager(QObject):
         self.max_order_amount = max_order_amount
         self.max_positions    = max_positions
 
+        # OrderExecutor 초기화 (Kiwoom SendOrder 전담)
+        from order.order_executor import OrderExecutor
+        self._executor = OrderExecutor(kiwoom, account, max_order_amount)
+
         self.cash:      int = 0                          # 가용 예수금
         self.positions: dict[str, Position] = {}         # 보유 종목
+        self.position_repo = PositionRepository(self.positions)  # [NEW Phase 1] positions 캡슐화
         self.orders:    dict[str, OrderRecord] = {}      # 전체 주문 기록
         self._pending:  set[str] = set()                 # 주문 중 종목 (중복 방지)
         self._pending_sell_time: dict[str, datetime] = {}  # 매도 주문 접수 시각
@@ -1014,7 +1020,7 @@ class OrderManager(QObject):
         - 이미 partial_sold=True 이면 재호출 무시 (중복 방지)
         - 매도 체결 후 pos.qty는 체결 콜백에서 자동 감소 → trail은 남은 수량에 적용
         """
-        from scanner.smart_scanner import ScannerLogger
+        from scanner.scanner_logger import ScannerLogger
         pos = self.positions.get(code)
         if pos is None:
             logger.debug("[분할익절] %s 포지션 없음 — 스킵", code)
@@ -1053,14 +1059,8 @@ class OrderManager(QObject):
         qty:  int,
         price: int,
     ) -> str:
-        price_type = PriceType.MARKET if price == 0 else PriceType.LIMIT
-        rq_name    = f"{'매수' if order_type == OrderType.BUY else '매도'}_{code}"
-
-        ret = self._kiwoom._ocx.dynamicCall(
-            "SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)",
-            [rq_name, "1001", self._account,
-             order_type, code, qty, price, price_type, ""],
-        )
+        # OrderExecutor에 위임
+        ret, rq_name = self._executor.send(order_type, code, name, qty, price)
 
         side = "매수" if order_type == OrderType.BUY else "매도"
         if ret != 0:
