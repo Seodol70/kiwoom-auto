@@ -25,41 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 
-@dataclass
-class ExitContext:
-    """청산 판정용 파라미터 (시간대별 오버라이드)"""
-
-
-    sl_pct: float
-    """손절 기준 수익률 (%)"""
-
-
-    trail_activation: float
-    """트레일 활성화 수익 (%)"""
-
-
-    trail_tier1: float
-    """트레일 1단계 폭 (%)"""
-
-
-    trail_tier2: float
-    """트레일 2단계 폭 (%)"""
-
-
-    trail_tier3: float
-    """트레일 3단계 폭 (%)"""
-
-
-    time_cut_min: int
-    """타임컷 분"""
-
-
-    partial_profit_pct: float = 0.0
-    """분할익절 목표 수익률 (%)"""
-
-
-    atr_trail_enabled: bool = False
-    """ATR 기반 트레일 활성화"""
+from app.strategy import EntryStrategy, ExitStrategy, ExitContext
 
 
 
@@ -97,81 +63,29 @@ class TradingController(QObject):
         self._snap_store = snap_store
         self._auto_trading = False
 
+        from app.strategy import EntryStrategy, ExitStrategy
+        self._entry_strategy = EntryStrategy(self._order_mgr, self._risk_mgr)
+        self._exit_strategy = ExitStrategy(self._scan_cfg, self._snap_store)
+
+
+    @pyqtSlot(bool)
+    def set_auto_trading(self, enabled: bool) -> None:
+        self._auto_trading = enabled
+        logger.info("[TradingController] 자동매매 %s", "ON" if enabled else "OFF")
 
     # ─── 신호 필터링 ──────────────────────────────────────────────────
 
 
     @pyqtSlot(object)
     def handle_signal(self, sig: ScanSignal) -> bool:
-        """
-        신호 필터링 체인 (6단계).
-
-
-        Args:
-            sig: SmartScanner 발행 신호
-
-
-        Returns:
-            True if signal passes all filters
-
-
-        필터 순서 (critical — 변경 금지):
-            1. _auto_trading 플래그 확인
-            2. 포지션 수 한도 (5개)
-            3. 신규 매수 락 확인 (loss cut / profit lock)
-            4. 섹터 쏠림 확인
-            5. 예수금 부족 확인
-            6. 이미 보유 종목 중복 진입 방지
-        """
-
-
-        # 1️⃣ 자동매매 OFF → 신호 무시
-        if not self._auto_trading:
-            self.signal_rejected.emit(f"{sig.code}: 자동매매 OFF")
+        """신호 필터링 (EntryStrategy 위임)"""
+        passed, reason = self._entry_strategy.should_entry(sig, self._auto_trading)
+        
+        if not passed:
+            self.signal_rejected.emit(f"{sig.code}: {reason}")
             return False
 
-
-        # 2️⃣ 포지션 5개 풀
-        if len(self._order_mgr.positions) >= 5:
-            self.signal_rejected.emit(f"{sig.code}: 포지션 5개 풀")
-            return False
-
-
-        # 3️⃣ 손익 락 확인
-        if self._risk_mgr.is_new_entry_locked:
-            self.signal_rejected.emit(f"{sig.code}: 신규 매수 락 (손익한도)")
-            return False
-
-
-        if self._risk_mgr.is_daily_loss_cut_done:
-            self.signal_rejected.emit(f"{sig.code}: 손절 한도 도달")
-            return False
-
-
-        # 4️⃣ 섹터 쏠림 확인
-        sector = getattr(sig, "sector", "")
-        if sector and self._has_sector_overweight(sector):
-            self.signal_rejected.emit(f"{sig.code}: 섹터 쏠림 ({sector})")
-            return False
-
-
-        # 5️⃣ 예수금 부족 확인
-        required_cash = sig.price * sig.qty
-        available_cash = self._order_mgr.available_cash
-        if available_cash < required_cash:
-            self.signal_rejected.emit(
-                f"{sig.code}: 예수금 부족 ({available_cash:,} < {required_cash:,})"
-            )
-            return False
-
-
-        # 6️⃣ 중복 진입 방지
-        if sig.code in self._order_mgr.positions:
-            self.signal_rejected.emit(f"{sig.code}: 이미 보유 중")
-            return False
-
-
-        # ✅ 모든 필터 통과 → 진입 신호
+        # ✅ 모든 필터 통과 → 진입 신호 전송
         self._order_mgr.handle_signal(sig)
         return True
 
@@ -179,14 +93,6 @@ class TradingController(QObject):
     # ─── 필터 헬퍼 ──────────────────────────────────────────────────
 
 
-    def _has_sector_overweight(self, sector: str) -> bool:
-        """섹터 쏠림 확인 (동일 섹터 3개 이상 보유)"""
-        sector_count = sum(
-            1
-            for pos in self._order_mgr.positions.values()
-            if getattr(pos, "sector", "") == sector
-        )
-        return sector_count >= 3
 
 
     # ─── 포지션 청산 판정 ──────────────────────────────────────────────
@@ -213,24 +119,37 @@ class TradingController(QObject):
 
 
             # 청산 판정 순서 (hard stop부터 시작)
-            if self._check_hard_stop(pos, sell_qty):
+            # peak_price 갱신
+            self._exit_strategy.update_peak_price(pos)
+
+            # [REFACTORED] ExitStrategy 사용 (손절, 트레일링, 타임컷 통합)
+            should_exit, reason = self._exit_strategy.should_exit(pos, exit_ctx)
+            
+            if should_exit:
+                self.log_message.emit(f"🚀 [청산] {pos.name}({pos.code}) {reason}")
+                
+                # 손절 계열인 경우 블랙리스트 등록 (당일 재진입 방지)
+                if any(x in reason for x in ["Stop Loss", "Hard Stop", "Candle Stop"]):
+                    self._order_mgr.mark_stop_loss(pos.code)
+                    
+                self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
+                count += 1
                 continue
-            if self._check_candle_stop(pos, sell_qty):
-                continue
-            if self._check_stop_loss(pos, sell_qty, exit_ctx):
-                continue
+
+            # 나머지 특수 청산 로직 (분할익절 등 - 향후 ExitStrategy로 완전 통합 가능)
             if self._check_partial_profit(pos, sell_qty, exit_ctx):
+                count += 1
                 continue
             if self._check_breakeven_stop(pos, sell_qty):
-                continue
-            if self._check_trail_stop(pos, sell_qty, exit_ctx):
+                count += 1
                 continue
             if self._check_ema20_exit(pos, sell_qty):
+                count += 1
                 continue
             if self._check_trend_decay(pos, sell_qty):
+                count += 1
                 continue
-            if self._check_time_cut(pos, sell_qty, exit_ctx):
-                continue
+
 
 
     def _get_exit_context(self, now: datetime) -> ExitContext:

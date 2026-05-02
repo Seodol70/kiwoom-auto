@@ -41,7 +41,7 @@ from typing import Callable, ClassVar, Optional
 import pandas as pd
 
 
-from scanner.universe import _is_ordinary_stock
+from scanner.universe import is_ordinary_stock, is_pure_equity_name, filter_equity_rows
 from PyQt5.QtCore import QTimer
 from rich.console import Console
 from rich.live import Live
@@ -230,62 +230,9 @@ from scanner.config import SmartScannerConfig
 # ---------------------------------------------------------------------------
 
 
-def is_pure_equity_name(name: str) -> bool:
-    """
-    ETF·ETN·인버스·레버리지·스팩 및 국내 ETF 브랜드명이 들어가면 False.
+# (Filtering logic moved to scanner.universe)
 
 
-    스캐너 감시/스냅샷 적재 시 순수 주식만 남기기 위해 사용한다.
-    """
-    if not name or not str(name).strip():
-        return False
-    n = str(name).strip()
-    upper = n.upper()
-
-
-    # 강화된 필터링 — ETF/ETN/파생상품 전부 제외
-    exclude_kw = (
-        # 기본
-        "ETF", "ETN", "인버스", "레버리지", "곱버스", "역추적",
-        "2X", "3X", "5X", "10X", "스팩", "SPAC", "헷지", "HEDGE",
-        # 선물추적, 옵션, 수익증권
-        "선물", "옵션", "수익증권", "구조", "파생",
-        # ETF 브랜드
-        "KODEX", "TIGER", "KBSTAR", "HANAR", "KOSEF", "ARIRANG",
-        "TIMEFOLIO", "KINDEX", "ACE", "RISE", "SOL", "FOCUS",
-    )
-    for kw in exclude_kw:
-        if kw in n or kw in upper:
-            return False
-
-
-    return True
-
-
-
-
-def filter_equity_rows(rows: list[dict]) -> tuple[list[dict], int]:
-    """opt10030 등에서 받은 행 리스트에서 우선주·비주식(ETF 등)을 제거한다."""
-    out: list[dict] = []
-    dropped = 0
-    for r in rows:
-        code = str(r.get("code", "")).lstrip("A").strip()
-        if not _is_ordinary_stock(code):
-            dropped += 1
-            logger.debug("[유니버스필터] 우선주 제외 — %s(%s)", r.get("name", ""), code)
-            continue
-        nm = r.get("name", "")
-        if is_pure_equity_name(str(nm)):
-            out.append(r)
-        else:
-            dropped += 1
-            logger.debug(
-                "[유니버스필터] 제외 — %s(%s)",
-                nm, code,
-            )
-    if dropped:
-        logger.info("[유니버스필터] 우선주·ETF·파생 등 제외 %d건 → 잔여 %d건", dropped, len(out))
-    return out, dropped
 
 
 
@@ -539,7 +486,8 @@ from scanner.signal_evaluator import (
     check_volume_surge, check_chejan_strength, check_disparity_from_ma,
     check_ema20_filter, check_bullish_engulfing, check_bullish_pin_bar,
     check_breakout_gate, check_pre_surge, check_opening_surge,
-    check_opening_scalp, check_eod_entry, check_jdm_entry
+    check_opening_scalp, check_eod_entry, check_jdm_entry,
+    check_pullback_entry
 )
 
 
@@ -928,8 +876,8 @@ class SmartScanner:
 
         # ②-bis 요셉 시그널 추세 단계 갱신 (분 단위 1회)
         if getattr(self.cfg, "yosep_trend_enabled", True):
-            from strategy.jang_dong_min import get_trend_status
-            trend_level = get_trend_status(
+            from scanner.indicator_service import IndicatorService
+            trend_level = IndicatorService.get_trend_status(
                 closes=list(snap.closes_1min or []),
                 highs=list(snap.highs_1min or []),
                 lows=list(snap.lows_1min or []),
@@ -959,6 +907,8 @@ class SmartScanner:
                 sig = self._build_breakout_signal(snap)
             elif strategy == "JDM_ENTRY":
                 sig = self._build_jdm_signal(snap)
+            elif strategy == "PULLBACK":
+                sig = self._build_pullback_signal(snap)
             else:
                 logger.debug("[Strategy] 알 수 없는 전략명 스킵 — %s", strategy)
                 continue
@@ -1039,6 +989,19 @@ class SmartScanner:
             entry_candle_low=candle_low,
             near_daily_high=_dctx["near_high"],
             daily_ma20=_dctx["daily_ma20"],
+            change_pct=float(getattr(snap, "change_pct", 0) or 0),
+        )
+
+    def _build_pullback_signal(self, snap: StockSnapshot) -> Optional[ScanSignal]:
+        """PULLBACK_ENTRY 전략 평가 후 통과 시 ScanSignal을 반환한다."""
+        r_pullback = check_pullback_entry(snap, self.cfg)
+        if r_pullback is None:
+            return None
+            
+        candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+        return ScanSignal(
+            snap.code, snap.name, "PULLBACK", snap.current_price, r_pullback,
+            entry_candle_low=candle_low,
             change_pct=float(getattr(snap, "change_pct", 0) or 0),
         )
 

@@ -15,7 +15,17 @@ from PyQt5.QtWidgets import (
 )
 
 
-from config import TELEGRAM as _TG
+try:
+    from config import TELEGRAM as _TG
+except ModuleNotFoundError:
+    import sys
+    import os
+    # 프로젝트 루트(d:\prj\kiwoom-auto)를 찾아서 path에 추가
+    _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if _ROOT not in sys.path:
+        sys.path.insert(0, _ROOT)
+    from config import TELEGRAM as _TG
+
 from scanner.smart_scanner import format_trade_amount_korean
 from ui.components.common import _hline
 
@@ -29,6 +39,7 @@ class HeaderBar(QWidget):
     # 자동매매 ON/OFF 상태 변경 시 MainWindow 로 전달
     auto_trade_toggled = pyqtSignal(bool)      # True = 시작, False = 정지
     exit_requested = pyqtSignal()              # 프로그램 종료 요청
+    reload_requested = pyqtSignal()            # 설정 실시간 리로드 요청
     unlock_requested = pyqtSignal()            # 일일 손익 락 수동 해제 요청
     overnight_mode_toggled = pyqtSignal(bool)  # True = 야간보유 ON, False = OFF
     switch_real_requested = pyqtSignal()       # 실전투자 전환 버튼
@@ -65,6 +76,14 @@ class HeaderBar(QWidget):
         self._btn_auto.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
         self._btn_auto.setFixedSize(140, 30)
         self._btn_auto.clicked.connect(self._on_auto_clicked)
+
+
+        # ── 설정 리로드 버튼 ───────────────────────────────────────────
+        self._btn_reload = QPushButton("⚙ 설정 리로드")
+        self._btn_reload.setObjectName("btn_reload")
+        self._btn_reload.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        self._btn_reload.setFixedSize(100, 30)
+        self._btn_reload.clicked.connect(lambda: self.reload_requested.emit())
 
 
         # ── 재시작 버튼 ────────────────────────────────────────────────
@@ -133,6 +152,7 @@ class HeaderBar(QWidget):
         lay.addWidget(self._btn_overnight)
         lay.addWidget(self._btn_auto)
         lay.addWidget(self._btn_unlock)
+        lay.addWidget(self._btn_reload)
         lay.addWidget(self._btn_restart)
         lay.addWidget(self._btn_exit)
 
@@ -180,16 +200,22 @@ class HeaderBar(QWidget):
 
 
     def _on_restart_clicked(self) -> None:
-        """프로그램 재시작 버튼 클릭 — 소스 변경사항 반영"""
+        """프로그램 재시작 버튼 클릭 — run_qt.py 를 다시 실행"""
         import subprocess
         import sys
         import os
-        # 현재 스크립트의 절대 경로 (소스 변경 시 자동 반영)
-        script_path = os.path.abspath(__file__)
-        # 새 프로세스 시작
-        subprocess.Popen([sys.executable, script_path])
-        # 현재 프로세스 종료
-        self.exit_requested.emit()
+        
+        # 프로젝트 루트(d:\prj\kiwoom-auto)에 있는 run_qt.py 찾기
+        _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        run_qt_path = os.path.join(_ROOT, "run_qt.py")
+        
+        if os.path.exists(run_qt_path):
+            # 새 프로세스 시작 (run_qt.py)
+            subprocess.Popen([sys.executable, run_qt_path])
+            # 현재 프로세스 종료
+            self.exit_requested.emit()
+        else:
+            logger.error("[Restart] run_qt.py를 찾을 수 없습니다: %s", run_qt_path)
 
 
     def _on_exit_clicked(self) -> None:

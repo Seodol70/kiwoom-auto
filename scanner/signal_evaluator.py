@@ -1363,3 +1363,51 @@ def check_jdm_entry(
     reason = f"[{_slot}][{mode_tag}] {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} | {candle_reason}{_near_tag}"
     ScannerLogger.passed(snap.code, snap.name, mode_tag, reason)
     return reason
+
+
+def check_pullback_entry(
+    snap: StockSnapshot,
+    cfg:  SmartScannerConfig,
+) -> Optional[str]:
+    """
+    [NEW] 눌림목 진입 신호 (Pullback Entry).
+    
+    상승 추세(trend_level >= 2) 종목이 EMA20 근처까지 눌렸을 때 진입.
+    추세 상승장에서 '달리는 말에 올라타기' 대신 '잠시 쉬어갈 때'를 포착.
+    """
+    tlv = int(getattr(snap, "trend_level", 0))
+    if tlv < 2:
+        return None  # 최소 Medium Trend 이상 필요
+
+    closes = snap.closes_1min
+    if len(closes) < 20:
+        return None
+
+    from strategy.jang_dong_min import calc_ema, calc_rsi
+    ema20 = calc_ema(closes, 20)
+    rsi = calc_rsi(closes, 14)
+    if ema20 is None or rsi is None:
+        return None
+
+    # 1. EMA20 근처 확인 (0% ~ +0.8% 이내)
+    dist = (snap.current_price - ema20) / ema20 * 100
+    if not (0.0 <= dist <= 0.8):
+        return None
+
+    # 2. RSI 과열 해소 확인 (40 ~ 55)
+    # 이미 너무 과열된 상태(70+)에서의 눌림은 위험하므로 배제
+    if not (40.0 <= rsi <= 58.0):
+        return None
+
+    # 3. 거래량 확인 (일시적 거래 감소 확인 - 패닉 셀링 방지)
+    vols = snap.volumes_1min
+    if len(vols) >= 5:
+        avg_v5 = sum(vols[-6:-1]) / 5
+        if vols[-1] > avg_v5 * 1.5:
+             # 거래량이 실린 하락은 눌림목이 아니라 추세 붕괴일 수 있음
+             return None
+
+    reason = f"[PULLBACK] EMA20지지({dist:.2f}%) | RSI {rsi:.1f} | 추세Lv{tlv}"
+    ScannerLogger.passed(snap.code, snap.name, "PULLBACK", reason)
+    return reason
+

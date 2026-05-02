@@ -45,7 +45,7 @@ class ApplicationContext(QObject):
         self.kiwoom._on_order_msg_cb = self.order_mgr.on_order_msg
         
         # ── SmartScanner Config ──
-        self.scan_cfg = SmartScannerConfig.from_adaptive("config/adaptive_params.json")
+        self.scan_cfg = SmartScannerConfig.from_adaptive("params/adaptive_params.json")
         _yosep_preset = str(STRATEGY.get("yosep_preset", "") or "").strip().lower()
         if _yosep_preset:
             self.scan_cfg.apply_yosep_preset(_yosep_preset)

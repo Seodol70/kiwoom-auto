@@ -166,56 +166,86 @@ class IndicatorService:
 
     @staticmethod
     def get_trend_status(
-        ma7: Optional[float],
-        ma15: Optional[float],
-        ma20: Optional[float],
-        current_price: int,
-    ) -> dict:
+        closes: list[float],
+        highs: list[float],
+        lows: list[float],
+        volumes: list[int],
+        ema_period: int = 20,
+        atr_period: int = 14,
+        volume_lookback: int = 20,
+    ) -> int:
         """
-        추세 상태 판정.
-
-        Args:
-            ma7: 7일 이동평균
-            ma15: 15일 이동평균
-            ma20: 20일 이동평균
-            current_price: 현재가
-
-        Returns:
-            {
-                'is_uptrend': bool,
-                'is_aligned': bool (정배열),
-                'level': int (0=no trend, 1=weak, 2=normal, 3=strong)
-            }
+        [고도화] 추세 강도 판정 알고리즘 (Level 0~3).
+        
+        평가 요소:
+        1. 가격 위치 (Distance): EMA 대비 ATR 단위 거리
+        2. 기울기 (Slope): EMA의 단기 기울기
+        3. 가속도 (Acceleration): 기울기의 변화량 (추세 강화 확인)
+        4. 수급 (Volume): 최근 평균 대비 거래량 폭발력
         """
-        result = {"is_uptrend": False, "is_aligned": False, "level": 0}
+        need_price = max(ema_period + 5, atr_period + 1)
+        if len(closes) < need_price or len(highs) < need_price or len(lows) < need_price:
+            return 0
 
-        if not ma7 or not ma15 or not ma20:
-            return result
+        # ── 지표 계산 ──
+        ema_now = IndicatorService.calc_ema(closes, ema_period)
+        ema_prev = IndicatorService.calc_ema(closes[:-1], ema_period)
+        ema_prev2 = IndicatorService.calc_ema(closes[:-2], ema_period)
+        atr = IndicatorService.calc_atr(highs, lows, closes, atr_period)
+        
+        if any(v is None for v in [ema_now, ema_prev, ema_prev2, atr]) or atr <= 0:
+            return 0
 
-        # 정배열 확인: ma7 > ma15 > ma20
-        is_aligned = ma7 > ma15 > ma20
-        result["is_aligned"] = is_aligned
+        cur_price = float(closes[-1])
+        
+        # [필수] 상승 추세 기초 조건: 가격 > EMA AND EMA 기울기 > 0
+        if cur_price <= ema_now or ema_now <= ema_prev:
+            return 0
 
-        if not is_aligned:
-            return result
+        # 1️⃣ 거리 점수 (Distance Score)
+        dist_atr = (cur_price - ema_now) / atr
+        
+        # 2️⃣ 가속도 점수 (Slope Acceleration)
+        slope_now = ema_now - ema_prev
+        slope_prev = ema_prev - ema_prev2
+        is_accelerating = (slope_now > slope_prev)
 
-        # 현재가가 모든 MA 위에 있는가
-        is_above_all = current_price > ma7 > ma15 > ma20
-        result["is_uptrend"] = is_uptrend = is_aligned and is_above_all
-
-        # 추세 강도 판정
-        if is_uptrend:
-            diff_7_15 = (ma7 - ma15) / ma15 * 100
-            diff_15_20 = (ma15 - ma20) / ma20 * 100
-
-            if diff_7_15 > 3.0 and diff_15_20 > 2.0:
-                result["level"] = 3  # 강한 상승
-            elif diff_7_15 > 1.5 and diff_15_20 > 1.0:
-                result["level"] = 2  # 보통 상승
+        # 3️⃣ 수급 점수 (Volume Score)
+        need_vol = volume_lookback + 1
+        has_vol = (len(volumes) >= need_vol and any(v > 0 for v in volumes[-need_vol:]))
+        vol_ratio = 1.0
+        if has_vol:
+            avg_vol = float(np.mean(np.array(volumes[-(need_vol):-1], dtype=np.float64)))
+            if avg_vol > 0:
+                vol_ratio = float(volumes[-1]) / avg_vol
             else:
-                result["level"] = 1  # 약한 상승
+                has_vol = False
 
-        return result
+        # 4️⃣ 박스권 응축 확인 (Consolidation) - 변동성이 극도로 낮아진 상태
+        # ATR이 가격의 0.4% 이하이면 응축으로 판단
+        is_consolidating = (atr / cur_price < 0.004)
+
+        # ── 종합 판정 ──
+        # [Level 3: Strong] 강력한 추세 + 수급 + 가속 (또는 응축 후 돌파)
+        if dist_atr >= 1.2 and vol_ratio >= 1.5 and is_accelerating:
+            return 3
+        if dist_atr >= 0.8 and vol_ratio >= 2.0 and is_consolidating:
+            # 박스권 응축 후 거래량 실린 돌파는 거리가 짧아도 강력
+            return 3
+        if dist_atr >= 1.5 and vol_ratio >= 1.2:
+            return 3
+        
+        # [Level 2: Medium] 안정적 추세 + 수급
+        if dist_atr >= 0.7 and vol_ratio >= 1.1:
+            return 2
+        if dist_atr >= 1.0:
+            return 2
+            
+        # [Level 1: Weak] 추세 시작 초기
+        if dist_atr >= 0.2:
+            return 1
+            
+        return 0
 
     @staticmethod
     def check_daily_alignment(

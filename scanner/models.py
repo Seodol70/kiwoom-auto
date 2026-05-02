@@ -49,6 +49,8 @@ class StockSnapshot:
 
     # 1분봉 데이터 (외부에서 저장)
     closes_1min: list[float] = field(default_factory=list)
+    highs_1min: list[float] = field(default_factory=list)
+    lows_1min: list[float] = field(default_factory=list)
     volumes_1min: list[int] = field(default_factory=list)
 
     # 수급 정보

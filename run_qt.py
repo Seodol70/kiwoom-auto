@@ -8,6 +8,12 @@
 
 import sys
 import os
+
+# 프로젝트 루트를 path에 추가 (하위 모듈의 절대 경로 임포트 보장)
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import logging
 import logging.handlers
 

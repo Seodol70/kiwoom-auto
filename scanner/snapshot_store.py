@@ -20,55 +20,12 @@ from typing import Optional
 import pandas as pd
 
 from scanner.models import StockSnapshot
-from scanner.universe import _is_ordinary_stock
+from scanner.universe import is_ordinary_stock, is_pure_equity_name, filter_equity_rows
 
 logger = logging.getLogger(__name__)
 
 
-def is_pure_equity_name(name: str) -> bool:
-    """
-    ETF·ETN·인버스·레버리지·스팩 및 국내 ETF 브랜드명이 들어가면 False.
 
-    스캐너 감시/스냅샷 적재 시 순수 주식만 남기기 위해 사용한다.
-    """
-    if not name or not str(name).strip():
-        return False
-    n = str(name).strip()
-    upper = n.upper()
-
-    exclude_kw = (
-        "ETF", "ETN", "인버스", "레버리지", "곱버스", "역추적",
-        "2X", "3X", "5X", "10X", "스팩", "SPAC", "헷지", "HEDGE",
-        "선물", "옵션", "수익증권", "구조", "파생",
-        "KODEX", "TIGER", "KBSTAR", "HANAR", "KOSEF", "ARIRANG",
-        "TIMEFOLIO", "KINDEX", "ACE", "RISE", "SOL", "FOCUS",
-    )
-    for kw in exclude_kw:
-        if kw in n or kw in upper:
-            return False
-
-    return True
-
-
-def filter_equity_rows(rows: list[dict]) -> tuple[list[dict], int]:
-    """opt10030 등에서 받은 행 리스트에서 우선주·비주식(ETF 등)을 제거한다."""
-    out: list[dict] = []
-    dropped = 0
-    for r in rows:
-        code = str(r.get("code", "")).lstrip("A").strip()
-        if not _is_ordinary_stock(code):
-            dropped += 1
-            logger.debug("[유니버스필터] 우선주 제외 — %s(%s)", r.get("name", ""), code)
-            continue
-        nm = r.get("name", "")
-        if is_pure_equity_name(str(nm)):
-            out.append(r)
-        else:
-            dropped += 1
-            logger.debug("[유니버스필터] 제외 — %s(%s)", nm, code)
-    if dropped:
-        logger.info("[유니버스필터] 우선주·ETF·파생 등 제외 %d건 → 잔여 %d건", dropped, len(out))
-    return out, dropped
 
 
 def _df_cell_scalar(val, default=None):
@@ -416,10 +373,12 @@ class SnapshotStore:
             prev_close    = safe_int_cell("prev_close",    0),
             change_pct    = chg_pct_cached if chg_pct_cached != 0 else safe_float_cell("change_pct",  0.0),
             closes_1min   = closes_list,
+            highs_1min    = highs_list,
+            lows_1min     = lows_list,
             volumes_1min  = vols_list,
             daily_closes  = daily_closes,
-            daily_highs   = [],  # not used in tests
-            daily_lows    = [],  # not used in tests
+            daily_highs   = [daily_high_prev],
+            daily_lows    = [daily_low_prev],
             foreign_net_buy = inv_foreign,
             inst_net_buy    = inv_inst,
             rank             = safe_int_cell("rank", 0),

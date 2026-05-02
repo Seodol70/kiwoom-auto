@@ -52,11 +52,13 @@ class ScannerWorker(QObject):
     def run(self) -> None:
         import logging as _logging
         _log = _logging.getLogger("ScannerWorker")
-        from scanner.smart_scanner import (
+        from scanner.signal_evaluator import (
             check_breakout, check_jdm_entry, check_breakout_gate,
             check_pre_surge, check_opening_scalp, check_opening_surge, check_eod_entry,
-            is_pure_equity_name, _resolve_time_slot, _get_slot_value,
+            _resolve_time_slot, _get_slot_value,
         )
+        from scanner.universe import is_pure_equity_name
+
         from strategy.jang_dong_min import get_trend_status as _gts
         self._running = True
         self.log_message.emit("[ScannerWorker] 시작 — SnapshotStore 데이터 대기 중...")
@@ -155,10 +157,10 @@ class ScannerWorker(QObject):
                     _atr_p  = int(getattr(self._cfg, "yosep_atr_period",      14))
                     _vol_lb = int(getattr(self._cfg, "yosep_volume_lookback", 20))
                     _need   = max(_ema_p + 1, _atr_p + 1)
-                    _cl = list(snap.closes_1min)
-                    _hi = list(snap.highs_1min)
-                    _lo = list(snap.lows_1min)
-                    _vl = list(snap.volumes_1min)
+                    _cl = list(snap.closes_1min or [])
+                    _hi = list(snap.highs_1min or [])
+                    _lo = list(snap.lows_1min or [])
+                    _vl = list(snap.volumes_1min or [])
                     if len(_cl) >= _need and len(_hi) >= _need and len(_lo) >= _need:
                         _tlv = _gts(
                             closes=_cl, highs=_hi, lows=_lo, volumes=_vl,
@@ -253,10 +255,11 @@ class ScannerWorker(QObject):
 
 
         # ── 슬롯별 신호 라우팅 ────────────────────────────────
-        from scanner.smart_scanner import (
+        from scanner.signal_evaluator import (
             check_eod_entry, check_pre_surge, check_opening_scalp, check_jdm_entry,
-            check_breakout, check_breakout_gate, ScanSignal
+            check_breakout, check_breakout_gate
         )
+        from scanner.models import ScanSignal
         from scanner.indicator_service import IndicatorService
 
 
@@ -581,6 +584,33 @@ class ScannerWorker(QObject):
 
     def stop(self) -> None:
         self._running = False
+
+    def cleanup_stale_data(self, active_codes: set[str]) -> int:
+        """오래된 내부 상태(쿨다운, 대기 신호 등)를 정리하여 메모리 누수를 방지한다."""
+        import time as _time
+        now_mono = _time.monotonic()
+        cleaned = 0
+
+        # 1. BREAKOUT 대기 — 60분 이상 경과한 항목 제거
+        stale_bp = [
+            c for c, v in list(self._breakout_pending.items())
+            if (now_mono - v.get("first_time", now_mono)) > 3600
+        ]
+        for c in stale_bp:
+            self._breakout_pending.pop(c, None)
+            cleaned += 1
+
+        # 2. 신호 쿨다운 — 보유 중이 아닌 & 마지막 emit 2시간 초과 항목 제거
+        stale_emit = [
+            c for c, t in list(self._signal_last_emit_mono.items())
+            if c not in active_codes and (now_mono - t) > 7200
+        ]
+        for c in stale_emit:
+            self._signal_last_emit_mono.pop(c, None)
+            self._signal_prev_active.pop(c, None)
+            cleaned += 1
+
+        return cleaned
 
 
 

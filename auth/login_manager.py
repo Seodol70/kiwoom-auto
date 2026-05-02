@@ -144,14 +144,14 @@ class LoginManager(QObject):
         self.server_mode: str = ""   # "모의투자" | "실전투자"
         self.use_real:    bool = False
 
-        self._account_cache_file = "config/last_account.txt"
+        self._account_cache_file = "params/last_account.txt"
 
         self._kiwoom._ocx.OnEventConnect.connect(self._on_event_connect)
 
     def _save_last_account(self) -> None:
         try:
             import os, json
-            os.makedirs("config", exist_ok=True)
+            os.makedirs("params", exist_ok=True)
             with open(self._account_cache_file, "w", encoding="utf-8") as f:
                 json.dump({"account": self.account, "use_real": self.use_real}, f)
         except Exception as e:

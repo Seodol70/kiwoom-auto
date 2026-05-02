@@ -780,17 +780,10 @@ class OrderManager(QObject):
 
     def _is_buy_allowed(self, code: str, name: str) -> bool:
         """ETF/ETN/관리·정지·투자경고 종목을 매수 직전에 강제 차단한다."""
-        # 1) 이름 키워드 차단 (scanner.smart_scanner.is_pure_equity_name 과 동일)
-        nm_orig = (name or "").strip()
-        nm = nm_orig.upper()
-        exclude_kw = (
-            "ETF", "ETN", "인버스", "레버리지", "곱버스", "역추적",
-            "2X", "3X", "5X", "10X", "스팩", "SPAC", "헷지", "HEDGE",
-            "선물", "옵션", "수익증권", "구조", "파생",
-            "KODEX", "TIGER", "KBSTAR", "HANAR", "KOSEF", "ARIRANG",
-            "TIMEFOLIO", "KINDEX", "ACE", "RISE", "SOL", "FOCUS",
-        )
-        if any(kw in nm_orig or kw in nm for kw in exclude_kw):
+        from scanner.universe import is_pure_equity_name
+        
+        # 1) 이름 키워드 차단
+        if not is_pure_equity_name(name):
             msg = f"매수 차단 — ETF/ETN/파생 종목 ({name} {code})"
             logger.warning(msg)
             self.order_failed.emit(msg)
@@ -1365,3 +1358,31 @@ class OrderManager(QObject):
                 f"{filled_price:,}",
             )
         self.order_filled.emit(payload)
+
+    def cleanup_stale_data(self, active_codes: set[str]) -> int:
+        """오래된 내부 상태(신호 시각, 주문 기록 등)를 정리하여 메모리 누수를 방지한다."""
+        import time as _time
+        now_mono = _time.monotonic()
+        cleaned = 0
+
+        # 1. 당일 신호 쿨다운 — 보유 중이 아닌 코드 중 마지막 신호 2시간 초과 항목 제거
+        stale_sig = [
+            c for c, t in list(self._signal_last_time.items())
+            if c not in active_codes and (now_mono - t) > 7200
+        ]
+        for c in stale_sig:
+            self._signal_last_time.pop(c, None)
+            cleaned += 1
+
+        # 2. 과거 주문 레코드 — 1000건 초과 시 오래된 것부터 삭제 (당일 체결만 보존)
+        if len(self.orders) > 1000:
+            sorted_keys = sorted(
+                self.orders.keys(),
+                key=lambda k: self.orders[k].ordered_at
+            )
+            to_del = sorted_keys[: len(self.orders) - 500]
+            for k in to_del:
+                del self.orders[k]
+            cleaned += len(to_del)
+
+        return cleaned

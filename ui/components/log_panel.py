@@ -251,6 +251,11 @@ class LogPanel(QWidget):
         outer.addWidget(splitter)
 
 
+    def verticalScrollBar(self):
+        """메인 로그 영역의 수직 스크롤바 반환 (MainWindow 버퍼링 호환성용)"""
+        return self._log.verticalScrollBar()
+
+
     # ── 왼쪽 패널: 스캐너 진단 ───────────────────────────────────────────────
 
 
@@ -282,8 +287,9 @@ class LogPanel(QWidget):
     @pyqtSlot(str)
     def append(self, text: str) -> None:
         """주문·체결·시스템 이벤트 (기존 경로)."""
-        ts = datetime.now().strftime("%H:%M:%S")
-
+        import re
+        has_ts = re.match(r"^\[\d{2}:\d{2}:\d{2}\]", text)
+        ts_str = "" if has_ts else f"[{datetime.now().strftime('%H:%M:%S')}] "
 
         if "체결" in text or "완료" in text:
             color = "#89dceb"
@@ -294,9 +300,8 @@ class LogPanel(QWidget):
         else:
             color = "#6c7086"
 
+        self._log.append(f'<span style="color:{color};">{ts_str}{text}</span>')
 
-        self._log.append(f'<span style="color:{color};">[{ts}] {text}</span>')
-        self._log.moveCursor(QTextCursor.MoveOperation.End)
 
 
     # ── 오른쪽 패널: 시스템 로그 ─────────────────────────────────────────────

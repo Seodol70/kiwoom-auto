@@ -10,7 +10,7 @@ analysis/feedback_engine.py
     → classify_losses()
     → compute_adjustments()
     → apply_safety_guards()          ← 바운드 / 일일한도 / 연속일 체크
-    → write_adaptive_params()        → config/adaptive_params.json
+    → write_adaptive_params()        → params/adaptive_params.json
 
 다음 날 시작 시 SmartScannerConfig.from_adaptive() 가 자동 로드.
 """
@@ -45,7 +45,7 @@ SLOT_DANGER_MIN_TRADES  = 2      # 최소 건수 (건수 부족 시 판정 보�
 SLOT_GOLDEN_WIN_RATE    = 0.60   # 황금 구간 승률 60% 이상
 
 # peak_pnl_history 경로 (프로젝트 루트 기준)
-PEAK_HISTORY_PATH = "config/peak_pnl_history.json"
+PEAK_HISTORY_PATH = "params/peak_pnl_history.json"
 PEAK_HISTORY_DAYS = 5            # 최근 N일 평균 peak 사용
 PROFIT_LOCK_RATIO = 0.70         # 평균 peak 의 70% 를 lock 으로 설정
 PROFIT_LOCK_MIN   = 30_000       # lock 최솟값 (원) — 너무 작으면 비활성
@@ -221,7 +221,7 @@ class FeedbackEngine:
     def __init__(
         self,
         log_dir:       str = "logs",
-        adaptive_path: str = "config/adaptive_params.json",
+        adaptive_path: str = "params/adaptive_params.json",
     ):
         self.log_dir       = Path(log_dir)
         self.adaptive_path = Path(adaptive_path)
@@ -1003,7 +1003,7 @@ class FeedbackEngine:
         return path
 
     def _load_peak_history(self) -> List[Dict]:
-        """config/peak_pnl_history.json → list[{date, peak_pnl}]"""
+        """params/peak_pnl_history.json → list[{date, peak_pnl}]"""
         p = self._peak_history_path()
         if not p.exists():
             return []

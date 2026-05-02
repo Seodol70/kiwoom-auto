@@ -130,18 +130,57 @@ def _fetch_stock_state(kiwoom, code: str) -> str:
     ).strip()
 
 
-def _is_ordinary_stock(code: str) -> bool:
+def is_pure_equity_name(name: str) -> bool:
+    """
+    ETF·ETN·인버스·레버리지·스팩 및 국내 ETF 브랜드명이 들어가면 False.
+    순수 주식 종목만 필터링하기 위해 사용한다.
+    """
+    if not name or not str(name).strip():
+        return False
+    n = str(name).strip()
+    upper = n.upper()
+
+    exclude_kw = (
+        "ETF", "ETN", "인버스", "레버리지", "곱버스", "역추적",
+        "2X", "3X", "5X", "10X", "스팩", "SPAC", "헷지", "HEDGE",
+        "선물", "옵션", "수익증권", "구조", "파생",
+        "KODEX", "TIGER", "KBSTAR", "HANAR", "KOSEF", "ARIRANG",
+        "TIMEFOLIO", "KINDEX", "ACE", "RISE", "SOL", "FOCUS",
+    )
+    for kw in exclude_kw:
+        if kw in n or kw in upper:
+            return False
+
+    return True
+
+
+def filter_equity_rows(rows: list[dict]) -> tuple[list[dict], int]:
+    """리스트 형태의 종목 데이터에서 비적격 종목(우선주, ETF 등)을 일괄 제거한다."""
+    out: list[dict] = []
+    dropped = 0
+    for r in rows:
+        code = str(r.get("code", "")).lstrip("A").strip()
+        if not is_ordinary_stock(code):
+            dropped += 1
+            continue
+        nm = r.get("name", "")
+        if is_pure_equity_name(str(nm)):
+            out.append(r)
+        else:
+            dropped += 1
+    return out, dropped
+
+
+def is_ordinary_stock(code: str) -> bool:
     """
     보통주만 True. 우선주·ETF·ETN 은 False.
-
-    키움 코드 규칙:
-      - 6자리 숫자
-      - 끝자리 0: 보통주 (삼성전자 005930)
-      - 끝자리 5: 보통주 일부 (카카오 035720)
-      - 끝자리 0 외: 우선주 (삼성전자우 005935 → 끝 5는 예외적으로 허용)
-      - "1"로 시작: ETF (KODEX200 069500 → 실제론 069로 시작하므로 코드 앞 검토)
-    실용적 규칙: 끝자리가 0 또는 5 인 6자리 숫자만 허용
+    키움 규칙: 6자리 숫자이면서 끝자리가 0 또는 5인 경우만 보통주로 간주 (단순화).
     """
-    if len(code) != 6 or not code.isdigit():
+    if not code or len(code) != 6 or not code.isdigit():
         return False
     return code[-1] in ("0", "5")
+
+
+def _is_ordinary_stock(code: str) -> bool:
+    """(레거시 호환용)"""
+    return is_ordinary_stock(code)

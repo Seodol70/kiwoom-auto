@@ -136,56 +136,62 @@ def get_trend_status(
     volume_lookback: int = 20,
 ) -> int:
     """
-    요셉 시그널 스타일 추세 강도(0~3) 반환.
-
-    0: No Trend
-    1: Weak Trend
-    2: Medium Trend
-    3: Strong Trend
-
-    volumes 가 부족하면 EMA/ATR 거리만으로 판정 (거래량 가중 없이 한 단계 낮춤).
+    고도화된 추세 강도(0~3) 판정 알고리즘 — IndicatorService 위임
     """
-    need_price = max(ema_period + 1, atr_period + 1)
-    if len(closes) < need_price or len(highs) < need_price or len(lows) < need_price:
-        return 0
+    from scanner.indicator_service import IndicatorService
+    return IndicatorService.get_trend_status(
+        closes, highs, lows, volumes, ema_period, atr_period, volume_lookback
+    )
 
-    ema_now = calc_ema(closes, ema_period)
-    ema_prev = calc_ema(closes[:-1], ema_period)
-    atr = calc_atr(highs, lows, closes, atr_period)
-    if ema_now is None or ema_prev is None or atr is None or atr <= 0:
-        return 0
 
-    cur_price = float(closes[-1])
-    # 상승 추세 최소 조건: 가격이 EMA 위 + EMA 기울기 양수
+    
+    # [필수] 상승 추세 기초 조건: 가격 > EMA AND EMA 기울기 > 0
     if cur_price <= ema_now or ema_now <= ema_prev:
         return 0
 
+    # 1️⃣ 거리 점수 (Distance Score)
     dist_atr = (cur_price - ema_now) / atr
+    
+    # 2️⃣ 가속도 점수 (Slope Acceleration)
+    slope_now = ema_now - ema_prev
+    slope_prev = ema_prev - ema_prev2
+    is_accelerating = (slope_now > slope_prev)
 
-    # 거래량 데이터가 충분하면 volume 가중 판정
+    # 3️⃣ 수급 점수 (Volume Score)
     need_vol = volume_lookback + 1
     has_vol = (len(volumes) >= need_vol and any(v > 0 for v in volumes[-need_vol:]))
+    vol_ratio = 1.0
     if has_vol:
         avg_vol = float(np.mean(np.array(volumes[-(need_vol):-1], dtype=np.float64)))
-        if avg_vol <= 0:
+        if avg_vol > 0:
+            vol_ratio = float(volumes[-1]) / avg_vol
+        else:
             has_vol = False
 
-    if has_vol:
-        vol_ratio = float(volumes[-1]) / avg_vol
-        if dist_atr >= 1.30 and vol_ratio >= 1.20:   # 2026-04-17: 1.50→1.20 (신호 포착 확대)
-            return 3
-        if dist_atr >= 0.70 and vol_ratio >= 1.20:
-            return 2
-        if dist_atr >= 0.25 and vol_ratio >= 0.90:
-            return 1
-    else:
-        # 거래량 미확보 — EMA/ATR 거리만으로 판정 (한 단계 보수적 적용)
-        if dist_atr >= 1.30:
-            return 2   # volume 없이 3→2
-        if dist_atr >= 0.70:
-            return 1   # volume 없이 2→1
-        if dist_atr >= 0.25:
-            return 1
+    # 4️⃣ 박스권 응축 확인 (Consolidation) - 변동성이 극도로 낮아진 상태
+    # ATR이 가격의 0.4% 이하이면 응축으로 판단
+    is_consolidating = (atr / cur_price < 0.004)
+
+    # ── 종합 판정 ──
+    # [Level 3: Strong] 강력한 추세 + 수급 + 가속 (또는 응축 후 돌파)
+    if dist_atr >= 1.2 and vol_ratio >= 1.5 and is_accelerating:
+        return 3
+    if dist_atr >= 0.8 and vol_ratio >= 2.0 and is_consolidating:
+        # 박스권 응축 후 거래량 실린 돌파는 거리가 짧아도 강력
+        return 3
+    if dist_atr >= 1.5 and vol_ratio >= 1.2:
+        return 3
+    
+    # [Level 2: Medium] 안정적 추세 + 수급
+    if dist_atr >= 0.7 and vol_ratio >= 1.1:
+        return 2
+    if dist_atr >= 1.0: # 수급 부족해도 거리가 충분하면 2단계
+        return 2
+        
+    # [Level 1: Weak] 초기 추세
+    if dist_atr >= 0.2:
+        return 1
+        
     return 0
 
 

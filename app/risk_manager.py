@@ -42,6 +42,10 @@ class RiskManager(QObject):
         self._daily_loss_cut_done = False
         self._manual_unlock_active = False
 
+    def update_config(self, scan_cfg: SmartScannerConfig) -> None:
+        """설정 객체 참조를 갱신한다."""
+        self._scan_cfg = scan_cfg
+
     # ─── 공개 인터페이스 ──────────────────────────────────────────────
 
     @property
