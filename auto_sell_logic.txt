@@ -1,0 +1,416 @@
+    def _auto_sell_by_pnl(self) -> None:
+        """
+        당일 앱 매수분(qty_buy_today_app)만 익절/손절에 도달하면 해당 수량만 시장가 매도.
+        HTS·전일 보유분은 여기서 매도하지 않는다.
+
+        [신규 전략 — 캔들 마감 기반]
+        - Hard Stop (config hard_stop_pct): 즉시 강제 전량 매도
+        - 캔들 저가 손절: 진입 캔들 저점 이탈 시 전량 매도
+        - 손절(설정값, config stop_loss_pct): 이하 시 전량 매도
+        - 트레일 스탑: 고점(peak_price) 대비 trail_pct% 하락 시 전량 매도
+            · trail_activation_pct 이상 수익 달성 시 활성화
+            · 수익 구간별 trail_pct 차등 (tier1/2/3)
+        - Time-cut: time_cut_minutes(기본 25분) 경과 → 수익률 무관 전량 강제 청산 (안전망)
+        """
+        import time as _time
+        from datetime import datetime as _datetime
+
+        if _time.monotonic() < getattr(self, "_sl_tp_warmup_end", 0.0):
+            return
+
+        # ━━━ 실시간 보유 종목 수익률 로깅 (1분에 한 번만) ━━━
+        positions = list(self.order_mgr.positions.items())
+        if positions:
+            _now_mono = _time.monotonic()
+            _last = getattr(self, "_pos_log_last", 0.0)
+            if _now_mono - _last >= 60.0:
+                self._pos_log_last = _now_mono
+                pos_summary = []
+                for code, pos in positions:
+                    chg = float(pos.price_change_pct_vs_avg)
+                    peak_mark = f" [고점{pos.peak_price:,}]" if pos.peak_price > 0 else ""
+                    _sec_tag = f" [섹터:{getattr(pos, 'sector', '')[:4]}]" if getattr(pos, "sector", "") else ""
+                    pos_summary.append(f"{pos.name}({code}):{chg:+.2f}%{peak_mark}{_sec_tag}")
+                logger.info(f"[포지션현황] 보유 {len(positions)}개 | {' | '.join(pos_summary)}")
+
+        now_dt = _datetime.now()
+
+        # ATR 트레일 계산용 import — 루프 밖에서 1회만 (매 종목마다 호출 방지)
+        try:
+            from strategy.jang_dong_min import calc_atr as _calc_atr_fn
+        except Exception:
+            _calc_atr_fn = None
+
+        # ── 현재 시간 슬롯 감지 (청산 파라미터 오버라이드용) ─────────────────────
+        _now_min = now_dt.hour * 60 + now_dt.minute
+        _is_opening = (9 * 60) <= _now_min < (9.5 * 60)    # 09:00~09:30
+        _is_midday = (11 * 60) <= _now_min < (13 * 60)     # 11:00~13:00
+
+        if _is_opening:
+            _eff_sl_pct      = float(getattr(self._scan_cfg, "stop_loss_pct_opening",        self._auto_sl_pct))
+            _eff_trail_act   = self._scan_cfg.trail_activation_pct
+            _eff_trail_tier1 = self._scan_cfg.trail_pct_tier1
+            _eff_trail_tier2 = self._scan_cfg.trail_pct_tier2
+            _eff_time_cut    = self._scan_cfg.time_cut_minutes
+        elif _is_midday:
+            _eff_sl_pct      = float(getattr(self._scan_cfg, "stop_loss_pct_midday",        self._auto_sl_pct))
+            _eff_trail_act   = float(getattr(self._scan_cfg, "trail_activation_pct_midday",  self._scan_cfg.trail_activation_pct))
+            _eff_trail_tier1 = float(getattr(self._scan_cfg, "trail_pct_tier1_midday",       self._scan_cfg.trail_pct_tier1))
+            _eff_trail_tier2 = float(getattr(self._scan_cfg, "trail_pct_tier2_midday",       self._scan_cfg.trail_pct_tier2))
+            _eff_time_cut    = int(getattr(self._scan_cfg,   "time_cut_minutes_midday",      self._scan_cfg.time_cut_minutes))
+        else:
+            _eff_sl_pct      = self._auto_sl_pct
+            _eff_trail_act   = self._scan_cfg.trail_activation_pct
+            _eff_trail_tier1 = self._scan_cfg.trail_pct_tier1
+            _eff_trail_tier2 = self._scan_cfg.trail_pct_tier2
+            _eff_time_cut    = self._scan_cfg.time_cut_minutes
+
+        # ━━━ 포지션별 청산 판정 ━━━
+        for code, pos in positions:
+            if self.order_mgr.is_pending(code):
+                continue
+            qty_today = getattr(pos, "qty_buy_today_app", 0) or 0
+            if qty_today <= 0:
+                qty_today = pos.qty
+            sell_qty = min(pos.qty, qty_today)
+            if sell_qty <= 0:
+                continue
+
+            chg = float(pos.price_change_pct_vs_avg)
+
+            # ⚠️ Hard Stop: config hard_stop_pct 이하 손실 → 즉시 강제 매도
+            if chg <= self._hard_stop_pct:
+                logger.warning(
+                    "[Hard Stop] %s(%s) 손실률 %.2f%% (≤ %.1f%%) — 강제 매도 %d주",
+                    pos.name, code, chg, self._hard_stop_pct, sell_qty
+                )
+                self.log_panel.append(
+                    f"🔴 [Hard Stop] {pos.name}({code}) 손실률 {chg:+.2f}% "
+                    f"(기준 {self._hard_stop_pct:.1f}%) — {sell_qty}주 강제 매도"
+                )
+                self._audit.log_sell_decision(
+                    code, f"Hard Stop {chg:+.2f}% (기준 {self._hard_stop_pct:.1f}%)",
+                    pos.current_price,
+                )
+                self.order_mgr.mark_stop_loss(code)
+                self.order_mgr.force_exit(
+                    code, pos.name, sell_qty,
+                    reason=f"Hard Stop {self._hard_stop_pct:.1f}%"
+                )
+                continue
+
+            # ━━━ 캔들 저가 손절 (진입 캔들 저점 이탈) ━━━
+            # EOD 포지션은 갭 체크(09:00) 이전까지 캔들손절 제외 — 종가 부근 저가 기반 손절가는 너무 타이트
+            _is_eod_pre_gap = (getattr(pos, "eod_trade", False)
+                               and not getattr(pos, "overnight_held", False))
+            if _is_eod_pre_gap:
+                pass  # 갭 체크 이전 EOD 포지션 — 캔들손절 스킵
+            elif pos.candle_stop_price > 0 and pos.current_price <= pos.candle_stop_price:
+                self.log_panel.append(
+                    f"🔴 [캔들손절] {pos.name}({code}) 현재가 {pos.current_price:,} ≤ "
+                    f"손절가 {pos.candle_stop_price:,}원 — {sell_qty}주 매도"
+                )
+                self._audit.log_sell_decision(
+                    code,
+                    f"캔들손절 (현재가 {pos.current_price:,} ≤ 손절가 {pos.candle_stop_price:,})",
+                    pos.current_price,
+                )
+                self.order_mgr.mark_stop_loss(code)
+                self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                continue
+
+            # ━━━ 손절 ━━━
+            # EOD 포지션은 당일 손절 제외 — 익일 갭 체크(09:00) 및 타임컷(09:30)으로 관리
+            _is_eod_pre_gap = (getattr(pos, "eod_trade", False)
+                               and not getattr(pos, "overnight_held", False))
+            if not _is_eod_pre_gap and chg <= _eff_sl_pct:
+                # [NEW] Trend Protect (EMA20 지지 확인)
+                _ema_protected = False
+                if getattr(self._scan_cfg, "trend_protect_enabled", True):
+                    _snap_tp = self._snap_store.get_snapshot(code) if hasattr(self, "_snap_store") else None
+                    if _snap_tp is not None:
+                        _cls_tp = list(getattr(_snap_tp, "closes_1min", []) or [])
+                        if len(_cls_tp) >= 20:
+                            from strategy.jang_dong_min import calc_ema as _calc_ema_tp
+                            _ema20_tp = _calc_ema_tp(_cls_tp, 20)
+                            if _ema20_tp and pos.current_price > _ema20_tp:
+                                _ema_protected = True
+                                self.log_panel.append(
+                                    f"🛡️ [눌림목 보류] {pos.name}({code}) 손절가({chg:+.2f}%) 도달이나 "
+                                    f"EMA20({_ema20_tp:,.0f}) 지지 중 — 청산 보류"
+                                )
+
+                if _ema_protected:
+                    pass  # EMA20 지지로 손절 보류
+                else:
+                    position_log.info(
+                        "[청산결정:손절] %s(%s) 현재가=%d 평단=%d 수익률=%+.2f%% peak=%d",
+                        pos.name, code, pos.current_price, pos.avg_price, chg, pos.peak_price,
+                    )
+                    self.log_panel.append(
+                        f"🔴 [손절] {pos.name}({code}) 하락률 {chg:+.2f}% — {sell_qty}주 매도"
+                    )
+                    self._audit.log_sell_decision(
+                        code, f"손절 {chg:+.2f}% (기준 {_eff_sl_pct:.1f}%)",
+                        pos.current_price,
+                    )
+                    self.order_mgr.mark_stop_loss(code)
+                    self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                    continue
+
+            # ━━━ [분할 익절] 목표 수익률 도달 시 일부 매도 ━━━
+            # EOD 포지션은 갭 체크(overnight_held=True) 이전까지 분할익절 제외 — 오버나이트 계획 유지
+            _eod_pre_gap = (getattr(pos, "eod_trade", False)
+                            and not getattr(pos, "overnight_held", False))
+            if not _eod_pre_gap:
+                # 신고가 근처 진입 종목의 TP 부스트 — 진입 슬롯에 따라 차등 적용
+                # MORNING(09:30~11:00): +5%   MIDDAY(11:00~13:00): +3.5%   AFTERNOON(13:00~): 미적용
+                _partial_pct = self._scan_cfg.partial_profit_pct
+                if getattr(pos, "near_daily_high", False):
+                    _entry_t = getattr(pos, "entry_time", None)
+                    _entry_h = _entry_t.hour * 60 + _entry_t.minute if _entry_t else 0
+                    if _entry_h < 11 * 60:        # OPENING / MORNING (09:00~11:00)
+                        _near_high_tp = float(getattr(self._scan_cfg, "daily_near_high_tp_pct", 5.0))
+                    elif _entry_h < 13 * 60:      # MIDDAY (11:00~13:00) — 절충
+                        _near_high_tp = float(getattr(self._scan_cfg, "daily_near_high_tp_pct", 5.0)) * 0.7
+                    else:                         # AFTERNOON (13:00~) — 타임컷 25분에 묶여 부스트 역효과
+                        _near_high_tp = 0.0
+                    if _near_high_tp > 0:
+                        _partial_pct = max(_partial_pct, _near_high_tp)
+                if (self._scan_cfg.partial_profit_enabled
+                        and not pos.partial_sold
+                        and pos.avg_price > 0
+                        and chg >= _partial_pct):
+                    _p_qty = self.order_mgr.partial_exit(
+                        code, pos.name,
+                        sell_ratio=self._scan_cfg.partial_sell_ratio,
+                        reason=f"분할익절 +{chg:.2f}% 달성",
+                    )
+                    if _p_qty > 0:
+                        self.log_panel.append(
+                            f"✂️ [분할익절] {pos.name}({code}) +{chg:.2f}% — "
+                            f"{_p_qty}주 ({self._scan_cfg.partial_sell_ratio*100:.0f}%) 매도"
+                        )
+                        self._audit.log_sell_decision(
+                            code,
+                            f"분할익절 +{chg:.2f}% (기준 {self._scan_cfg.partial_profit_pct:.1f}%)",
+                            pos.current_price,
+                        )
+                        continue  # 이번 사이클 trail 스킵, 다음 사이클부터 trail 정상 적용
+
+            # ━━━ 본절가 스탑: 분할 익절 후 평단 이탈 시 잔여 전량 청산 ━━━
+            if (self._scan_cfg.breakeven_stop_enabled
+                    and pos.partial_sold
+                    and pos.avg_price > 0):
+                _buf = self._scan_cfg.breakeven_stop_buffer_pct
+                _be_threshold = pos.avg_price * (1 - _buf / 100)
+                if pos.current_price <= _be_threshold:
+                    self.log_panel.append(
+                        f"🛡️ [본절가스탑] {pos.name}({code}) "
+                        f"현재가 {pos.current_price:,} ≤ 본절가 {_be_threshold:,.0f}원 "
+                        f"— 잔여 {sell_qty}주 전량 청산 (분할익절 수익 보호)"
+                    )
+                    self._audit.log_sell_decision(
+                        code,
+                        f"본절가스탑 현재가 {pos.current_price:,} ≤ {_be_threshold:,.0f}원 "
+                        f"(분할익절 후 평단 이탈)",
+                        pos.current_price,
+                    )
+                    self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                    continue
+
+            # ━━━ 트레일 스탑: 고점 대비 하락 시 전량 청산 ━━━
+            # EOD 포지션은 당일 트레일 제외 — 익일 갭 체크(09:00) 및 타임컷(09:30)으로 관리
+            _is_eod_pre_gap_trail = (getattr(pos, "eod_trade", False)
+                                     and not getattr(pos, "overnight_held", False))
+            if not _is_eod_pre_gap_trail and pos.peak_price > 0:
+                _peak_chg = (pos.peak_price - pos.avg_price) / pos.avg_price * 100
+                # 신고가 근처 진입 종목의 트레일 활성화 기준도 슬롯별 차등 적용
+                _trail_activation = _eff_trail_act
+                if getattr(pos, "near_daily_high", False):
+                    _entry_t = getattr(pos, "entry_time", None)
+                    _entry_h = _entry_t.hour * 60 + _entry_t.minute if _entry_t else 0
+                    if _entry_h < 11 * 60:       # MORNING: 트레일 활성화 2.5%
+                        _trail_activation = max(_trail_activation,
+                                               float(getattr(self._scan_cfg, "daily_near_high_tp_pct", 5.0)) * 0.5)
+                    elif _entry_h < 13 * 60:     # MIDDAY: 1.75%
+                        _trail_activation = max(_trail_activation,
+                                               float(getattr(self._scan_cfg, "daily_near_high_tp_pct", 5.0)) * 0.35)
+                    # AFTERNOON: 기본값 유지 (1.0%)
+                # peak가 activation 이상인 경우에만 트레일 발동
+                if _peak_chg >= _trail_activation:
+                    cfg = self._scan_cfg
+                    _strong_lv = int(getattr(cfg, "strong_trend_hold_level", 3))
+                    _is_strong_trend = int(getattr(pos, "trend_level", 0)) >= _strong_lv
+
+                    if _is_strong_trend:
+                        # Strong Trend 포지션: tier1(1.5%) 건너뛰고 tier2(2.5%)부터 시작
+                        # → 추세 상승 중 조기 청산 방지, 더 큰 수익 구간 허용
+                        if _peak_chg < cfg.trail_tier2_max:
+                            _trail_pct = _eff_trail_tier2
+                        else:
+                            _trail_pct = cfg.trail_pct_tier3
+                    else:
+                        if _peak_chg < cfg.trail_tier1_max:
+                            _trail_pct = _eff_trail_tier1
+                        elif _peak_chg < cfg.trail_tier2_max:
+                            _trail_pct = _eff_trail_tier2
+                        else:
+                            _trail_pct = cfg.trail_pct_tier3
+
+                    _trail_price = int(pos.peak_price * (1 - _trail_pct / 100))
+
+                    # ── [NEW] ATR 기반 트레일 스탑 ──────────────────────────────────────
+                    # peak_price - 1.5×ATR14 선을 계산해 티어 트레일보다 촘촘하면 우선 적용
+                    # 데이터 부족 / 계산 실패 시 기존 티어 트레일 유지 (fail-safe)
+                    _atr_trail_tag = ""
+                    if getattr(cfg, "atr_trail_enabled", True):
+                        try:
+                            _snap_atr = (self._snap_store.get_snapshot(code)
+                                         if hasattr(self, "_snap_store") else None)
+                            if _snap_atr is not None:
+                                _h_atr = list(getattr(_snap_atr, "highs_1min",  []) or [])
+                                _l_atr = list(getattr(_snap_atr, "lows_1min",   []) or [])
+                                _c_atr = list(getattr(_snap_atr, "closes_1min", []) or [])
+                                if (_calc_atr_fn is not None
+                                        and len(_h_atr) >= 15
+                                        and len(_l_atr) >= 15
+                                        and len(_c_atr) >= 15):
+                                    _atr_v = _calc_atr_fn(_h_atr, _l_atr, _c_atr, 14)
+                                    if _atr_v and _atr_v > 0:
+                                        _atr_mult = float(getattr(cfg, "atr_trail_multiplier", 1.5))
+                                        _atr_line = int(pos.peak_price - _atr_v * _atr_mult)
+                                        _applied = _atr_line > _trail_price
+                                        logger.debug(
+                                            "[ATR Trail] %s(%s) peak=%d ATR=%.1f "
+                                            "atr_line=%d tier_line=%d → 적용=%s",
+                                            pos.name, code, pos.peak_price, _atr_v,
+                                            _atr_line, _trail_price,
+                                            "ATR" if _applied else "tier",
+                                        )
+                                        if _applied:
+                                            _trail_price = _atr_line
+                                            _atr_trail_tag = f" ATR×{_atr_mult:.1f}({_atr_v:.0f}pt)"
+                                else:
+                                    logger.debug(
+                                        "[ATR Trail] %s(%s) 데이터 부족 — bars=%d (min 15 필요)",
+                                        pos.name, code, min(len(_h_atr), len(_l_atr), len(_c_atr)),
+                                    )
+                        except Exception as _atr_ex:
+                            logger.debug("[ATR Trail] %s(%s) 계산 예외 — %s", pos.name, code, _atr_ex)
+
+                    if pos.current_price <= _trail_price:
+                        # [NEW] Trend Protect (EMA20 지지 확인)
+                        _ema_protected = False
+                        if getattr(self._scan_cfg, "trend_protect_enabled", True):
+                            _snap_tp = self._snap_store.get_snapshot(code) if hasattr(self, "_snap_store") else None
+                            if _snap_tp is not None:
+                                _cls_tp = list(getattr(_snap_tp, "closes_1min", []) or [])
+                                if len(_cls_tp) >= 20:
+                                    from strategy.jang_dong_min import calc_ema as _calc_ema_tp
+                                    _ema20_tp = _calc_ema_tp(_cls_tp, 20)
+                                    if _ema20_tp and pos.current_price > _ema20_tp:
+                                        _ema_protected = True
+                                        self.log_panel.append(
+                                            f"🛡️ [눌림목 보류] {pos.name}({code}) 트레일가({_trail_price:,}원) 도달이나 "
+                                            f"EMA20({_ema20_tp:,.0f}) 지지 중 — 청산 보류"
+                                        )
+
+                        if _ema_protected:
+                            continue  # 트레일 스탑 보류
+
+                        _trend_tag = " [Strong홀딩]" if _is_strong_trend else ""
+                        _trail_label = f"트레일스탑{_trend_tag}{_atr_trail_tag}"
+                        position_log.info(
+                            "[청산결정:트레일] %s(%s) 현재가=%d peak=%d trail_가격=%d "
+                            "trail_pct=%.1f%% 수익률=%+.2f%%%s",
+                            pos.name, code, pos.current_price, pos.peak_price,
+                            _trail_price, _trail_pct, chg, _atr_trail_tag,
+                        )
+                        self.log_panel.append(
+                            f"🔻 [{_trail_label}] {pos.name}({code}) "
+                            f"현재가 {pos.current_price:,} ≤ 트레일가 {_trail_price:,} "
+                            f"(고점 {pos.peak_price:,} - {_trail_pct:.1f}%) — {sell_qty}주 전량 청산"
+                        )
+                        self._audit.log_sell_decision(
+                            code,
+                            f"{_trail_label} 현재가 {pos.current_price:,} ≤ {_trail_price:,} "
+                            f"(고점 {pos.peak_price:,}, trail {_trail_pct:.1f}%)",
+                            pos.current_price,
+                        )
+                        self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                        continue
+
+            # ━━━ 분봉 EMA20 이탈 청산 (추세 소멸 조기 감지) ━━━
+            # ema20_exit_enabled=True 일 때만 동작 (기본 OFF — 노이즈 민감도 주의)
+            if getattr(self._scan_cfg, "ema20_exit_enabled", False):
+                _snap_ema = self._snap_store.get_snapshot(code) if hasattr(self, "_snap_store") else None
+                if _snap_ema is not None:
+                    _cls_ema = list(getattr(_snap_ema, "closes_1min", []) or [])
+                    if len(_cls_ema) >= 20:
+                        from strategy.jang_dong_min import calc_ema as _calc_ema_exit
+                        _ema20_exit = _calc_ema_exit(_cls_ema, 20)
+                        _buf = float(getattr(self._scan_cfg, "ema20_exit_buffer_pct", 0.2))
+                        if _ema20_exit and pos.current_price < _ema20_exit * (1.0 - _buf / 100.0):
+                            self.log_panel.append(
+                                f"📉 [EMA20이탈청산] {pos.name}({code}) "
+                                f"현재가 {pos.current_price:,} < EMA20 {_ema20_exit:,.0f} "
+                                f"(buf -{_buf:.1f}%) — {sell_qty}주 전량 청산"
+                            )
+                            self._audit.log_sell_decision(
+                                code,
+                                f"EMA20 이탈 추세소멸 현재가 {pos.current_price:,} < EMA20 {_ema20_exit:,.0f}",
+                                pos.current_price,
+                            )
+                            self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                            continue
+
+            # ━━━ 요셉 시그널 추세 소멸 익절: Strong(3) → No Trend(0) ━━━
+            # 추세가 꺾일 때 이익을 잠그는 보조 청산. 손실 구간에서는 강제하지 않음.
+            # EOD 종목은 당일(갭 체크 이전) 추세 소멸 익절 제외
+            _is_eod_pre_gap = (getattr(pos, "eod_trade", False)
+                               and not getattr(pos, "overnight_held", False))
+            if chg > 0 and not _is_eod_pre_gap and self.order_mgr.should_exit_on_trend_decay(code):
+                self.log_panel.append(
+                    f"🟡 [추세소멸익절] {pos.name}({code}) Strong→No Trend 전환, 수익 {chg:+.2f}% — {sell_qty}주 청산"
+                )
+                self._audit.log_sell_decision(
+                    code,
+                    f"요셉 추세소멸익절 Strong→NoTrend (수익 {chg:+.2f}%)",
+                    pos.current_price,
+                )
+                self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+                continue
+
+            # ━━━ Time-cut: 설정값(time_cut_minutes) 경과 시 수익률 무관 전량 청산 (안전망) ━━━
+            # EOD 포지션은 타임컷 제외 — _check_overnight_gap / _check_overnight_timecut 에서 관리
+            if getattr(pos, "eod_trade", False):
+                continue
+            # Strong Trend 포지션 타임컷 면제 — 추세 유지 중 조기 청산 방지
+            # 청산은 트레일스탑 또는 추세소멸(should_exit_on_trend_decay)에 위임
+            _strong_lv = int(getattr(self._scan_cfg, "strong_trend_hold_level", 3))
+            _timecut_exempt = (
+                getattr(self._scan_cfg, "strong_trend_timecut_exempt", True)
+                and int(getattr(pos, "trend_level", 0)) >= _strong_lv
+            )
+            if _timecut_exempt:
+                continue
+            _time_cut_min = _eff_time_cut
+            entry_time = getattr(pos, "entry_time", None)
+            if entry_time:
+                elapsed_min = (now_dt - entry_time).total_seconds() / 60
+                if elapsed_min >= _time_cut_min:
+                    position_log.info(
+                        "[청산결정:타임컷] %s(%s) 경과=%d분 현재가=%d 수익률=%+.2f%% peak=%d",
+                        pos.name, code, int(elapsed_min), pos.current_price, chg, pos.peak_price,
+                    )
+                    self.log_panel.append(
+                        f"⏱️ [Time-cut] {pos.name}({code}) {elapsed_min:.0f}분 경과, 수익 {chg:+.2f}% — {sell_qty}주 강제 청산"
+                    )
+                    self._audit.log_sell_decision(
+                        code, f"Time-cut {elapsed_min:.0f}분 경과 (수익 {chg:+.2f}%)",
+                        pos.current_price,
+                    )
+                    self.order_mgr.sell(code, pos.name, sell_qty, price=0)
+
+    @pyqtSlot()

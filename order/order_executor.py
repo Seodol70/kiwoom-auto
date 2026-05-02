@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from order.order_types import OrderType, PriceType
+
 if TYPE_CHECKING:
     pass
 
@@ -52,8 +54,6 @@ class OrderExecutor:
             - ret == 0: 성공
             - ret != 0: 실패
         """
-        from order.order_manager import OrderType, PriceType
-
         price_type = PriceType.MARKET if price == 0 else PriceType.LIMIT
         rq_name = f"{'매수' if order_type == OrderType.BUY else '매도'}_{code}"
 

@@ -38,16 +38,6 @@ _TAX = _COST.get("tax_rate", 0.0023)
 # 상수
 # ---------------------------------------------------------------------------
 
-class OrderType:
-    BUY         = 1
-    SELL        = 2
-    BUY_CANCEL  = 3
-    SELL_CANCEL = 4
-
-class PriceType:
-    LIMIT  = "00"
-    MARKET = "03"
-
 # 체결 구분 (OnReceiveChejanData)
 CHEJAN_ORDER = "0"    # 주문 접수/확인 (체결 포함, gubun "0")
 CHEJAN_FILL  = "0"    # 체결 — Kiwoom gubun "0" 이 주문+체결, "1" 은 잔고변동
@@ -242,6 +232,15 @@ class OrderManager(QObject):
         self._audit = None
 
         self._connect_chejan()
+
+    # -----------------------------------------------------------------------
+    # 속성
+    # -----------------------------------------------------------------------
+
+    @property
+    def available_cash(self) -> int:
+        """가용 예수금 (TradingController 호환 프로퍼티)."""
+        return self.cash
 
     # -----------------------------------------------------------------------
     # 주문 메시지 콜백 (OnReceiveMsg → kiwoom_api → 여기)

@@ -29,6 +29,7 @@ except Exception:
 from PyQt5.QtCore import QEventLoop, QTimer
 from PyQt5.QtWidgets import QApplication
 
+from infra.kiwoom_protocol import KiwoomProtocol
 from logging_config import tr_log
 
 logger = logging.getLogger(__name__)
@@ -75,21 +76,14 @@ _TR_FAIL = _TrFailCounter()
 # 상수
 # ---------------------------------------------------------------------------
 
+from order.order_types import OrderType, PriceType
+
+
 class ReturnCode:
     OK             =  0
     COMM_FAIL      = -100
     LOGIN_FAIL     = -101
     LOGIN_TIMEOUT  = -102
-
-class OrderType:
-    BUY    = 1  # 신규매수
-    SELL   = 2  # 신규매도
-    BUY_CANCEL  = 3  # 매수취소
-    SELL_CANCEL = 4  # 매도취소
-
-class PriceType:
-    LIMIT  = "00"  # 지정가
-    MARKET = "03"  # 시장가
 
 # TR 코드
 TR_STOCK_INFO  = "opt10001"   # 주식기본정보요청
@@ -241,7 +235,7 @@ def _resolve_prev_close(prev_close: int, current_price: int, change_pct: float) 
 # KiwoomManager
 # ---------------------------------------------------------------------------
 
-class KiwoomManager:
+class KiwoomManager(KiwoomProtocol):
     """
     키움 Open API+ 래퍼.
 
