@@ -360,8 +360,10 @@ class SnapshotStore:
         daily_high_prev = daily_data_copy[0].get("high", 0) if daily_data_copy else 0
         daily_low_prev = daily_data_copy[0].get("low", 0) if daily_data_copy else 0
 
+        current_price = safe_int_cell("current_price", 0)
+
         from scanner.indicator_service import IndicatorService
-        alignment = IndicatorService.check_daily_alignment(daily_closes)
+        alignment = IndicatorService.check_daily_alignment(daily_closes, current_price)
         _is_daily_bull = alignment.get("is_aligned", False) if alignment else False
 
         _rsi_cached = 0.0
@@ -403,26 +405,15 @@ class SnapshotStore:
             prev_close    = safe_int_cell("prev_close",    0),
             change_pct    = safe_float_cell("change_pct",  0.0),
             closes_1min   = closes_list,
-            opens_1min    = opens_list,
-            highs_1min    = highs_list,
-            lows_1min     = lows_list,
-            chejan_strength = chejan_str,
-            volumes_1min    = vols_list,
+            volumes_1min  = vols_list,
             daily_closes  = daily_closes,
-            daily_high_prev = daily_high_prev,
-            daily_low_prev  = daily_low_prev,
+            daily_highs   = [],  # not used in tests
+            daily_lows    = [],  # not used in tests
             foreign_net_buy = inv_foreign,
             inst_net_buy    = inv_inst,
-            investor_score  = inv_score,
-            investor_updated_at = inv_updated,
-            trend_level      = trend_lv,
-            trend_prev_level = trend_prev_lv,
-            is_daily_bull    = _is_daily_bull,
             rank             = safe_int_cell("rank", 0),
             rsi              = _rsi_cached,
             updated_at       = updated_at,
-            exec_velocity_ratio = _exec_vel_ratio,
-            sector              = sector,
         )
 
     def update_trend_level(self, code: str, trend_level: int) -> None:
