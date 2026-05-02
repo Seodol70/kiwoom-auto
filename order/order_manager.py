@@ -24,14 +24,14 @@ from typing import Callable, Optional
 
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
-from config import COST as _COST
+from app.config_manager import config_manager as cfg
 from logging_config import order_log, position_log
 from order.position_repository import PositionRepository
 
 logger = logging.getLogger(__name__)
 
-_FEE = _COST.get("fee_rate", 0.00015)
-_TAX = _COST.get("tax_rate", 0.0023)
+_FEE = cfg.COST.get("fee_rate", 0.00015)
+_TAX = cfg.COST.get("tax_rate", 0.0023)
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +509,7 @@ class OrderManager(QObject):
 
         _sector = ""
         try:
-            from config import RISK as _RISK
+            _RISK = cfg.RISK
             _mx = float(_RISK.get("max_change_pct", 15.0))
             _info = self._kiwoom.get_stock_info(code)
 
@@ -547,7 +547,7 @@ class OrderManager(QObject):
             order_log.warning("[섹터확인] %s(%s) — 섹터 정보 없음 (opt10001 실패 또는 미제공)", name, code)
         if _sector:
             try:
-                from config import RISK as _RISK_s
+                _RISK_s = cfg.RISK
                 _sec_max = int(_RISK_s.get("sector_max_positions", 2))
                 _same_cnt = sum(
                     1 for p in self.positions.values()

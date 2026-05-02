@@ -1018,6 +1018,7 @@ class KiwoomManager(KiwoomProtocol):
                 "close":  safe_int(g("현재가")),
                 "volume": safe_int(g("거래량")),
             })
+        rows.reverse()  # [최신->과거] 를 [과거->최신] 으로 변경 (IndicatorService 표준)
         return rows
 
     def _parse_daily_candle_rows(self, tr_code: str, rq_name: str) -> list[dict]:
@@ -1038,6 +1039,7 @@ class KiwoomManager(KiwoomProtocol):
                 "close":  close_price,
                 "volume": safe_int(g("거래량")),
             })
+        rows.reverse()  # [최신->과거] 를 [과거->최신] 으로 변경 (IndicatorService 표준)
         return rows
 
     # opt10030 거래대금 필드명 후보 — 서버 버전·모의투자 여부에 따라 다를 수 있음

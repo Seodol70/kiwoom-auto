@@ -144,57 +144,6 @@ def get_trend_status(
     )
 
 
-    
-    # [필수] 상승 추세 기초 조건: 가격 > EMA AND EMA 기울기 > 0
-    if cur_price <= ema_now or ema_now <= ema_prev:
-        return 0
-
-    # 1️⃣ 거리 점수 (Distance Score)
-    dist_atr = (cur_price - ema_now) / atr
-    
-    # 2️⃣ 가속도 점수 (Slope Acceleration)
-    slope_now = ema_now - ema_prev
-    slope_prev = ema_prev - ema_prev2
-    is_accelerating = (slope_now > slope_prev)
-
-    # 3️⃣ 수급 점수 (Volume Score)
-    need_vol = volume_lookback + 1
-    has_vol = (len(volumes) >= need_vol and any(v > 0 for v in volumes[-need_vol:]))
-    vol_ratio = 1.0
-    if has_vol:
-        avg_vol = float(np.mean(np.array(volumes[-(need_vol):-1], dtype=np.float64)))
-        if avg_vol > 0:
-            vol_ratio = float(volumes[-1]) / avg_vol
-        else:
-            has_vol = False
-
-    # 4️⃣ 박스권 응축 확인 (Consolidation) - 변동성이 극도로 낮아진 상태
-    # ATR이 가격의 0.4% 이하이면 응축으로 판단
-    is_consolidating = (atr / cur_price < 0.004)
-
-    # ── 종합 판정 ──
-    # [Level 3: Strong] 강력한 추세 + 수급 + 가속 (또는 응축 후 돌파)
-    if dist_atr >= 1.2 and vol_ratio >= 1.5 and is_accelerating:
-        return 3
-    if dist_atr >= 0.8 and vol_ratio >= 2.0 and is_consolidating:
-        # 박스권 응축 후 거래량 실린 돌파는 거리가 짧아도 강력
-        return 3
-    if dist_atr >= 1.5 and vol_ratio >= 1.2:
-        return 3
-    
-    # [Level 2: Medium] 안정적 추세 + 수급
-    if dist_atr >= 0.7 and vol_ratio >= 1.1:
-        return 2
-    if dist_atr >= 1.0: # 수급 부족해도 거리가 충분하면 2단계
-        return 2
-        
-    # [Level 1: Weak] 초기 추세
-    if dist_atr >= 0.2:
-        return 1
-        
-    return 0
-
-
 def calc_rsi(closes: list[float], period: int = 14) -> Optional[float]:
     """RSI(Relative Strength Index) — numpy 가속"""
     if len(closes) < period + 1:
@@ -272,9 +221,9 @@ def check_daily_alignment(daily_closes: list[float]) -> bool:
     if len(daily_closes) < 20:
         return False
 
-    ma5 = sum(daily_closes[:5]) / 5
-    ma10 = sum(daily_closes[:10]) / 10
-    ma20 = sum(daily_closes[:20]) / 20
+    ma5 = sum(daily_closes[-5:]) / 5
+    ma10 = sum(daily_closes[-10:]) / 10
+    ma20 = sum(daily_closes[-20:]) / 20
 
     return ma5 > ma10 > ma20
 
@@ -313,26 +262,25 @@ def get_daily_context(
         # 데이터 부족 → 필터 통과 (fail-open)
         return result
 
-    daily_ma20 = sum(daily_closes[:20]) / 20
+    daily_ma20 = sum(daily_closes[-20:]) / 20
     result["daily_ma20"] = daily_ma20
     result["above_ma20"] = current_price >= daily_ma20
 
     # MA20 기울기: 3거래일 전 MA20 대비 현재 MA20이 우상향인지 확인
-    # daily_closes는 최신순 정렬 → [0]=오늘, [3]=3거래일 전
-    if len(daily_closes) >= 23:   # MA20(20개) + 3일 오프셋 = 23개 필요
-        ma20_3d_ago = sum(daily_closes[3:23]) / 20
+    if len(daily_closes) >= 23:
+        ma20_3d_ago = sum(daily_closes[-23:-3]) / 20
         result["ma20_slope_up"] = daily_ma20 > ma20_3d_ago
     # 23개 미만이면 fail-open(True) 유지
 
     # MA60 — 데이터가 60개 이상일 때만 계산, 부족하면 fail-open
     if len(daily_closes) >= 60:
-        daily_ma60 = sum(daily_closes[:60]) / 60
+        daily_ma60 = sum(daily_closes[-60:]) / 60
         result["daily_ma60"] = daily_ma60
         result["above_ma60"] = current_price >= daily_ma60
 
     # 신고가 근처: 최근 25일 최고가 대비 near_high_threshold_pct 이내
     n = min(25, len(daily_closes))
-    high_25d = max(daily_closes[:n])
+    high_25d = max(daily_closes[-n:])
     result["high_25d"] = high_25d
     if high_25d > 0:
         result["near_high"] = current_price >= high_25d * (1.0 - near_high_threshold_pct / 100.0)

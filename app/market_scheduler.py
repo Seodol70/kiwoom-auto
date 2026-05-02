@@ -31,6 +31,12 @@ class MarketScheduler(QObject):
     phase1_trail = pyqtSignal()
     """10:30~15:15 Phase 1 트레일 체크 신호 (매분)"""
 
+    overnight_gap_check = pyqtSignal()
+    """09:00 오버나잇 갭 체크 신호"""
+
+    overnight_timecut = pyqtSignal()
+    """09:30 오버나잇 타임컷 신호"""
+
     overnight_auto_enabled = pyqtSignal()
     """14:40 야간보유 자동 ON 신호"""
 
@@ -100,14 +106,13 @@ class MarketScheduler(QObject):
               and not self._eod_gap_checked_today
               and is_weekday):
             self._eod_gap_checked_today = True
-            # MainWindow에서 실제 EOD 포지션 확인하고 _check_overnight_gap() 호출
+            self.overnight_gap_check.emit()
 
         # ─── 09:30 EOD 타임컷 신호 ────────────────────────────────────
 
         elif (time(9, 30) <= now_time < time(9, 31)
               and is_weekday):
-            # MainWindow에서 실제 overnight_held 포지션 확인하고 _check_overnight_timecut() 호출
-            pass
+            self.overnight_timecut.emit()
 
         # ─── 10:30 Phase 1 강제청산 (1회만) ───────────────────────────
 

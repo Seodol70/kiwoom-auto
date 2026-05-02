@@ -64,7 +64,8 @@ from engine.workers import ScannerWorker, PortfolioWorker
 
 
 from logging_config import position_log
-from config import TELEGRAM as _TG
+from app.config_manager import config_manager as cfg
+# _TG 대신 cfg.TELEGRAM 사용 가능
 from telegram_bot import TelegramBot
 from scanner.smart_scanner import format_trade_amount_korean
 
@@ -212,7 +213,7 @@ class MainWindow(QMainWindow):
         # 우: 보유현황(위) + 차트(아래) 세로 분할
         right_v = QSplitter(Qt.Vertical)
         right_v.setHandleWidth(2)
-        from config import RISK as _RISK
+        _RISK = cfg.RISK
         self.portfolio_panel = PortfolioPanel(
             tp_init=_RISK.get("take_profit_pct", 3.0),
             sl_init=_RISK.get("stop_loss_pct",  -1.2),
@@ -394,12 +395,27 @@ class MainWindow(QMainWindow):
         self.market_scheduler.market_closing.connect(self._on_market_closing)
         self.market_scheduler.feedback_triggered.connect(self._on_feedback_triggered)
         self.market_scheduler.day_reset.connect(self._on_day_reset)
+        self.market_scheduler.overnight_gap_check.connect(self.trading_controller.check_overnight_gap)
+        self.market_scheduler.overnight_timecut.connect(self.trading_controller.check_overnight_timecut)
+        self.market_scheduler.phase1_cutoff.connect(lambda: self.trading_controller.liquidate_phase1_positions(forced=True))
+        self.market_scheduler.phase1_trail.connect(lambda: self.trading_controller.liquidate_phase1_positions(forced=False))
+        self.market_scheduler.overnight_auto_enabled.connect(lambda: self.header._btn_overnight.setChecked(True))
+        self.market_scheduler.overnight_auto_enabled.connect(lambda: self._on_overnight_mode_toggle(True))
 
         self.risk_manager.daily_profit_locked.connect(self._on_profit_locked)
         self.risk_manager.daily_loss_cut.connect(self._on_loss_cut)
 
-        self.trading_controller.signal_rejected.connect(lambda msg: logger.debug(f"[신호 거절] {msg}"))
+        self.trading_controller.signal_rejected.connect(lambda msg: self.append_log(f"❌ [진입거절] {msg}"))
         self.trading_controller.log_message.connect(self.append_log)
+        self.trading_controller.market_data_updated.connect(
+            lambda k1, k2, d1, d2, crash: self.header.set_index(k1, k2, d1, d2)
+        )
+        self.trading_controller.scan_status_updated.connect(
+            lambda msg, done: self.scan_status.done(msg) if done else self.scan_status.reset()
+        )
+        self.trading_controller.daily_refresh_requested.connect(
+            lambda codes: QTimer.singleShot(500, lambda: self.trading_controller.refresh_daily_candles(codes, 0))
+        )
 
         # 6. 스캐너 및 기타
         self._smart_scanner.on_signal = self._on_scan_signal_direct
@@ -407,7 +423,8 @@ class MainWindow(QMainWindow):
             self._tg.cmd_start.connect(lambda: self._on_auto_trade_toggle(True))
             self._tg.cmd_stop.connect(lambda: self._on_auto_trade_toggle(False))
             self._tg.cmd_status.connect(self._on_tg_status_requested)
-            self.append_log("[연결] 텔레그램 봇 연결됨")
+        self.trading_controller.portfolio_updated.connect(self._on_portfolio_refresh)
+        self.append_log("[연결] 텔레그램 봇 연결됨")
 
 
     def _setup_timers(self) -> None:
@@ -424,7 +441,7 @@ class MainWindow(QMainWindow):
         # 차트 갱신 + 현재가 기반 포트폴리오 갱신 (2초)
         self._chart_timer = QTimer(self)
         self._chart_timer.timeout.connect(self._refresh_chart)
-        self._chart_timer.timeout.connect(self._refresh_portfolio_prices)
+        self._chart_timer.timeout.connect(self.trading_controller.update_portfolio_prices)
         self._chart_timer.start(5000)  # 2026-04-23: 2s→5s (메인 스레드 이벤트 루프 부하 감소, Watchdog ACK 우선순위)
 
 
@@ -448,12 +465,12 @@ class MainWindow(QMainWindow):
 
         # 지수 급락 감지 (60초마다) — 헤더 지수 표시 + 급락 감지
         self._crash_check_timer = QTimer(self)
-        self._crash_check_timer.timeout.connect(self._check_market_crash)
+        self._crash_check_timer.timeout.connect(self.trading_controller.check_market_crash)
         QTimer.singleShot(35_000, lambda: self._crash_check_timer.start(60_000))  # 35s 뒤 시작
 
         # opt10030 주기 스캔 (1분마다) — 메인 스레드에서 호출 (Kiwoom TR은 메인 스레드만 지원)
         self._scan_refresh_timer = QTimer(self)
-        self._scan_refresh_timer.timeout.connect(self._run_scanner_scan)
+        self._scan_refresh_timer.timeout.connect(self.trading_controller.run_periodic_scan)
         # 장 시작 전까지는 타이머만 등록, start_after_login 후 가동
 
         # 텔레그램 1시간 보고 (1시간마다)
@@ -563,7 +580,7 @@ class MainWindow(QMainWindow):
 
 
         # 지수 초기 조회 — 스캔(1s) 완료 후 5s 뒤 (TR 충돌 회피)
-        QTimer.singleShot(6_000, self._check_market_crash)
+        QTimer.singleShot(6_000, self.trading_controller.check_market_crash)
 
 
         # 수급 초기 조회 — 스캔 + 지수 완료 후 10s 뒤
@@ -637,7 +654,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str, str)
     def _on_login_success(self, account: str, mode: str) -> None:
         import time as _time
-        from config import RISK as _RISK2
+        _RISK2 = cfg.RISK
 
 
         self.header.set_connected(account, mode)
@@ -731,10 +748,7 @@ class MainWindow(QMainWindow):
         return
 
 
-    @pyqtSlot()
-    def _check_market_crash(self) -> None:
-        if hasattr(self, 'trading_controller'):
-            self.trading_controller.check_market_crash()
+    # (Moved to TradingController)
 
 
     def _run_feedback_loop(self) -> None:
@@ -803,36 +817,10 @@ class MainWindow(QMainWindow):
                 pass
 
 
-    def _check_overnight_gap(self) -> None:
-        if hasattr(self, 'trading_controller'):
-            self.trading_controller.check_overnight_gap()
+    # (Moved to TradingController)
 
 
-    def _check_overnight_timecut(self) -> None:
-        """
-        EOD 포지션 익일 09:30 타임컷.
-        overnight_held = True 이고 수익률 eod_timecut_min_pct 미달이면 강제 청산.
-        """
-        import logging as _log
-        _logger = _log.getLogger(__name__)
-        _min_pct = float(getattr(self._scan_cfg, "eod_timecut_min_pct", 1.0))
-
-
-        for code, pos in list(self.order_mgr.positions.items()):
-            if not getattr(pos, "overnight_held", False):
-                continue
-            chg = float(pos.price_change_pct_vs_avg)
-            if chg < _min_pct:
-                self.log_panel.append(
-                    f"⏱️ [EOD타임컷] {pos.name}({code}) 09:30 수익 {chg:+.2f}% < {_min_pct:.1f}% — "
-                    f"{pos.qty}주 강제 청산"
-                )
-                self._audit.log_sell_decision(
-                    code, f"EOD 타임컷 09:30 수익 {chg:+.2f}% (기준 {_min_pct:.1f}%)", pos.current_price
-                )
-                self.order_mgr.force_exit(code, pos.name, pos.qty,
-                                          reason=f"EOD 타임컷 09:30 ({chg:+.2f}%)")
-                _logger.info("[EOD타임컷] %s(%s) %+.2f%%", pos.name, code, chg)
+    # (Moved to TradingController)
 
 
     def _reload_adaptive_config(self) -> None:
@@ -845,7 +833,8 @@ class MainWindow(QMainWindow):
         config.py 의 RISK 오버라이드는 항상 adaptive 값 위에 덮어씀 (우선순위 보장).
         """
         try:
-            from config import RISK as _RISK, STRATEGY as _STRAT
+            _RISK = cfg.RISK
+            _STRAT = cfg.STRATEGY
             from scanner.smart_scanner import SmartScannerConfig
 
 
@@ -888,16 +877,12 @@ class MainWindow(QMainWindow):
             logger.warning("[AdaptiveReload] 리로드 실패: %s", _e)
 
 
-    def _liquidate_phase1_positions(self, forced: bool = False) -> None:
-        if hasattr(self, 'trading_controller'):
-            self.trading_controller.liquidate_phase1_positions(forced)
+    # (Moved to TradingController)
 
 
 
 
-    def _liquidate_all_positions(self) -> None:
-        if hasattr(self, 'trading_controller'):
-            self.trading_controller.liquidate_all_positions()
+    # (Moved to TradingController)
 
 
 
@@ -1062,117 +1047,10 @@ class MainWindow(QMainWindow):
         self.order_mgr.buy(code, name, qty, price=oprice)
 
 
-    @pyqtSlot()
-    def _run_scanner_scan(self) -> None:
-        """
-        메인 스레드에서 1분마다 호출 (QTimer) — 실제 스캔은 백그라운드 스레드에서 실행.
+    # (Moved to TradingController)
 
 
-        메인 스레드 블로킹 방지:
-        - run_periodic_scan()을 별도 스레드에서 비동기 실행
-        - 진행 상황은 QTimer.singleShot으로 메인 스레드에서 UI 업데이트
-        - 완료 후 일봉 갱신을 QTimer 체인으로 처리
-        """
-        import logging as _log
-        from config import STRATEGY as _STR
-        _logger = _log.getLogger(__name__)
-
-
-        # 이전 스캔이 아직 진행 중이면 스킵 (블로킹 방지)
-        if getattr(self, '_scan_in_progress', False):
-            _logger.debug("[스캔] 이전 스캔 진행 중 — 스킵")
-            return
-
-
-        # [NEW] balance TR 처리 중이면 3초 후 재시도 — scan/balance 충돌 방지 (2026-04-27)
-        if getattr(self._kiwoom, '_tr_busy', False):
-            _logger.info("[스캔] TR 처리 중 (%s) — 3s 후 재시도",
-                        getattr(self._kiwoom, '_tr_current_rq', '?'))
-            QTimer.singleShot(3_000, self._run_scanner_scan)
-            return
-
-
-        self._scan_in_progress = True
-        self.log_panel.append(f"[스캔] 주기 스캔 시작 — {datetime.now():%H:%M:%S}")
-        self.scan_status.reset()
-
-
-        try:
-            # 스캔 시작 전 ACK — run_periodic_scan이 수십 초 걸릴 수 있어 미리 리셋
-            _hm = getattr(self, "_health_monitor", None)
-            if _hm:
-                _hm.ack()
-
-
-            self._smart_scanner.run_periodic_scan(on_progress=None)
-
-
-            # 스캔 완료 후 ACK — 스캔이 길었더라도 즉시 Watchdog 안심
-            if _hm:
-                _hm.ack()
-
-
-            # 스캔 완료 요약 메시지 (진행 상황은 신호 발생 시에만 표시)
-            total_watched = len(self._snap_store)
-            self.log_panel.append(f"[스캔] 완료 — 전체 {total_watched}종목 모니터링")
-            self.scan_status.done(f"완료 / {total_watched}종목")
-
-
-            # 일봉 갱신 대기 목록 처리 — QTimer 체인 (최대 10개, 각 350ms 간격)
-            _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))[:10]
-            if _pending:
-                self._smart_scanner._daily_refresh_pending = []
-                QTimer.singleShot(500, lambda codes=_pending: self._daily_candle_chain(codes, 0))
-        except Exception as e:
-            _logger.exception("[스캔] run_periodic_scan 오류")
-            self.log_panel.append(f"[스캔 오류] {e}")
-            self.scan_status.done(f"오류: {e}")
-        finally:
-            self._scan_in_progress = False
-
-
-    def _daily_candle_chain(self, codes: list, idx: int) -> None:
-        """
-        일봉 데이터를 QTimer 체인으로 1종목씩 비동기 갱신.
-
-
-        350ms 간격으로 한 번에 1 TR 호출 → TRRateLimiter가 sleep 불필요
-        (0.35s > 0.25s MIN_INTERVAL), UI 이벤트 루프 완전 자유.
-        """
-        import logging as _log
-        _logger = _log.getLogger(__name__)
-
-
-        if idx >= len(codes):
-            _logger.info("[일봉갱신] 완료 — %d종목 처리", len(codes))
-            return
-
-
-        # _tr_busy 중이면 이 종목 스킵 후 다음으로 (무한 재시도 방지)
-        if getattr(self._kiwoom, "_tr_busy", False):
-            _logger.debug("[일봉갱신] TR 사용 중 — %s 스킵 후 다음 종목", codes[idx])
-            QTimer.singleShot(350, lambda: self._daily_candle_chain(codes, idx + 1))
-            return
-
-
-        # 일봉 갱신 중 watchdog ACK 명시적 전송 (10종목 × 최대 1s = 최대 10s, 12s 임계값 방어)
-        _hm = getattr(self, "_health_monitor", None)
-        if _hm:
-            _hm.ack()
-
-
-        code = codes[idx]
-        try:
-            candles = self._kiwoom.get_daily_candles(code, count=120)
-            if candles:
-                self._snap_store.set_daily_candles(code, candles)
-                _logger.debug("[일봉갱신] %s 완료 (%d개)", code, len(candles))
-        except Exception as e:
-            _logger.warning("[일봉갱신] %s 실패: %s", code, e)
-
-
-        # 다음 종목: 350ms 후 처리 (TRRateLimiter 0.25s 간격 자동 충족 → sleep=0)
-        QTimer.singleShot(350, lambda: self._daily_candle_chain(codes, idx + 1))
+    # (Moved to TradingController)
 
 
     def _on_scan_signal_direct(self, sig) -> None:
@@ -1269,17 +1147,7 @@ class MainWindow(QMainWindow):
 
 
         # 보유 포지션 강제청산 (EOD 포지션 제외)
-        if self.order_mgr.positions:
-            self.log_panel.append("🔴 [15:20 강제청산] 모든 포지션 전량 매도 (EOD 제외)...")
-            for code, pos in list(self.order_mgr.positions.items()):
-                if getattr(pos, "eod_trade", False):
-                    self.log_panel.append(
-                        f"🌙 [EOD유지] {pos.name}({code}) — 익일 관리 포지션, 15:20 청산 제외"
-                    )
-                    continue
-                if pos.qty > 0:
-                    self.order_mgr.force_exit(code, pos.name, pos.qty, reason="Day Close 15:20")
-                    self.log_panel.append(f"  └─ {pos.name}({code}) {pos.qty}주 매도 주문")
+        self.trading_controller.liquidate_all_positions()
 
 
         # 전일 거래량 캐시 저장
@@ -1316,11 +1184,7 @@ class MainWindow(QMainWindow):
             f"🔴 [손절 한도] 일일 손실 -{loss_limit:,}원 도달 — 전량 강제청산 진행..."
         )
         # 모든 보유 포지션 강제청산
-        if self.order_mgr.positions:
-            for code, pos in list(self.order_mgr.positions.items()):
-                if pos.qty > 0:
-                    self.order_mgr.force_exit(code, pos.name, pos.qty, reason="Daily Loss Cut")
-                    self.log_panel.append(f"  └─ {pos.name}({code}) {pos.qty}주 매도 주문")
+        self.trading_controller.liquidate_all_positions()
 
 
     @pyqtSlot()
@@ -1431,42 +1295,7 @@ class MainWindow(QMainWindow):
         )
 
 
-    def _refresh_portfolio_prices(self) -> None:
-        """보유 종목 현재가를 실시간 스냅샷 우선으로 갱신하고 패널을 업데이트한다."""
-        positions = self.order_mgr.positions
-        if not positions:
-            return
-        try:
-            for pos in positions.values():
-                # 실시간 체결로 누적되는 SnapshotStore 가격을 우선 사용한다.
-                # (GetMasterLastPrice는 장중 실시간성과 정확도가 떨어질 수 있음)
-                price = 0
-                snap = self._snap_store.get_snapshot(pos.code)
-                if snap and snap.current_price > 0:
-                    price = snap.current_price
-                    src = "snapshot"
-                else:
-                    # [NEW] 스냅샷 미포함 종목 → 강제 갱신 (2026-04-04)
-                    price = self._kiwoom.get_current_price(pos.code)
-                    src = "master_last (강제갱신)"
-                if price > 0 and pos.current_price != price:
-                    # 현재가가 변경되었을 때만 로그 출력
-                    import logging as _lg
-                    _lg.getLogger(__name__).debug(
-                        "현재가갱신 — %s(%s) price=%d(avg=%d, src=%s)",
-                        pos.name, pos.code, price, pos.avg_price, src
-                    )
-                    pos.current_price = price
-        except Exception:
-            return
-        self._on_portfolio_refresh({
-            "cash":      self.order_mgr.cash,
-            "positions": dict(positions),
-        })
-        # Phase 3: TradingController에서 청산 판정 (기존 _auto_sell_by_pnl 대체)
-        self.trading_controller.check_and_exit_all()
-        self.order_mgr._check_failed_sells()   # 매도 미체결 재시도
-        self.order_mgr._check_pending_buys()   # [P2] 매수 미체결 10초 취소
+    # (Moved to TradingController)
 
 
     def _on_investor_refresh_tick(self) -> None:

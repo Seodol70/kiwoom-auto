@@ -15,16 +15,8 @@ from PyQt5.QtWidgets import (
 )
 
 
-try:
-    from config import TELEGRAM as _TG
-except ModuleNotFoundError:
-    import sys
-    import os
-    # 프로젝트 루트(d:\prj\kiwoom-auto)를 찾아서 path에 추가
-    _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if _ROOT not in sys.path:
-        sys.path.insert(0, _ROOT)
-    from config import TELEGRAM as _TG
+from app.config_manager import config_manager as cfg
+# _TG 대신 cfg.TELEGRAM 사용 가능
 
 from scanner.smart_scanner import format_trade_amount_korean
 from ui.components.common import _hline

@@ -14,7 +14,7 @@ from app.risk_manager import RiskManager
 from app.trading_controller import TradingController
 from analysis.health_monitor import HealthMonitor
 from trade_audit_logger import TradeAuditLogger
-from config import STRATEGY, RISK as _RISK, TELEGRAM as _TG
+from app.config_manager import config_manager as cfg
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ class ApplicationContext(QObject):
         # ── OrderManager ──
         self.order_mgr = OrderManager(
             self.kiwoom,
-            max_positions=STRATEGY.get("max_positions", 5),
+            max_positions=cfg.get("max_positions", 5),
             parent=self
         )
         self.order_mgr._audit = self.audit
@@ -46,14 +46,14 @@ class ApplicationContext(QObject):
         
         # ── SmartScanner Config ──
         self.scan_cfg = SmartScannerConfig.from_adaptive("params/adaptive_params.json")
-        _yosep_preset = str(STRATEGY.get("yosep_preset", "") or "").strip().lower()
+        _yosep_preset = str(cfg.get("yosep_preset", "") or "").strip().lower()
         if _yosep_preset:
             self.scan_cfg.apply_yosep_preset(_yosep_preset)
-        self.scan_cfg.max_change_pct = float(_RISK.get("max_change_pct", 15.0))
-        self.scan_cfg.signal_cooldown_sec = float(_RISK.get("signal_cooldown_sec", 45.0))
-        self.scan_cfg.index_block_pct = float(_RISK.get("market_index_block_pct", -1.5))
+        self.scan_cfg.max_change_pct = float(cfg.get("max_change_pct", 15.0))
+        self.scan_cfg.signal_cooldown_sec = float(cfg.get("signal_cooldown_sec", 45.0))
+        self.scan_cfg.index_block_pct = float(cfg.get("market_index_block_pct", -1.5))
         
-        _wpm = STRATEGY.get("watch_pool_max")
+        _wpm = cfg.get("watch_pool_max")
         if _wpm is not None:
             wpm = max(1, int(_wpm))
             self.scan_cfg.watch_pool_max = wpm
@@ -68,8 +68,11 @@ class ApplicationContext(QObject):
         self.market_scheduler = MarketScheduler(self)
         self.risk_manager = RiskManager(self.order_mgr, self.scan_cfg, self)
         self.trading_controller = TradingController(
-            self.order_mgr, self.scan_cfg, self.risk_manager,
-            snap_store=self.snap_store, parent=self
+            self.kiwoom, self.order_mgr, self.scan_cfg, self.risk_manager,
+            smart_scanner=self.smart_scanner,
+            snap_store=self.snap_store,
+            health_monitor=self.health_monitor,
+            parent=self
         )
         
         # ── HealthMonitor ──
@@ -87,11 +90,11 @@ class ApplicationContext(QObject):
         
         # ── 텔레그램 ──
         self.tg_bot = None
-        if _TG.get("enabled") and _TG.get("token"):
+        if cfg.get("TELEGRAM", {}).get("enabled") and cfg.get("TELEGRAM", {}).get("token"):
             try:
                 # TelegramBot 임포트는 지연
                 from telegram_bot import TelegramBot
-                self.tg_bot = TelegramBot(_TG["token"], _TG["chat_id"], parent=self)
+                self.tg_bot = TelegramBot(cfg.TELEGRAM["token"], cfg.TELEGRAM["chat_id"], parent=self)
             except Exception as e:
                 logger.warning("[텔레그램] 봇 초기화 실패: %s", e)
                 

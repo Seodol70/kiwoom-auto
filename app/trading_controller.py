@@ -45,23 +45,46 @@ class TradingController(QObject):
 
 
     log_message = pyqtSignal(str)
-    """청산 판정 로그 메시지"""
+    """청산/스캔/시스템 로그 메시지"""
+
+    market_data_updated = pyqtSignal(float, float, float, float, bool)
+    """코스피(현재, %), 코스닥(현재, %), 급락여부"""
+
+    scan_status_updated = pyqtSignal(str, bool)
+    """상태 메시지, 완료여부"""
+
+    daily_refresh_requested = pyqtSignal(list)
+    """일봉 데이터 수집 요청 (codes)"""
+
+    portfolio_updated = pyqtSignal(dict)
+    """포트폴리오 데이터 갱신 (cash, positions)"""
 
 
     def __init__(
         self,
+        kiwoom,
         order_mgr,
         scan_cfg,
         risk_mgr,
+        smart_scanner=None,
         snap_store=None,
+        health_monitor=None,
         parent=None,
     ):
         super().__init__(parent)
+        self._kiwoom = kiwoom
         self._order_mgr = order_mgr
         self._scan_cfg = scan_cfg
         self._risk_mgr = risk_mgr
+        self._smart_scanner = smart_scanner
         self._snap_store = snap_store
+        self._health_monitor = health_monitor
         self._auto_trading = False
+        
+        self._scan_in_progress = False
+        self._market_crash_off = False
+        self._kospi_chg_pct = 0.0
+        self._kosdaq_chg_pct = 0.0
 
         from app.strategy import EntryStrategy, ExitStrategy
         self._entry_strategy = EntryStrategy(self._order_mgr, self._risk_mgr)
@@ -603,20 +626,97 @@ class TradingController(QObject):
     # ─── 시간대별 특별 관리 ──────────────────────────────────────────
 
 
-    def check_market_crash(self) -> None:
-        return
+    # ─── 스캔 및 시장 감시 (MainWindow 에서 이전) ──────────────────────────
+    
+    @pyqtSlot()
+    def run_periodic_scan(self) -> None:
+        """주기적 종목 스캔 실행 (1분마다)"""
+        if self._scan_in_progress:
+            logger.debug("[TradingController] 이전 스캔 진행 중 — 스킵")
+            return
 
+        if getattr(self._kiwoom, '_tr_busy', False):
+            logger.info("[TradingController] TR 처리 중 (%s) — 3s 후 재시도",
+                        getattr(self._kiwoom, '_tr_current_rq', '?'))
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(3_000, self.run_periodic_scan)
+            return
+
+        self._scan_in_progress = True
+        self.log_message.emit(f"[스캔] 주기 스캔 시작 — {datetime.now():%H:%M:%S}")
+        self.scan_status_updated.emit("스캔 중...", False)
+
+        try:
+            # HealthMonitor ACK
+            if self._health_monitor:
+                self._health_monitor.ack()
+
+            if self._smart_scanner:
+                self._smart_scanner.run_periodic_scan(on_progress=None)
+
+            if self._health_monitor:
+                self._health_monitor.ack()
+
+            total_watched = len(self._snap_store) if self._snap_store else 0
+            self.log_message.emit(f"[스캔] 완료 — 전체 {total_watched}종목 모니터링")
+            self.scan_status_updated.emit(f"완료 / {total_watched}종목", True)
+
+            # 일봉 갱신 대기 목록 처리 요청
+            if self._smart_scanner:
+                _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))[:10]
+                if _pending:
+                    self._smart_scanner._daily_refresh_pending = []
+                    self.daily_refresh_requested.emit(_pending)
+        except Exception as e:
+            logger.exception("[TradingController] run_periodic_scan 오류")
+            self.log_message.emit(f"[스캔 오류] {e}")
+            self.scan_status_updated.emit(f"오류: {e}", True)
+        finally:
+            self._scan_in_progress = False
+
+    @pyqtSlot()
+    def check_market_crash(self) -> None:
+        """지수 급락 감지 및 신규 진입 차단 (60초마다)"""
+        if getattr(self._kiwoom, '_tr_busy', False):
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(5_000, self.check_market_crash)
+            return
+
+        # 1. 지수 조회 (코스피, 코스닥)
+        kp = self._kiwoom.get_index_info("001")
+        kd = self._kiwoom.get_index_info("101")
+
+        if not kp or not kd:
+            return
+
+        self._kospi_chg_pct = kp['change_pct']
+        self._kosdaq_chg_pct = kd['change_pct']
+
+        # 2. 급락 여부 판단
+        crash_limit = float(self._scan_cfg.get("market_crash_pct", -2.0))
+        is_crash = (self._kospi_chg_pct <= crash_limit or self._kosdaq_chg_pct <= crash_limit)
+
+        # 3. 상태 업데이트 및 신규 진입 차단 설정
+        if is_crash and not self._market_crash_off:
+            self._market_crash_off = True
+            self._auto_trading = False
+            self.log_message.emit(f"🔴 [지수급락] 코스피 {self._kospi_chg_pct}% / 코스닥 {self._kosdaq_chg_pct}% — 자동매매 긴급 정지")
+        
+        # UI 업데이트 신호 발생 (KOSPI 현재/%, KOSDAQ 현재/%, 급락여부)
+        self.market_data_updated.emit(
+            kp['current'], kp['change_pct'],
+            kd['current'], kd['change_pct'],
+            is_crash
+        )
 
     def check_overnight_gap(self) -> None:
-        import logging as _log
-        _logger = _log.getLogger(__name__)
+        """EOD 포지션 익일 갭 확인"""
         _gap_up = float(getattr(self._scan_cfg, 'eod_gap_up_exit_pct', 2.0))
         _gap_dn = float(getattr(self._scan_cfg, 'eod_gap_down_exit_pct', -1.5))
         eod_positions = [(code, pos) for code, pos in list(self._order_mgr.positions.items()) if getattr(pos, 'eod_trade', False)]
         if not eod_positions:
             return
         
-
         self.log_message.emit(f'🌅 [EOD갭체크] {len(eod_positions)}개 오버나잇 포지션 갭 확인...')
         for code, pos in eod_positions:
             if getattr(pos, 'avg_price', 0) <= 0:
@@ -637,10 +737,8 @@ class TradingController(QObject):
                 pos.overnight_held = True
                 self.log_message.emit(f'⏳ [EOD보합] {pos.name}({code}) 갭 {chg:+.2f}% — 트레일 스탑 모드로 전환')
 
-
     def liquidate_phase1_positions(self, forced: bool=False) -> None:
-        import logging as _log_module
-        _logger = _log_module.getLogger(__name__)
+        """Phase1 모닝 스캘핑 포지션 정리"""
         _trail_drop = float(getattr(self._scan_cfg, 'phase1_trail_drop_pct', 1.0))
         for code, pos in list(self._order_mgr.positions.items()):
             if getattr(pos, 'entry_phase', 0) != 1:
@@ -658,11 +756,8 @@ class TradingController(QObject):
                     self._order_mgr.force_exit(code, pos.name, pos.qty, reason=f'Phase1 trail -{_trail_drop:.1f}%')
                     self.log_message.emit(f'📉 [Phase1트레일] {pos.name}({code}) 고점 {pos.peak_price:,} → 현재 {pos.current_price:,} (-{drop_pct:.1f}%) 청산')
 
-
     def liquidate_all_positions(self) -> None:
-        from datetime import date as _date
-        import logging as _log
-        _logger = _log.getLogger(__name__)
+        """장 마감 전 모든 포지션 청산 (EOD 제외)"""
         if getattr(self, '_liquidate_in_progress', False):
             return
         self._liquidate_in_progress = True
@@ -683,11 +778,9 @@ class TradingController(QObject):
                 if sell_qty > 0:
                     targets.append((code, pos, sell_qty))
             
-
             if not targets:
                 return
             
-
             self.log_message.emit(f'🔴 [자동청산 시작] 오늘 앱 매수 {len(targets)}종목만 청산...')
             for code, pos, sell_qty in targets:
                 try:
@@ -699,3 +792,90 @@ class TradingController(QObject):
                     self.log_message.emit(f'  ⚠️ {pos.name}({code}) 청산 실패: {e}')
         finally:
             self._liquidate_in_progress = False
+
+    @pyqtSlot()
+    def update_portfolio_prices(self) -> None:
+        """보유 종목 현재가를 실시간 스냅샷 우선으로 갱신한다."""
+        positions = self._order_mgr.positions
+        if not positions:
+            return
+        try:
+            for pos in positions.values():
+                price = 0
+                if self._snap_store:
+                    snap = self._snap_store.get_snapshot(pos.code)
+                    if snap and snap.current_price > 0:
+                        price = snap.current_price
+                
+                if price <= 0:
+                    price = self._kiwoom.get_current_price(pos.code)
+                
+                if price > 0 and pos.current_price != price:
+                    pos.current_price = price
+        except Exception as e:
+            logger.warning("[TradingController] 포트폴리오 가격 갱신 실패: %s", e)
+            return
+
+        # 갱신된 데이터 발행 (UI 업데이트용)
+        self.portfolio_updated.emit({
+            "cash":      self._order_mgr.cash,
+            "positions": dict(positions),
+        })
+
+        # 청산 판정 및 미체결 관리
+        self.check_and_exit_all()
+        self._order_mgr._check_failed_sells()
+        self._order_mgr._check_pending_buys()
+
+    def refresh_daily_candles(self, codes: list, idx: int) -> None:
+        """
+        일봉 데이터를 QTimer 체인으로 1종목씩 비동기 갱신.
+        """
+        if idx >= len(codes):
+            logger.info("[TradingController] 일봉갱신 완료 — %d종목 처리", len(codes))
+            return
+
+        if getattr(self._kiwoom, "_tr_busy", False):
+            from PyQt5.QtCore import QTimer
+            logger.debug("[TradingController] 일봉갱신 TR 사용 중 — %s 스킵 후 다음 종목", codes[idx])
+            QTimer.singleShot(350, lambda: self.refresh_daily_candles(codes, idx + 1))
+            return
+
+        # HealthMonitor ACK
+        if self._health_monitor:
+            self._health_monitor.ack()
+
+        code = codes[idx]
+        try:
+            candles = self._kiwoom.get_daily_candles(code, count=120)
+            if candles:
+                self._snap_store.set_daily_candles(code, candles)
+                logger.debug("[TradingController] 일봉갱신 %s 완료 (%d개)", code, len(candles))
+        except Exception as e:
+            logger.warning("[TradingController] 일봉갱신 %s 실패: %s", code, e)
+
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(350, lambda: self.refresh_daily_candles(codes, idx + 1))
+    def check_overnight_timecut(self) -> None:
+        """
+        EOD 포지션 익일 09:30 타임컷.
+        overnight_held = True 이고 수익률 eod_timecut_min_pct 미달이면 강제 청산.
+        """
+        _min_pct = float(getattr(self._scan_cfg, "eod_timecut_min_pct", 1.0))
+
+        for code, pos in list(self._order_mgr.positions.items()):
+            if not getattr(pos, "overnight_held", False):
+                continue
+            chg = float(pos.price_change_pct_vs_avg)
+            if chg < _min_pct:
+                self.log_message.emit(
+                    f"⏱️ [EOD타임컷] {pos.name}({code}) 09:30 수익 {chg:+.2f}% < {_min_pct:.1f}% — "
+                    f"{pos.qty}주 강제 청산"
+                )
+                if hasattr(self._order_mgr, '_audit') and self._order_mgr._audit:
+                    self._order_mgr._audit.log_sell_decision(
+                        code, f"EOD 타임컷 09:30 수익 {chg:+.2f}% (기준 {_min_pct:.1f}%)", pos.current_price
+                    )
+                self._order_mgr.force_exit(code, pos.name, pos.qty,
+                                          reason=f"EOD 타임컷 09:30 ({chg:+.2f}%)")
+                logger.info("[EOD타임컷] %s(%s) %+.2f%%", pos.name, code, chg)

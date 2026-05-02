@@ -49,5 +49,8 @@ if __name__ == "__main__":
         handlers=[file_handler, console_handler],
     )
 
+    from app.config_manager import config_manager as cfg
+    logging.info("[시스템] 설정 관리자 준비 완료 (LiveReload 활성)")
+
     kiwoom = KiwoomManager()
     launch(kiwoom)
