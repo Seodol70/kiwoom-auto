@@ -408,9 +408,7 @@ class MainWindow(QMainWindow):
 
         self.trading_controller.signal_rejected.connect(lambda msg: self.append_log(f"❌ [진입거절] {msg}"))
         self.trading_controller.log_message.connect(self.append_log)
-        self.trading_controller.market_data_updated.connect(
-            lambda k1, k2, d1, d2, crash: self.header.set_index(k1, k2, d1, d2)
-        )
+        self.trading_controller.market_data_updated.connect(self.header.set_index)
         self.trading_controller.scan_status_updated.connect(
             lambda msg, done: self.scan_status.done(msg) if done else self.scan_status.reset()
         )
@@ -581,7 +579,7 @@ class MainWindow(QMainWindow):
 
 
         # 지수 초기 조회 — 스캔(1s) 완료 후 5s 뒤 (TR 충돌 회피)
-        QTimer.singleShot(6_000, self.trading_controller.check_market_crash)
+        QTimer.singleShot(2_000, self.trading_controller.check_market_crash)
 
 
         # 수급 초기 조회 — 스캔 + 지수 완료 후 10s 뒤

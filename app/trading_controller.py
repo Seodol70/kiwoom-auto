@@ -765,10 +765,13 @@ class TradingController(QObject):
         kd = self._kiwoom.get_index_info("101")
 
         if not kp or not kd:
+            logger.warning("[check_market_crash] 지수 정보를 가져오지 못했습니다. (KP=%s, KD=%s)", kp is not None, kd is not None)
             return
 
         self._kospi_chg_pct = kp['change_pct']
         self._kosdaq_chg_pct = kd['change_pct']
+        logger.info("[지수업데이트] KOSPI: %.2f(%.2f%%) / KOSDAQ: %.2f(%.2f%%)", 
+                    kp['current'], kp['change_pct'], kd['current'], kd['change_pct'])
 
         # 2. 급락 여부 판단 (index_block_pct -1.5%보다 더 심한 -2.0% 기준)
         crash_limit = -2.0

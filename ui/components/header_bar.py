@@ -41,23 +41,32 @@ class HeaderBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(52)
         self.setObjectName("header_bar")
+        # 버전 확인용 로그
+        logging.info("[HeaderBar] 초기화 완료 (Version: 2026-05-03-v2, Path: %s)", __file__)
+        
         lay = QHBoxLayout(self)
         lay.setContentsMargins(16, 0, 16, 0)
         lay.setSpacing(16)
+        # 시각적 변화 (배경색 아주 약간 변경)
+        self.setStyleSheet("background-color: #11111b; border-bottom: 2px solid #313244;")
 
 
         self._lbl_title = QLabel("📈 키움 자동매매")
         self._lbl_title.setFont(QFont("Malgun Gothic", 12, QFont.Bold))
         self._lbl_title.setObjectName("lbl_title")
-
+        self._lbl_title.setMinimumWidth(180)  # 잘림 방지
 
         self._lbl_account = self._make("계좌: —")
         self._lbl_mode    = self._make("—")
         self._lbl_conn    = self._make("● 미연결")
         self._lbl_conn.setObjectName("conn_off")
         self._lbl_pnl     = self._make("당일 실현손익: —")
-        self._lbl_kospi   = self._make("코스피: —")
-        self._lbl_kosdaq  = self._make("코스닥: —")
+        
+        # 지수 라벨 초기 스타일 (명시적 색상 부여)
+        self._lbl_kospi   = self._make("KOSPI: —")
+        self._lbl_kosdaq  = self._make("KOSDAQ: —")
+        self._lbl_kospi.setStyleSheet("color: #cdd6f4;")
+        self._lbl_kosdaq.setStyleSheet("color: #cdd6f4;")
 
 
         # ── Safety Switch ───────────────────────────────────────────────
@@ -126,11 +135,11 @@ class HeaderBar(QWidget):
 
 
         lay.addWidget(self._lbl_title)
-        lay.addStretch()
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_kospi)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_kosdaq)
+        lay.addStretch()
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_account)
         lay.addWidget(self._divider())
@@ -241,7 +250,7 @@ class HeaderBar(QWidget):
 
 
     def set_index(self, kospi_current: float, kospi_chg: float,
-                  kosdaq_current: float, kosdaq_chg: float) -> None:
+                  kosdaq_current: float, kosdaq_chg: float, is_crash: bool = False) -> None:
         """코스피·코스닥 현재가 및 등락률 표시 (한국식: 상승 빨강 / 하락 파랑)."""
         def _fmt(name: str, cur: float, chg: float) -> str:
             arrow = "▲" if chg > 0 else "▼" if chg < 0 else "—"
