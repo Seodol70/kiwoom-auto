@@ -1,5 +1,5 @@
 """
-Watchdog — 프로세스 감시 및 자동 재시작
+Watchdog - 프로세스 감시 및 자동 재시작
 
 역할:
   app.py를 subprocess로 실행 후 지속적으로 모니터링.
@@ -13,6 +13,11 @@ Watchdog — 프로세스 감시 및 자동 재시작
 import subprocess
 import sys
 import time
+import os
+
+# Windows 터미널 한글 깨짐 방지
+if sys.platform == "win32":
+    os.system("chcp 65001 > nul")
 
 APP_CMD = [sys.executable, "run_qt.py"]  # Streamlit 대신 Qt 버전 사용
 CHECK_INTERVAL = 10  # 초

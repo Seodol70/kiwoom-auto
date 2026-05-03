@@ -130,6 +130,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("키움 자동매매 대시보드")
         self.resize(1600, 900)
+        self.setMinimumSize(1200, 800)  # 최소 크기 지정 (자유로운 크기 조절 보장)
         self.setStyleSheet(_DARK_QSS)
 
         # [Log Buffering] 실시간 로그 폭주 시 UI 프리징 방지
@@ -202,7 +203,7 @@ class MainWindow(QMainWindow):
 
         # 메인 영역 — 좌(스캐너 40%) | 우(보유현황+차트 60%)
         h_split = QSplitter(Qt.Horizontal)
-        h_split.setHandleWidth(2)
+        h_split.setHandleWidth(6)
 
 
         # 좌: 스캐너 감시 종목
@@ -212,7 +213,7 @@ class MainWindow(QMainWindow):
 
         # 우: 보유현황(위) + 차트(아래) 세로 분할
         right_v = QSplitter(Qt.Vertical)
-        right_v.setHandleWidth(2)
+        right_v.setHandleWidth(6)
         _RISK = cfg.RISK
         self.portfolio_panel = PortfolioPanel(
             tp_init=_RISK.get("take_profit_pct", 3.0),
@@ -860,7 +861,8 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            cache_file = "config/login_cache.json"
+            # LoginManager에서 사용하는 실제 캐시 파일 경로로 수정
+            cache_file = "params/last_account.txt"
             if os.path.exists(cache_file):
                 os.remove(cache_file)
             self.header._on_restart_clicked()

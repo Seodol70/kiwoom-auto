@@ -1,12 +1,13 @@
+# -*- coding: utf-8 -*-
 """
-LoginManager — 접속 및 인증 모듈
+LoginManager - 계좌접속 및 인증 모듈
 
 기본값: 모의투자 서버 (안전 우선)
 선택:   로그인 다이얼로그에서 실전투자 전환 가능
 
 키움 CommConnect 파라미터
-  CommConnect(0) → 실전투자 서버
-  CommConnect(1) → 모의투자 서버  ← 기본값
+  CommConnect(0) -> 실전투자 서버
+  CommConnect(1) -> 모의투자 서버  <- 기본값
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ class LoginDialog(QDialog):
     ┌─────────────────────────────┐
     │  키움 자동매매 시스템        │
     │  ─────────────────────────  │
-    │  ☐  실전투자 서버 접속       │
+    │  [ ]  실전투자 서버 접속       │
     │     (체크 해제 시 모의투자)  │
     │  ─────────────────────────  │
     │     [  취소  ]  [  접속  ]  │
@@ -47,7 +48,7 @@ class LoginDialog(QDialog):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("키움 자동매매 — 서버 선택")
+        self.setWindowTitle("키움 자동매매 - 서버 선택")
         self.setFixedSize(360, 200)
         self.setStyleSheet(_DIALOG_QSS)
         self._use_real = False
@@ -101,7 +102,7 @@ class LoginDialog(QDialog):
     def _on_toggle(self, checked: bool) -> None:
         self._use_real = checked
         if checked:
-            self._lbl_mode.setText("⚠ 실전투자 서버 — 실제 돈이 사용됩니다!")
+            self._lbl_mode.setText("⚠ 실전투자 서버 - 실제 돈이 사용됩니다!")
             self._lbl_mode.setObjectName("mode_real")
         else:
             self._lbl_mode.setText("● 모의투자 서버 (기본값)")
@@ -125,7 +126,7 @@ class LoginManager(QObject):
 
     사용 예)
         mgr = LoginManager(kiwoom, parent=main_window)
-        ok = mgr.show_and_login()   # 다이얼로그 → CommConnect → 완료 대기
+        ok = mgr.show_and_login()   # 다이얼로그 -> CommConnect -> 완료 대기
         if ok:
             print("계좌:", mgr.account)
             print("모드:", mgr.server_mode)
@@ -143,6 +144,7 @@ class LoginManager(QObject):
         self.account:     str = ""
         self.server_mode: str = ""   # "모의투자" | "실전투자"
         self.use_real:    bool = False
+        self._requested_use_real: bool = False  # 사용자 선택값 (실제 접속 후 검증용)
 
         self._account_cache_file = "params/last_account.txt"
 
@@ -180,12 +182,13 @@ class LoginManager(QObject):
         없으면 서버 선택 다이얼로그를 표시한 뒤 CommConnect를 호출한다.
 
         Returns:
-            True → 로그인 성공
+            True -> 로그인 성공
         """
         cache = self._load_last_account()
         if cache and "account" in cache:
             self.account = cache["account"]
             self.use_real = cache.get("use_real", False)
+            # 서버 접속 후 실제 모드를 다시 확인하겠지만, 캐시 시점의 정보를 우선 표시
             self.server_mode = "실전투자" if self.use_real else "모의투자"
             logger.info("캐시된 설정으로 다이얼로그 생략 접속: %s 모드", self.server_mode)
             
@@ -204,6 +207,7 @@ class LoginManager(QObject):
             logger.info("로그인 취소")
             return False
 
+        self._requested_use_real = dlg.use_real
         self.use_real    = dlg.use_real
         self.server_mode = "실전투자" if self.use_real else "모의투자"
         logger.info("서버 선택: %s", self.server_mode)
@@ -227,28 +231,27 @@ class LoginManager(QObject):
     # -----------------------------------------------------------------------
 
     def reconnect_silent(self) -> bool:
-        """자동 재연결 — 다이얼로그 없이 이전 계좌로 재접속.
+        """자동 재연결 - 다이얼로그 없이 이전 계좌로 재접속.
 
         키움이 연결을 강제로 끊었을 때(야간 점검, 장 종료 후 등) 호출.
         이전에 선택했던 self.account가 있으면 다이얼로그 없이 자동 선택.
         """
-        logger.warning("[자동재연결] 시도 — 이전 계좌: '%s' 모드: %s",
+        logger.warning("[자동재연결] 시도 - 이전 계좌: '%s' 모드: %s",
                         self.account, self.server_mode)
         return self._connect(preferred_account=self.account)
 
     def _connect(self, preferred_account: str = "") -> bool:
-        """CommConnect → OnEventConnect 대기 → 계좌 선택.
+        """CommConnect -> OnEventConnect 대기 -> 계좌 선택.
 
         preferred_account: 재연결 시 이전 계좌번호. 지정되면 다이얼로그 없이 자동 선택.
         """
         self._err_code = -999
 
-        # 모의투자: SetLoginInfo로 모의투자 플래그 설정 후 CommConnect
-        # 실전투자: 플래그 없이 CommConnect
+        # 실전/모의 서버 선택은 키움 로그인 창에서 직접 수행해야 함 (Bad parameter count 방지)
         self._kiwoom._ocx.dynamicCall("CommConnect()")
-        logger.info("CommConnect() 호출 — 키움 로그인 창 대기 중")
+        logger.info("CommConnect() 호출 - 키움 로그인 창 대기 중 (%s)", self.server_mode)
 
-        # QEventLoop으로 대기 — Qt 이벤트를 처리하면서 OnEventConnect 콜백을 받음
+        # QEventLoop으로 대기 - Qt 이벤트를 처리하면서 OnEventConnect 콜백을 받음
         self._loop = QEventLoop()
         timer = QTimer()
         timer.setSingleShot(True)
@@ -273,12 +276,14 @@ class LoginManager(QObject):
         # 계좌번호 획득
         raw = self._kiwoom._ocx.dynamicCall("GetLoginInfo(QString)", "ACCNO")
         accounts = [a for a in raw.strip().split(";") if a]
+        logger.info("연결 성공 - RAW 계좌: [%s], 파싱된 계좌: %s", raw, accounts)
 
         if len(accounts) == 0:
-            logger.error("계좌 목록 없음")
+            logger.error("계좌 목록 없음 - Kiwoom 서버에서 계좌 정보를 보내지 않았습니다.")
             return False
         elif len(accounts) == 1:
             self.account = accounts[0]
+            logger.info("계좌 단일 감지 - 자동 선택: %s", self.account)
             self._save_last_account()
         elif preferred_account and preferred_account in accounts:
             # 자동 재연결 (실시간 끊김 시): 메모리의 이전 계좌를 자동 선택
@@ -299,7 +304,26 @@ class LoginManager(QObject):
                 self._save_last_account()
                 logger.info("계좌 선택 완료: %s (전체 %d개)", self.account, len(accounts))
 
-        logger.info("로그인 성공 — 모드: %s / 계좌: %s",
+        # 실제 서버 접속 모드 확인 (사용자 선택과 다를 수 있음)
+        actual_is_mock = self._kiwoom.is_mock
+        server_gubun = self._kiwoom._ocx.dynamicCall("GetLoginInfo(QString)", "GetServerGubun")
+        user_id = self._kiwoom._ocx.dynamicCall("GetLoginInfo(QString)", "USER_ID")
+        
+        logger.info("서버 구분 값: [%s], 사용자 ID: [%s]", server_gubun, user_id)
+        
+        self.use_real = not actual_is_mock
+        self.server_mode = "실전투자" if self.use_real else "모의투자"
+
+        # 사용자가 실전을 원했는데 모의로 접속된 경우 경고
+        if self._requested_use_real and actual_is_mock:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                None, "서버 접속 경고",
+                "실전투자를 선택하셨으나, 키움 로그인 창에서 '모의투자'가 체크되어 모의 서버로 접속되었습니다.\n"
+                "실전투자를 하시려면 재시작 후 키움 로그인 창에서 '모의투자' 체크를 해제해 주세요."
+            )
+
+        logger.info("로그인 성공 - 실제 모드: %s / 계좌: %s",
                     self.server_mode, self.account)
         self.login_success.emit(self.account, self.server_mode)
         return True

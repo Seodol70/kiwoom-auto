@@ -1,5 +1,5 @@
 """
-키움 자동매매 — Qt 대시보드 실행
+키움 자동매매 - Qt 대시보드 실행
 
 사용법:
   python run_qt.py        # 직접 실행
@@ -8,6 +8,10 @@
 
 import sys
 import os
+
+# Windows 터미널 한글 깨짐 방지 (UTF-8 설정)
+if sys.platform == "win32":
+    os.system("chcp 65001 > nul")
 
 # 프로젝트 루트를 path에 추가 (하위 모듈의 절대 경로 임포트 보장)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))

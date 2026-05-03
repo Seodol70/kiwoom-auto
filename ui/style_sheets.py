@@ -7,6 +7,7 @@ _DARK_QSS = """
 * {
     font-family: 'Malgun Gothic', 'Segoe UI', sans-serif;
     font-size: 9pt;
+    color: #cdd6f4;  /* 기본 텍스트 색상을 밝은 색으로 설정 */
 }
 QMainWindow {
     background: #1e1e2e;
@@ -20,16 +21,19 @@ QWidget#header_bar {
     background: #11111b;
     border-bottom: 1px solid #313244;
 }
-QLabel#logo_label {
+QLabel#lbl_title {  /* logo_label -> lbl_title로 수정 */
     color: #f5c2e7;
     font-size: 14pt;
     font-weight: bold;
     padding: 10px;
 }
-QLabel#account_info {
+/* 특정 헤더 정보 라벨 스타일 */
+QWidget#header_bar QLabel {
     color: #cdd6f4;
-    font-size: 10pt;
 }
+QLabel#conn_on  { color: #a6e3a1; font-weight: bold; }  /* 연결됨: 초록색 */
+QLabel#conn_off { color: #f38ba8; font-weight: bold; }  /* 미연결: 빨간색 */
+
 
 /* ─── 버튼 ────────────────────────────────────────────── */
 QPushButton {

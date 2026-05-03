@@ -1,5 +1,6 @@
+# -*- coding: utf-8 -*-
 """
-KiwoomManager — 키움증권 Open API+ 연동 핵심 클래스
+KiwoomManager - 키움증권 Open API+ 연동 핵심 클래스
 
 의존: PyQt5 (QApplication + QAxWidget), pywin32
 설치: pip install PyQt5 pywin32
@@ -54,7 +55,7 @@ class _TrFailCounter:
             tr_log.warning(
                 "[TR실패] %s 연속=%d회 누적=%d회%s",
                 tr_code, cnt, tot,
-                f" — {detail}" if detail else "",
+                f" - {detail}" if detail else "",
             )
         elif tot % self._REPORT_EVERY == 0:
             tr_log.info("[TR집계] %s 누적실패=%d회", tr_code, tot)
@@ -63,7 +64,7 @@ class _TrFailCounter:
         """성공 시 연속 실패 카운터 리셋."""
         if self._counts.get(tr_code, 0) > 0:
             tr_log.info(
-                "[TR회복] %s 연속실패 %d회 → 응답 정상화",
+                "[TR회복] %s 연속실패 %d회 -> 응답 정상화",
                 tr_code, self._counts[tr_code],
             )
         self._counts[tr_code] = 0
@@ -92,15 +93,15 @@ TR_HOLDINGS    = "opw00018"   # 계좌평가잔고내역요청
 TR_MIN_CANDLE  = "opt10080"   # 주식분봉차트조회요청
 TR_DAILY_CANDLE = "opt10081"  # 주식일봉차트조회요청
 TR_DAILY_REALIZED = "opt10074"  # 일자별실현손익요청 (당일 누적 실현손익)
-TR_INDEX_INFO     = "opt20001"  # 업종현재가요청 (지수 조회 — 코스피:"001", 코스닥:"101")
+TR_INDEX_INFO     = "opt20001"  # 업종현재가요청 (지수 조회 - 코스피:"001", 코스닥:"101")
 TR_INVESTOR       = "opt10059"  # 종목별투자자기관별요청 (외국인/기관 순매수)
 
 LOGIN_TIMEOUT_SEC = 30
-TR_DELAY_SEC      = 0.25      # TR 연속 조회 제한(초) — 키움 정책 200ms+
+TR_DELAY_SEC      = 0.25      # TR 연속 조회 제한(초) - 키움 정책 200ms+
 
 
 # ---------------------------------------------------------------------------
-# TR 레이트 리미터 — 1초 5회 제한 (슬라이딩 윈도우)
+# TR 레이트 리미터 - 1초 5회 제한 (슬라이딩 윈도우)
 # ---------------------------------------------------------------------------
 
 class TRRateLimiter:
@@ -108,13 +109,13 @@ class TRRateLimiter:
     키움 TR 요청 레이트 리미터 (슬라이딩 윈도우 방식).
 
     키움 정책: 1초당 최대 5회, 연속 TR 간 최소 0.2초 간격.
-    실제로는 안전 마진을 두어 4회/초, 0.25초 간격으로 제한한다.
+    실제로는 안전 마진을 두어 4 times/초, 0.25초 간격으로 제한한다.
 
     acquire()는 메인 스레드에서만 호출 (_comm_rq 전용).
     대기 구간에서 QApplication.processEvents()를 호출해 UI 블로킹을 방지한다.
     호출 전 _tr_busy=True 가 이미 설정되어 있으므로 processEvents 중 재진입 없음.
     """
-    MAX_PER_SEC  = 4      # 1초당 최대 호출 횟수 (5→4, 안전 마진)
+    MAX_PER_SEC  = 4      # 1초당 최대 호출 횟수 (5->4, 안전 마진)
     MIN_INTERVAL = 0.25   # 연속 호출 최소 간격 (초)
 
     def __init__(self) -> None:
@@ -125,7 +126,7 @@ class TRRateLimiter:
         """TR 속도 제한 대기. processEvents로 Qt 이벤트(Watchdog ACK 등) 허용.
         _tr_busy + _scan_in_progress 보호가 추가된 이후 cascade 위험 없음.
         (이전 '금지' 주석은 이 보호 추가 전 _load_candles_async 경로 기준이었음)
-        최대 대기: MIN_INTERVAL=0.25s 또는 슬라이딩 윈도우=~1s."""
+        최대 대기: MIN_INTERVAL=0.25 sec 또는 슬라이딩 윈도우=~1s."""
         from PyQt5.QtWidgets import QApplication
         from PyQt5.QtCore import QEventLoop
         QApplication.processEvents(QEventLoop.AllEvents, max(1, int(wait_sec * 1000)))
@@ -165,14 +166,14 @@ class TRRateLimiter:
 
 def safe_int(val, default: int = 0) -> int:
     """
-    키움 API 문자열 → int 안전 변환.
+    키움 API 문자열 -> int 안전 변환.
 
     처리 케이스:
-      " +1,234 "  → 1234
-      "-5678"     → 5678  (절댓값)
-      "+"         → 0     (부호만)
-      ""  / None  → 0
-      "1.5"       → 1     (float 경유)
+      " +1,234 "  -> 1234
+      "-5678"     -> 5678  (절댓값)
+      "+"         -> 0     (부호만)
+      ""  / None  -> 0
+      "1.5"       -> 1     (float 경유)
     """
     if val is None:
         return default
@@ -187,13 +188,13 @@ def safe_int(val, default: int = 0) -> int:
 
 def safe_float(val, default: float = 0.0) -> float:
     """
-    키움 API 문자열 → float 안전 변환 (부호는 그대로 유지).
+    키움 API 문자열 -> float 안전 변환 (부호는 그대로 유지).
 
     처리 케이스:
-      " +1.23 "  → 1.23
-      "-5.67"    → -5.67
-      "+"        → 0.0
-      ""  / None → 0.0
+      " +1.23 "  -> 1.23
+      "-5.67"    -> -5.67
+      "+"        -> 0.0
+      ""  / None -> 0.0
     """
     if val is None:
         return default
@@ -219,10 +220,10 @@ def _resolve_prev_close(prev_close: int, current_price: int, change_pct: float) 
         계산된 또는 원본 전일종가 (int)
 
     처리 로직:
-      1. prev_close > 0 → 원본 그대로 반환
-      2. current_price > 0 and change_pct != 0 → current_price / (1 + change_pct/100) 역산
-      3. change_pct == 0 (보합) → current_price 사용
-      4. 모두 0 → 0 반환
+      1. prev_close > 0 -> 원본 그대로 반환
+      2. current_price > 0 and change_pct != 0 -> current_price / (1 + change_pct/100) 역산
+      3. change_pct == 0 (보합) -> current_price 사용
+      4. 모두 0 -> 0 반환
     """
     if prev_close > 0:
         return prev_close
@@ -242,7 +243,7 @@ class KiwoomManager(KiwoomProtocol):
     사용 예)
         app = QApplication(sys.argv)
         kiwoom = KiwoomManager()
-        kiwoom.login()          # 블로킹 — 로그인 완료까지 대기
+        kiwoom.login()          # 블로킹 - 로그인 완료까지 대기
         info = kiwoom.get_stock_info("005930")
         app.exec_()
     """
@@ -267,10 +268,10 @@ class KiwoomManager(KiwoomProtocol):
         self._auto_login_callback: Optional[callable] = None  # 재로그인 성공 시 콜백
         self._tr_prev_next: str = ""  # 연속조회 여부 ("2" = 다음 데이터 있음)
 
-        # TR 레이트 리미터 — 1초 4회 / 0.25초 간격 보장
+        # TR 레이트 리미터 - 1초 4 times / 0.25초 간격 보장
         self._tr_limiter = TRRateLimiter()
 
-        # OnReceiveMsg 외부 콜백 — OrderManager가 [800033] 등 주문 에러를 처리하기 위해 사용
+        # OnReceiveMsg 외부 콜백 - OrderManager가 [800033] 등 주문 에러를 처리하기 위해 사용
         self._on_order_msg_cb: Optional[callable] = None
 
         self._connect_signals()
@@ -292,10 +293,10 @@ class KiwoomManager(KiwoomProtocol):
     def login(self) -> bool:
         """
         로그인 창을 띄우고 완료될 때까지 블로킹 대기.
-        Returns: 성공 여부
         """
-        logger.info("로그인 요청 중...")
+        # 실전/모의 서버 선택은 키움 로그인 창에서 직접 수행해야 함 (Bad parameter count 방지)
         self._ocx.dynamicCall("CommConnect()")
+        logger.info("CommConnect() 호출 - 키움 로그인 창 대기 중")
         ok = self._login_event.wait(timeout=LOGIN_TIMEOUT_SEC)
 
         if not ok:
@@ -304,11 +305,11 @@ class KiwoomManager(KiwoomProtocol):
 
         self._account_list = self._get_account_list()
         if not self._account_list:
-            logger.error("계좌 목록을 가져올 수 없습니다.")
+            logger.error("사용 가능한 계좌가 없습니다.")
             return False
 
         self._account = self._account_list[0]
-        logger.info("로그인 성공 — 계좌: %s", self._account)
+        logger.info("로그인 성공 - 계좌: %s", self._account)
         return True
 
     def _get_account_list(self) -> list[str]:
@@ -319,16 +320,19 @@ class KiwoomManager(KiwoomProtocol):
         """1: 로그인, 0: 미로그인"""
         return self._ocx.dynamicCall("GetConnectState()")
 
+    @property
+    def is_mock(self) -> bool:
+        """현재 접속된 서버가 모의투자 서버인지 여부 (GetServerGubun="1")"""
+        gubun = self._ocx.dynamicCall("GetLoginInfo(QString)", "GetServerGubun")
+        return str(gubun).strip() == "1"
+
     # -----------------------------------------------------------------------
     # opt10030 거래대금 상위 (연속조회 지원)
     # -----------------------------------------------------------------------
 
     def fetch_opt10030_top_volume(self, max_rows: int = 400) -> list[dict]:
         """
-        opt10030 거래대금 상위 종목. 한 페이지(최대 약 100행)를 넘기면 연속조회로 이어 받는다.
-
-        키움: prev_next 콜백이 '2'이면 다음 페이지가 있음 → CommRqData(..., prev_next=2).
-        max_rows=400 기준 약 4페이지(TR 4회) 소요. 각 TR 간 0.25s 딜레이 포함.
+        opt10030 top volume stocks.
         """
         all_rows: list[dict] = []
         prev_next = 0
@@ -342,7 +346,7 @@ class KiwoomManager(KiwoomProtocol):
             chunk = self._tr_data.get("rows", [])
             page += 1
             if not chunk:
-                logger.debug("[opt10030] 페이지 %d 응답 없음 — 종료", page)
+                logger.debug("[opt10030] 페이지 %d 응답 없음 - 종료", page)
                 break
             all_rows.extend(chunk)
             logger.debug(
@@ -404,12 +408,12 @@ class KiwoomManager(KiwoomProtocol):
                     "sector":        str(d.get("업종명", "")).strip(),
                 }
 
-            # 첫 시도 실패 → 0.3초 비블로킹 대기 후 재시도
+            # 첫 시도 실패 -> 0.3초 비블로킹 대기 후 재시도
             if retry == 0:
                 self._tr_limiter._nonblocking_wait(0.3)
 
         # 재시도도 실패
-        logger.warning("[opt10001] %s 응답 없음 — 스냅샷 폴백", code)
+        logger.warning("[opt10001] %s 응답 없음 - 스냅샷 폴백", code)
         _TR_FAIL.fail("opt10001", f"code={code}")
         return None
 
@@ -430,7 +434,7 @@ class KiwoomManager(KiwoomProtocol):
 
         Args:
             code: 종목코드
-            tick_unit: 분 단위 (1·3·5·10·15·30·45·60)
+            tick_unit: 분 단위 (1,3,5,10,15,30,45,60)
             count: 최대 캔들 수
 
         Returns:
@@ -466,7 +470,7 @@ class KiwoomManager(KiwoomProtocol):
         self._set_input("종목코드", code)
         self._set_input("기준일자", "")   # 오늘 기준 최근 N개
         self._set_input("수정주가구분", "1")
-        # 타임아웃 1초 — 일봉 체인 10종목 × 최대 1s = 최대 10s (기본 2s × 10 = 20s → watchdog 초과 방지)
+        # 타임아웃 1초 - 일봉 체인 10종목 x 최대 1s = 최대 10s (기본 2s x 10 = 20s -> watchdog 초과 방지)
         self._comm_rq(TR_DAILY_CANDLE, "daily_candle", "0101", timeout_ms=1_000)
 
         rows: list[dict] = self._tr_data.get("rows", [])
@@ -489,36 +493,36 @@ class KiwoomManager(KiwoomProtocol):
                 "pnl_pct": float,     수익률(%)
             }
         """
-        logger.info("get_balance 호출 — 계좌: '%s'", self._account)
+        logger.info("get_balance 호출 - 계좌: '%s'", self._account)
         if not self._account:
-            logger.warning("get_balance 계좌번호 없음 — 스킵")
+            logger.warning("get_balance 계좌번호 없음 - 스킵")
             return {}   # sync_balance가 if not balance: 로 스킵
         self._set_input("계좌번호",    self._account)
         self._set_input("비밀번호",    "")
         self._set_input("비밀번호입력매체구분", "00")
         self._set_input("조회구분",    "2")
-        # opw00001은 서버 부하 시 4~6초 소요 — 타임아웃 6s→3s (2026-04-27: 스캔 충돌 해소)
-        # 3초 이내 응답 안 오면 빠른 포기 → _tr_busy 점유 시간 단축 → scan TR 충돌 최소화
+        # opw00001은 서버 부하 시 4~6초 소요 - 타임아웃 6s->3s (2026-04-27: 스캔 충돌 해소)
+        # 3초 이내 응답 안 오면 빠른 포기 -> _tr_busy 점유 시간 단축 -> scan TR 충돌 최소화
         ok = self._comm_rq(TR_ACCOUNT, "balance", "2000", timeout_ms=3_000)
         if not ok:
-            logger.warning("get_balance TR 차단됨 — 잔고 동기화 스킵 (기존값 유지)")
-            return {}   # 빈 dict → sync_balance가 if not balance: 로 스킵, 기존 self.cash 유지
+            logger.warning("get_balance TR 차단됨 - 잔고 동기화 스킵 (기존값 유지)")
+            return {}   # 빈 dict -> sync_balance가 if not balance: 로 스킵, 기존 self.cash 유지
 
         d = self._tr_data
-        # 타임아웃으로 _tr_data가 비어 있으면(응답 미도착) 스킵 — 0원으로 덮어쓰기 방지
+        # 타임아웃으로 _tr_data가 비어 있으면(응답 미도착) 스킵 - 0원으로 덮어쓰기 방지
         if not d.get("예수금"):
-            logger.warning("get_balance 응답 없음 또는 예수금 필드 비어 있음 — 스킵 (서버 응답 지연)")
+            logger.warning("get_balance 응답 없음 또는 예수금 필드 비어 있음 - 스킵 (서버 응답 지연)")
             return {}
         cash = safe_int(d.get("예수금"))
 
-        # 총평가금액·총매입금액은 opw00001 필드명이 서버마다 다를 수 있음
-        # → 못 가져오면 holdings에서 직접 계산
+        # 총평가금액,총매입금액은 opw00001 필드명이 서버마다 다를 수 있음
+        # -> 못 가져오면 holdings에서 직접 계산
         total       = safe_int(d.get("총평가금액"))
         invest      = safe_int(d.get("총매입금액"))
         stock_value = safe_int(d.get("유가잔고평가액") or d.get("주식평가금액"))
 
-        # total/invest가 0이어도 holdings TR 추가 호출 금지 — _tr_busy 연장으로 8s 프리징 유발
-        # → 값이 없으면 cash만으로 대체 (다음 30s 갱신 시 정상화됨)
+        # total/invest가 0이어도 holdings TR 추가 호출 금지 - _tr_busy 연장으로 8s 프리징 유발
+        # -> 값이 없으면 cash만으로 대체 (다음 30s 갱신 시 정상화됨)
         if total == 0:
             total = cash + stock_value
 
@@ -537,7 +541,7 @@ class KiwoomManager(KiwoomProtocol):
         """
         계좌 기준 당일 실현손익(원). opt10074 싱글데이터 '실현손익'.
 
-        TR 실패·미지원(모의 등) 시 None — 호출측에서 기존 로컬 집계만 사용.
+        TR 실패,미지원(모의 등) 시 None - 호출측에서 기존 로컬 집계만 사용.
         """
         if not getattr(self, "_account", ""):
             return None
@@ -549,22 +553,22 @@ class KiwoomManager(KiwoomProtocol):
         self._set_input("종료일자", ds)
         ok = self._comm_rq(TR_DAILY_REALIZED, "daily_realized", "2002")
         if not ok:
-            logger.warning("opt10074 TR 차단됨 — 당일 실현손익 동기화 생략")
+            logger.warning("opt10074 TR 차단됨 - 당일 실현손익 동기화 생략")
             return None
         d = self._tr_data
         if not d:
-            logger.warning("opt10074 응답 없음 — 당일 실현손익 동기화 생략")
+            logger.warning("opt10074 응답 없음 - 당일 실현손익 동기화 생략")
             return None
         raw = d.get("실현손익", "")
         if raw is None or (isinstance(raw, str) and not str(raw).strip()):
-            logger.debug("opt10074 실현손익 필드 비어 있음 — 0으로 간주")
+            logger.debug("opt10074 실현손익 필드 비어 있음 - 0으로 간주")
             return 0
-        # 실현손익은 음수 가능 → safe_int(절댓값) 쓰지 않음
+        # 실현손익은 음수 가능 -> safe_int(절댓값) 쓰지 않음
         return int(safe_float(raw, 0.0))
 
     def get_investor_trend(self, code: str) -> dict:
         """
-        종목별 당일 외국인/기관 순매수 수량 조회 — opt10059.
+        종목별 당일 외국인/기관 순매수 수량 조회 - opt10059.
 
         입력: 종목코드, 금융투자구분(1=수량)
         반환: {"foreign_net": int, "inst_net": int}
@@ -604,7 +608,7 @@ class KiwoomManager(KiwoomProtocol):
 
     def get_index_info(self, index_code: str) -> Optional[dict]:
         """
-        업종(지수) 현재가 조회 — opt20001.
+        업종(지수) 현재가 조회 - opt20001.
 
         Args:
             index_code: "001" = 코스피, "101" = 코스닥
@@ -616,7 +620,7 @@ class KiwoomManager(KiwoomProtocol):
         self._set_input("업종코드", index_code)
         ok = self._comm_rq(TR_INDEX_INFO, "index_info", "9300", timeout_ms=1_000)
         if not ok:
-            logger.debug("[opt20001] TR 차단 — 지수 조회 스킵 (code=%s)", index_code)
+            logger.debug("[opt20001] TR 차단 - 지수 조회 스킵 (code=%s)", index_code)
             _TR_FAIL.fail("opt20001", f"TR차단 code={index_code}")
             return None
 
@@ -624,7 +628,7 @@ class KiwoomManager(KiwoomProtocol):
         raw_current = d.get("현재가", "")
         raw_base    = d.get("기준가", "")
 
-        logger.debug("[opt20001] 응답 raw — code=%s 현재가=%r 기준가=%r",
+        logger.debug("[opt20001] 응답 raw - code=%s 현재가=%r 기준가=%r",
                      index_code, raw_current, raw_base)
 
         # ── 단일 필드로 값이 온 경우 (표준 응답) ─────────────────────────
@@ -632,21 +636,21 @@ class KiwoomManager(KiwoomProtocol):
             raw_c = safe_int(raw_current)
             raw_b = safe_int(raw_base)
             # opt20001은 지수를 소수점 2자리 정수화하여 전송할 수 있음
-            # 코스피/코스닥 통상 1000~3000 범위. 10000 초과면 ×100 보정
+            # 코스피/코스닥 통상 1000~3000 범위. 10000 초과면 x100 보정
             current = raw_c / 100.0 if raw_c > 10_000 else float(raw_c)
             base    = raw_b / 100.0 if raw_b > 10_000 else float(raw_b)
             change_pct = round((current - base) / base * 100, 2) if base else 0.0
-            logger.info("[opt20001] 지수 — code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",
+            logger.info("[opt20001] 지수 - code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",
                         index_code, current, base, change_pct)
             _TR_FAIL.ok("opt20001")
             return {"index_code": index_code, "current": current,
                     "base": base, "change_pct": change_pct}
 
-        # ── rows 형태 응답 — 분봉 데이터에서 현재가/기준가 추출 ────────────
+        # ── rows 형태 응답 - 분봉 데이터에서 현재가/기준가 추출 ────────────
         # rows[0] = 최신 분봉 (오늘), rows 이후 = 전일 이전 데이터 (최신순 정렬)
         rows = d.get("rows", [])
         if not rows:
-            logger.warning("[opt20001] 지수 응답 없음 — code=%s", index_code)
+            logger.warning("[opt20001] 지수 응답 없음 - code=%s", index_code)
             _TR_FAIL.fail("opt20001", f"응답없음 code={index_code}")
             return None
 
@@ -655,7 +659,7 @@ class KiwoomManager(KiwoomProtocol):
         prev_rows  = [r for r in rows if not str(r.get("time", "")).startswith(today_str)]
 
         if not today_rows:
-            logger.warning("[opt20001] 오늘 분봉 없음 — code=%s (rows=%d)", index_code, len(rows))
+            logger.warning("[opt20001] 오늘 분봉 없음 - code=%s (rows=%d)", index_code, len(rows))
             return None
 
         # 최신 분봉 close = 현재가, 전일 가장 최근 close = 기준가
@@ -666,7 +670,7 @@ class KiwoomManager(KiwoomProtocol):
         base    = float(base_raw)    / 100.0 if base_raw    > 10_000 else float(base_raw)
         change_pct = round((current - base) / base * 100, 2) if base else 0.0
 
-        logger.info("[opt20001] 지수(rows) — code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",
+        logger.info("[opt20001] 지수(rows) - code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",
                     index_code, current, base, change_pct)
         return {"index_code": index_code, "current": current,
                 "base": base, "change_pct": change_pct}
@@ -684,10 +688,10 @@ class KiwoomManager(KiwoomProtocol):
         self._set_input("비밀번호",    "")
         self._set_input("비밀번호입력매체구분", "00")
         self._set_input("조회구분",    "1")
-        # timeout_ms 명시 — 기본값 2s 유지, Part 3의 2-step 분리 패턴과 함께 동작
+        # timeout_ms 명시 - 기본값 2s 유지, Part 3의 2-step 분리 패턴과 함께 동작
         ok = self._comm_rq(TR_HOLDINGS, "holdings", "2001", timeout_ms=2_000)
         if not ok:
-            logger.warning("get_holdings TR 차단됨 — 보유잔고 조회 생략")
+            logger.warning("get_holdings TR 차단됨 - 보유잔고 조회 생략")
             return []
 
         return self._tr_data.get("rows", [])
@@ -717,7 +721,7 @@ class KiwoomManager(KiwoomProtocol):
             org_order_no: 원주문번호 (취소/정정 시)
 
         Returns:
-            주문번호 (str) — 실패 시 ""
+            주문번호 (str) - 실패 시 ""
         """
         rq_name = f"주문_{code}"
         screen_no = "1000"
@@ -729,11 +733,11 @@ class KiwoomManager(KiwoomProtocol):
         )
 
         if ret != ReturnCode.OK:
-            logger.error("주문 실패 — code=%s ret=%d", code, ret)
+            logger.error("주문 실패 - code=%s ret=%d", code, ret)
             return ""
 
         logger.info(
-            "주문 전송 — %s %s qty=%d price=%d",
+            "주문 전송 - %s %s qty=%d price=%d",
             "매수" if order_type == OrderType.BUY else "매도",
             code, qty, price,
         )
@@ -786,7 +790,7 @@ class KiwoomManager(KiwoomProtocol):
         """
         TR 요청 후 응답 이벤트를 QEventLoop으로 대기 (Qt 이벤트 처리 유지).
 
-        호출 전 TRRateLimiter.acquire()로 키움 1초 4회 제한을 자동 준수한다.
+        호출 전 TRRateLimiter.acquire()로 키움 1초 4 times 제한을 자동 준수한다.
         time.sleep(TR_DELAY_SEC) 하드코딩을 제거하고 슬라이딩 윈도우로 대체.
 
         재진입(reentrant) 방지: QEventLoop.exec_() 중 다른 타이머 콜백이 TR을 다시
@@ -797,11 +801,11 @@ class KiwoomManager(KiwoomProtocol):
         호출자는 False 반환 시 self._tr_data를 읽으면 안 됨 (stale 데이터 위험).
         """
         # ── 재진입 방지 ──────────────────────────────────────────────────────
-        # _tr_busy 확인 먼저 — 차단 시 _tr_data를 건드리지 않음
+        # _tr_busy 확인 먼저 - 차단 시 _tr_data를 건드리지 않음
         # (외부 호출의 exec_() 복귀 직전에 _tr_data를 초기화하면 레이스 발생)
         if self._tr_busy:
             logger.warning(
-                "[TR] 재진입 차단 — %s 요청 거부 (현재 '%s' 처리 중)",
+                "[TR] 재진입 차단 - %s 요청 거부 (현재 '%s' 처리 중)",
                 rq_name, self._tr_current_rq,
             )
             return False
@@ -810,12 +814,12 @@ class KiwoomManager(KiwoomProtocol):
         self._tr_data = {}
         self._tr_prev_next = ""
 
-        # ★ acquire() 전에 busy 플래그 설정 —
+        # ★ acquire() 전에 busy 플래그 설정 -
         #   _wait()의 QEventLoop 도중 다른 타이머가 재진입하는 것을 차단
         self._tr_busy = True
         self._tr_current_rq = rq_name
         try:
-            # 레이트 리미터 — UI 비블로킹 대기 (QEventLoop 사용)
+            # 레이트 리미터 - UI 비블로킹 대기 (QEventLoop 사용)
             self._tr_limiter.acquire()
             logger.debug("[CommRqData] tr=%s rq=%s prev_next=%d screen=%s", tr_code, rq_name, prev_next, screen_no)
 
@@ -824,11 +828,11 @@ class KiwoomManager(KiwoomProtocol):
                 rq_name, tr_code, prev_next, screen_no,
             )
             if ret != ReturnCode.OK:
-                logger.error("CommRqData 실패 — tr=%s ret=%d", tr_code, ret)
+                logger.error("CommRqData 실패 - tr=%s ret=%d", tr_code, ret)
                 return False
             self._tr_loop = QEventLoop()
-            # QTimer를 _tr_loop 자식으로 생성 → Python GC 수집 방지 + Qt 수명 관리
-            # timer = QTimer() 로컬 변수는 exec_() 대기 중 GC 수집 위험 → timeout 무효화 가능
+            # QTimer를 _tr_loop 자식으로 생성 -> Python GC 수집 방지 + Qt 수명 관리
+            # timer = QTimer() 로컬 변수는 exec_() 대기 중 GC 수집 위험 -> timeout 무효화 가능
             self._tr_timeout_timer = QTimer(self._tr_loop)
             self._tr_timeout_timer.setSingleShot(True)
             self._tr_timeout_timer.timeout.connect(self._tr_loop.quit)
@@ -858,9 +862,9 @@ class KiwoomManager(KiwoomProtocol):
     # -----------------------------------------------------------------------
 
     def _on_event_connect(self, err_code: int) -> None:
-        """로그인 이벤트 처리 — 연결 상태 추적 + 콜백"""
+        """로그인 이벤트 처리 - 연결 상태 추적 + 콜백"""
         if err_code == ReturnCode.OK:
-            logger.info("OnEventConnect — 로그인 성공")
+            logger.info("OnEventConnect - 로그인 성공")
             self._is_connected = True
             self._account_list = self._get_account_list()
             if self._account_list:
@@ -872,7 +876,7 @@ class KiwoomManager(KiwoomProtocol):
                 except Exception as e:
                     logger.warning("재로그인 콜백 실패: %s", e)
         else:
-            logger.error("OnEventConnect — 로그인 실패 (err=%d)", err_code)
+            logger.error("OnEventConnect - 로그인 실패 (err=%d)", err_code)
             self._is_connected = False
 
     def set_auto_login_callback(self, callback: Callable) -> None:
@@ -888,19 +892,19 @@ class KiwoomManager(KiwoomProtocol):
         if self._is_connected:
             return True
 
-        logger.warning("연결 끊김 감지 — 자동 재로그인 시도")
+        logger.warning("연결 끊김 감지 - 자동 재로그인 시도")
         self._ocx.dynamicCall("CommConnect()")
         return False
 
     def force_unfreeze(self) -> None:
-        """Watchdog freeze 감지 시 daemon thread에서 호출 — 막힌 TR EventLoop 강제 해제.
+        """Watchdog freeze 감지 시 daemon thread에서 호출 - 막힌 TR EventLoop 강제 해제.
 
         QEventLoop.quit()은 Qt 내부적으로 thread-safe (QCoreApplication::postEvent 경유).
         _tr_busy=False 설정은 CPython GIL로 원자적.
         이후 _comm_rq finally 블록이 정상적으로 _tr_busy=False를 재설정함.
         """
         logger.warning(
-            "[force_unfreeze] 프리징 복구 시도 — tr_busy=%s, rq='%s'",
+            "[force_unfreeze] 프리징 복구 시도 - tr_busy=%s, rq='%s'",
             self._tr_busy, self._tr_current_rq,
         )
         # ① 현재 처리 중인 TR EventLoop 강제 종료 (가장 중요)
@@ -912,7 +916,7 @@ class KiwoomManager(KiwoomProtocol):
             except Exception as e:
                 logger.warning("[force_unfreeze] _tr_loop.quit() 실패: %s", e)
 
-        # ② busy 플래그 강제 해제 — _comm_rq finally가 다시 False로 설정하므로 중복 해제 무해
+        # ② busy 플래그 강제 해제 - _comm_rq finally가 다시 False로 설정하므로 중복 해제 무해
         self._tr_busy = False
         self._tr_current_rq = ""
         logger.warning("[force_unfreeze] _tr_busy 강제 해제 완료")
@@ -974,13 +978,25 @@ class KiwoomManager(KiwoomProtocol):
             self._tr_data = {"rows": rows}
 
         else:
-            logger.debug("[TR 수신] 알 수 없는 rq_name=%s — 처리 스킵", rq_name)
+            logger.debug("[TR 수신] 알 수 없는 rq_name=%s - 처리 스킵", rq_name)
 
         if self._tr_loop and self._tr_loop.isRunning():
             self._tr_loop.quit()
 
     def _on_receive_msg(self, _screen: str, rq_name: str, tr_code: str, msg: str) -> None:
-        logger.info("[MSG] rq=%s tr=%s → %s", rq_name, tr_code, msg)
+        # 키움 메시지 중 일부 깨진 한글(CP949) 보정 시도
+        try:
+            # 이미 str로 넘어오지만, 내부 바이트가 CP949인 경우를 대비해 변환 시도
+            # (PyQt 버전에 따라 자동으로 안 될 때 유용)
+            if any(ord(c) > 255 for c in msg):
+                # 이미 유니코드인 경우 그대로 사용
+                pass
+            else:
+                msg = msg.encode('latin-1').decode('cp949')
+        except Exception:
+            pass
+
+        logger.info("[MSG] rq=%s tr=%s -> %s", rq_name, tr_code, msg)
         if self._on_order_msg_cb:
             try:
                 self._on_order_msg_cb(rq_name, msg)
@@ -988,8 +1004,8 @@ class KiwoomManager(KiwoomProtocol):
                 logger.debug("[MSG 콜백 오류] %s", _e)
 
     def _on_receive_chejan_data(self, gubun: str, item_cnt: int, fid_list: str) -> None:
-        """체결/잔고 이벤트 — 필요 시 확장"""
-        logger.debug("체결잔고 수신 — gubun=%s", gubun)
+        """체결/잔고 이벤트 - 필요 시 확장"""
+        logger.debug("체결잔고 수신 - gubun=%s", gubun)
 
     # -----------------------------------------------------------------------
     # TR 데이터 파서
@@ -1042,7 +1058,7 @@ class KiwoomManager(KiwoomProtocol):
         rows.reverse()  # [최신->과거] 를 [과거->최신] 으로 변경 (IndicatorService 표준)
         return rows
 
-    # opt10030 거래대금 필드명 후보 — 서버 버전·모의투자 여부에 따라 다를 수 있음
+    # opt10030 거래대금 필드명 후보 - 서버 버전,모의투자 여부에 따라 다를 수 있음
     _OPT10030_AMT_FIELDS = ("거래대금", "누적거래대금", "거래금액", "거래대금(천원)")
 
     def _parse_top_volume_rows(self, tr_code: str, rq_name: str) -> list[dict]:
@@ -1069,17 +1085,17 @@ class KiwoomManager(KiwoomProtocol):
                 return self._get_comm_data(tr_code, rq_name, _i, f)
             code = g("종목코드").strip().lstrip("A")
             if not code:
-                logger.debug("[opt10030] 행[%d] 종목코드 없음 — 스킵", i)
+                logger.debug("[opt10030] 행[%d] 종목코드 없음 - 스킵", i)
                 continue
 
             raw_amt = g(_amt_field)
             # 거래대금 단위 처리: opt10030 모든 거래대금 필드는 '백만 원' 단위
             amt_val = safe_int(raw_amt)
-            # opt10030 거래대금: 백만원 → 원으로 변환 (×1,000,000)
-            # 예: 487 → 487,000,000원 (4억 8,700만 원)
+            # opt10030 거래대금: 백만원 -> 원으로 변환 (x1,000,000)
+            # 예: 487 -> 487,000,000원 (4억 8,700만 원)
             # 필드명: "거래대금", "누적거래대금", "거래금액" 등
             if amt_val > 0:
-                amt_val *= 1_000_000  # 백만 원 → 원 변환
+                amt_val *= 1_000_000  # 백만 원 -> 원 변환
             if amt_val == 0:
                 price_v  = safe_int(g("현재가"))
                 volume_v = safe_int(g("거래량"))
@@ -1088,10 +1104,10 @@ class KiwoomManager(KiwoomProtocol):
                     amt_val = price_v * volume_v
 
             if i < 5:
-                # 거래대금 단위 진단 (천원→원 변환 확인용) — DEBUG 레벨로 유지
+                # 거래대금 단위 진단 (천원->원 변환 확인용) - DEBUG 레벨로 유지
                 from scanner.smart_scanner import format_trade_amount_korean
                 amt_korean = format_trade_amount_korean(amt_val) if amt_val > 0 else "0원"
-                logger.debug("[opt10030 진단] 행[%d] %s(%s) 거래대금: raw='%s' → %d원 ≈ %s",
+                logger.debug("[opt10030 진단] 행[%d] %s(%s) 거래대금: raw='%s' -> %d원 ~ %s",
                              i, code, g("종목명").strip(), raw_amt, amt_val, amt_korean)
             rows.append({
                 "code":          code,
@@ -1143,7 +1159,7 @@ class KiwoomManager(KiwoomProtocol):
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
     )
 
     app = QApplication(sys.argv)
@@ -1174,7 +1190,7 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
-# MockKiwoomManager — OCX 없이 UI 테스트용
+# MockKiwoomManager - OCX 없이 UI 테스트용
 # ---------------------------------------------------------------------------
 
 class _MockOcx:
@@ -1248,7 +1264,7 @@ class MockKiwoomManager:
         return {"name": "Mock종목", "current_price": 0, "change_pct": 0.0}
 
     def fetch_opt10030_top_volume(self, max_rows: int = 200) -> list:
-        """OCX 없음 — 빈 리스트 (UI 테스트용)"""
+        """OCX missing - empty list (for UI test)"""
         return []
 
     def get_current_price(self, code: str) -> int:

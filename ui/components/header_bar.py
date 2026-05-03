@@ -242,20 +242,20 @@ class HeaderBar(QWidget):
 
     def set_index(self, kospi_current: float, kospi_chg: float,
                   kosdaq_current: float, kosdaq_chg: float) -> None:
-        """코스피·코스닥 현재가 및 등락률 표시."""
+        """코스피·코스닥 현재가 및 등락률 표시 (한국식: 상승 빨강 / 하락 파랑)."""
         def _fmt(name: str, cur: float, chg: float) -> str:
-            arrow = "▲" if chg >= 0 else "▼"
-            return f"{name} {cur:,.2f} {arrow}{abs(chg):.2f}%"
+            arrow = "▲" if chg > 0 else "▼" if chg < 0 else "—"
+            return f"{name} {cur:,.2f} ({arrow}{abs(chg):.2f}%)"
 
+        self._lbl_kospi.setText(_fmt("KOSPI", kospi_current, kospi_chg))
+        self._lbl_kosdaq.setText(_fmt("KOSDAQ", kosdaq_current, kosdaq_chg))
 
-        self._lbl_kospi.setText(_fmt("코스피", kospi_current, kospi_chg))
-        self._lbl_kosdaq.setText(_fmt("코스닥", kosdaq_current, kosdaq_chg))
-
-
-        kospi_color  = "#f38ba8" if kospi_chg  < 0 else "#a6e3a1"
-        kosdaq_color = "#f38ba8" if kosdaq_chg < 0 else "#a6e3a1"
-        self._lbl_kospi.setStyleSheet(f"color: {kospi_color};")
-        self._lbl_kosdaq.setStyleSheet(f"color: {kosdaq_color};")
+        # 한국 시장 기준: 상승(Red), 하락(Blue), 보합(Gray)
+        kospi_color = "#f38ba8" if kospi_chg > 0 else "#89b4fa" if kospi_chg < 0 else "#cdd6f4"
+        kosdaq_color = "#f38ba8" if kosdaq_chg > 0 else "#89b4fa" if kosdaq_chg < 0 else "#cdd6f4"
+        
+        self._lbl_kospi.setStyleSheet(f"color: {kospi_color}; font-weight: bold; border: 1px solid #313244; border-radius: 4px; padding: 2px 6px; background: #181825;")
+        self._lbl_kosdaq.setStyleSheet(f"color: {kosdaq_color}; font-weight: bold; border: 1px solid #313244; border-radius: 4px; padding: 2px 6px; background: #181825;")
 
 
 

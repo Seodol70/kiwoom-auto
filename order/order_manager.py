@@ -351,9 +351,12 @@ class OrderManager(QObject):
             self.positions = new_positions
 
             # 모의투자 서버는 opw00001 "예수금"을 투자금 차감 없이 반환한다.
-            # 보유 종목 매입금액 합계를 차감해 실제 가용 예수금을 추정한다.
-            invested = sum(p.avg_price * p.qty for p in self.positions.values())
-            self.cash = max(0, server_cash - invested)
+            # 실전투자 서버는 이미 차감된 "예수금" 또는 "D+2추정예수금"을 반환하므로 차감하지 않는다.
+            if self._kiwoom.is_mock:
+                invested = sum(p.avg_price * p.qty for p in self.positions.values())
+                self.cash = max(0, server_cash - invested)
+            else:
+                self.cash = server_cash
             logger.info("잔고 동기화 완료 — 예수금 %s원 (서버=%s / 투자=%s) / 보유 %d종목",
                         f"{self.cash:,}", f"{server_cash:,}", f"{invested:,}",
                         len(self.positions))
@@ -415,8 +418,11 @@ class OrderManager(QObject):
                     sector            = old.sector            if old else "",
                 )
             self.positions = new_positions
-            invested = sum(p.avg_price * p.qty for p in self.positions.values())
-            self.cash = max(0, server_cash - invested)
+            if self._kiwoom.is_mock:
+                invested = sum(p.avg_price * p.qty for p in self.positions.values())
+                self.cash = max(0, server_cash - invested)
+            else:
+                self.cash = server_cash
             logger.info("잔고 동기화(2단계) 완료 — 예수금 %s원 / 보유 %d종목",
                         f"{self.cash:,}", len(self.positions))
             self._sync_daily_realized_from_broker()
