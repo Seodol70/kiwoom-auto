@@ -63,6 +63,15 @@ class PnLTracker:
         return (current_price - avg_price) / avg_price * 100.0
 
     @staticmethod
+    def calculate_unrealized_cost_minus_value(
+        avg_price: int,
+        current_price: int,
+        qty: int,
+    ) -> int:
+        """미실현 원가-평가 차이 (양수=손실, 음수=이익)."""
+        return (avg_price - current_price) * qty
+
+    @staticmethod
     def calculate_realized_pnl(
         entry_price: int,
         exit_price: int,

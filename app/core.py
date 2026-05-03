@@ -64,6 +64,19 @@ class ApplicationContext(QObject):
         self.smart_scanner = SmartScanner(self.kiwoom, self.scan_cfg)
         self.smart_scanner.store = self.snap_store
         
+        # ── HealthMonitor ──
+        def _on_freeze_handler():
+            force_fn = getattr(self.kiwoom, "force_unfreeze", None)
+            if force_fn:
+                force_fn()
+
+        self.health_monitor = HealthMonitor(
+            scan_cfg=self.scan_cfg,
+            on_param_relax=lambda *args: None,  # UI 델리게이트 필요
+            on_freeze=_on_freeze_handler,
+            on_reconnect=self.login_mgr.reconnect_silent
+        )
+
         # ── Application Layer ──
         self.market_scheduler = MarketScheduler(self)
         self.risk_manager = RiskManager(self.order_mgr, self.scan_cfg, self)
@@ -74,20 +87,10 @@ class ApplicationContext(QObject):
             health_monitor=self.health_monitor,
             parent=self
         )
-        
-        # ── HealthMonitor ──
-        def _on_freeze_handler():
-            force_fn = getattr(self.kiwoom, "force_unfreeze", None)
-            if force_fn:
-                force_fn()
-            
-        self.health_monitor = HealthMonitor(
-            scan_cfg=self.scan_cfg,
-            on_param_relax=lambda *args: None, # UI 델리게이트 필요
-            on_freeze=_on_freeze_handler,
-            on_reconnect=self.login_mgr.reconnect_silent
-        )
-        
+
+        # ── SmartScanner ↔ OrderManager 연결 (의존성 주입) ──
+        self.smart_scanner._order_mgr = self.order_mgr
+
         # ── 텔레그램 ──
         self.tg_bot = None
         if cfg.get("TELEGRAM", {}).get("enabled") and cfg.get("TELEGRAM", {}).get("token"):

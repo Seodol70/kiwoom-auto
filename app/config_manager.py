@@ -130,3 +130,44 @@ class ConfigManager:
 
 # 전역 인스턴스 생성
 config_manager = ConfigManager()
+
+
+def reload_adaptive(scan_cfg) -> str:
+    """adaptive_params.json을 다시 읽어 scan_cfg를 in-place 갱신한다.
+
+    ScannerWorker와 SmartScanner가 scan_cfg를 직접 참조하므로
+    객체 교체가 아닌 속성 복사로 갱신해야 공유 참조가 유지된다.
+    """
+    try:
+        from scanner.smart_scanner import SmartScannerConfig
+        _RISK  = config_manager.RISK
+        _STRAT = config_manager.STRATEGY
+
+        new_cfg = SmartScannerConfig.from_adaptive("params/adaptive_params.json")
+
+        new_cfg.max_change_pct      = float(_RISK.get("max_change_pct", 15.0))
+        new_cfg.signal_cooldown_sec = float(_RISK.get("signal_cooldown_sec", 45.0))
+        new_cfg.index_block_pct     = float(_RISK.get("market_index_block_pct", -1.5))
+
+        _yosep = str(_STRAT.get("yosep_preset", "") or "").strip().lower()
+        if _yosep:
+            new_cfg.apply_yosep_preset(_yosep)
+
+        _wpm = _STRAT.get("watch_pool_max")
+        if _wpm is not None:
+            wpm = max(1, int(_wpm))
+            new_cfg.watch_pool_max   = wpm
+            new_cfg.realtime_sub_max = wpm
+            new_cfg.display_top_n    = wpm
+
+        for field_name, new_val in vars(new_cfg).items():
+            try:
+                setattr(scan_cfg, field_name, new_val)
+            except Exception:
+                pass
+
+        logger.info("[AdaptiveReload] params/adaptive_params.json 리로드 완료")
+        return "⚙️ [적응형파라미터] 어제 피드백 조정값 적용됨"
+    except Exception as _e:
+        logger.warning("[AdaptiveReload] 리로드 실패: %s", _e)
+        return f"⚠️ [적응형파라미터] 리로드 실패: {_e}"

@@ -43,8 +43,8 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
 import pyqtgraph as pg
 from ui.style_sheets import _DARK_QSS
 from PyQt5.QtCore import (
-    Qt, QObject, QThread, QTimer, QEvent,
-    pyqtSignal, pyqtSlot,
+    Qt, QTimer,
+    pyqtSlot,
 )
 from PyQt5.QtGui import QColor, QFont, QTextCursor
 from PyQt5.QtWidgets import (
@@ -518,8 +518,8 @@ class MainWindow(QMainWindow):
         self._smart_scanner.on_index_update = self._on_realtime_index
 
 
-        # [NEW] 포지션 실시간 현재가 갱신 + 동적 감시 중단/재개 콜백 연결
-        self._smart_scanner._order_mgr = self.order_mgr
+        # 포지션 실시간 현재가 갱신 + 동적 감시 중단/재개 콜백 연결
+        # (_order_mgr 주입은 ApplicationContext에서 처리됨)
         max_pos = self.order_mgr.max_positions
 
 
@@ -576,7 +576,7 @@ class MainWindow(QMainWindow):
 
         # opt10030 첫 스캔을 1초 후 실행 (로그인 직후 여유)
         self.log_panel.append("[스캔] 1초 후 opt10030 초기 스캔 예약...")
-        QTimer.singleShot(1000, self._run_scanner_scan)
+        QTimer.singleShot(1000, self.trading_controller.run_periodic_scan)
 
 
         # 지수 초기 조회 — 스캔(1s) 완료 후 5s 뒤 (TR 충돌 회피)
@@ -713,23 +713,7 @@ class MainWindow(QMainWindow):
             "cash":      self.order_mgr.cash,
             "positions": dict(self.order_mgr.positions),
         })
-
-
-        # HealthMonitor — 매도체결 시 손익 기록
-        _hm = getattr(self, "_health_monitor", None)
-        if _hm is not None and d.get("side") == "매도체결":
-            _ab = d.get("avg_buy_price") or 0
-            _fp = d.get("filled_price", 0)
-            _fq = d.get("filled_qty",   0)
-            _pnl = (_fp - _ab) * _fq if _ab and _fp and _fq else 0.0
-            from analysis.health_monitor import TradeRecord as _TR
-            _hm.record_trade(_TR(
-                code       = d.get("code",  ""),
-                pnl        = float(_pnl),
-                entry_time = str(d.get("entry_time",  "")),
-                exit_time  = str(d.get("filled_time", "")),
-                reason     = d.get("reason", ""),
-            ))
+        self.trading_controller.on_fill_processed(d)
 
 
     @pyqtSlot()
@@ -748,15 +732,15 @@ class MainWindow(QMainWindow):
         return
 
 
-    # (Moved to TradingController)
 
 
     def _run_feedback_loop(self) -> None:
         """15:35에 호출 — FeedbackEngine을 QThread에서 실행, 완료 시 _on_feedback_done() 호출."""
         from PyQt5.QtCore import QThread
+        from app.feedback_worker import FeedbackWorker
         self.log_panel.append("📊 [피드백] 장 마감 분석 시작...")
         thread = QThread(self)
-        worker = _FeedbackWorker()
+        worker = FeedbackWorker()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_feedback_done)
@@ -764,7 +748,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.start()
-        self._feedback_thread = thread   # GC 방지
+        self._feedback_thread = thread  # GC 방지
 
 
     @pyqtSlot(object)
@@ -817,72 +801,19 @@ class MainWindow(QMainWindow):
                 pass
 
 
-    # (Moved to TradingController)
 
 
-    # (Moved to TradingController)
 
 
     def _reload_adaptive_config(self) -> None:
-        """
-        adaptive_params.json 을 다시 읽어 _scan_cfg 를 갱신한다.
-        매일 08:00 자동 시작 시 호출 — 전날 FeedbackEngine 이 조정한 값을
-        재시작 없이 당일에 바로 적용하기 위함.
-
-
-        config.py 의 RISK 오버라이드는 항상 adaptive 값 위에 덮어씀 (우선순위 보장).
-        """
-        try:
-            _RISK = cfg.RISK
-            _STRAT = cfg.STRATEGY
-            from scanner.smart_scanner import SmartScannerConfig
-
-
-            new_cfg = SmartScannerConfig.from_adaptive("params/adaptive_params.json")
-
-
-            # config.py 고정 오버라이드 재적용 (adaptive 값이 이 값을 덮어쓰면 안 됨)
-            new_cfg.max_change_pct     = float(_RISK.get("max_change_pct", 15.0))
-            new_cfg.signal_cooldown_sec = float(_RISK.get("signal_cooldown_sec", 45.0))
-            new_cfg.index_block_pct    = float(_RISK.get("market_index_block_pct", -1.5))
-
-
-            _yosep = str(_STRAT.get("yosep_preset", "") or "").strip().lower()
-            if _yosep:
-                new_cfg.apply_yosep_preset(_yosep)
-
-
-            _wpm = _STRAT.get("watch_pool_max")
-            if _wpm is not None:
-                wpm = max(1, int(_wpm))
-                new_cfg.watch_pool_max   = wpm
-                new_cfg.realtime_sub_max = wpm
-                new_cfg.display_top_n    = wpm
-
-
-            # 공유 참조 갱신: ScannerWorker 와 SmartScanner 가 _scan_cfg 를 직접 참조하므로
-            # 기존 객체의 필드를 in-place 로 업데이트 (객체 교체가 아닌 속성 복사)
-            for field_name, new_val in vars(new_cfg).items():
-                try:
-                    setattr(self._scan_cfg, field_name, new_val)
-                except Exception:
-                    pass
-
-
-            logger.info("[AdaptiveReload] params/adaptive_params.json 리로드 완료")
-            self.log_panel.append("⚙️ [적응형파라미터] 어제 피드백 조정값 적용됨")
-
-
-        except Exception as _e:
-            logger.warning("[AdaptiveReload] 리로드 실패: %s", _e)
-
-
-    # (Moved to TradingController)
+        from app.config_manager import reload_adaptive
+        self.log_panel.append(reload_adaptive(self._scan_cfg))
 
 
 
 
-    # (Moved to TradingController)
+
+
 
 
 
@@ -1047,10 +978,8 @@ class MainWindow(QMainWindow):
         self.order_mgr.buy(code, name, qty, price=oprice)
 
 
-    # (Moved to TradingController)
 
 
-    # (Moved to TradingController)
 
 
     def _on_scan_signal_direct(self, sig) -> None:
@@ -1087,38 +1016,9 @@ class MainWindow(QMainWindow):
         self._news_analyzer.analyze(sig.code, sig.name)
 
 
-        # Phase 1 태깅 (OPENING_SCALP 포지션 한도는 여기서만 체크)
-        if sig.signal_type == "OPENING_SCALP":
-            sig.entry_phase = 1
-            _ph1_max = int(getattr(self._scan_cfg, "phase1_max_positions", 3))
-            _ph1_count = sum(1 for p in self.order_mgr.positions.values()
-                             if getattr(p, "entry_phase", 0) == 1)
-            if _ph1_count >= _ph1_max:
-                self.log_panel.append(
-                    f"🔒 [Phase1한도] {sig.name}({sig.code}) 스킵 — "
-                    f"Phase1 최대 {_ph1_max}개 도달 (현재 {_ph1_count}개)"
-                )
-                # HealthMonitor 기록 (필터 통과하지 못했으므로 기록)
-                _hm = getattr(self, "_health_monitor", None)
-                if _hm is not None:
-                    _hm.record_signal(sig.code, sig.name, sig.signal_type)
-                return
-        else:
-            sig.entry_phase = 2
-
-
-        # Phase 3: TradingController에서 신호 필터링 + 진입
-        # (자동매매, 포지션 한도, 손익 락, 섹터, 예수금, 중복 진입 등)
+        # TradingController: Phase1 태깅 + 필터 체인 + 진입
         self.trading_controller.set_auto_trading(self._auto_trading)
-        if self.trading_controller.handle_signal(sig):
-            # 필터 통과 → order_mgr에서 처리 (TradingController에서 호출함)
-            pass
-
-
-        # HealthMonitor에 신호 기록 (매매 여부와 무관하게 신호 자체를 기록)
-        _hm = getattr(self, "_health_monitor", None)
-        if _hm is not None:
-            _hm.record_signal(sig.code, sig.name, sig.signal_type)
+        self.trading_controller.handle_signal(sig)
 
 
     # ────────────────────────────────────────────────────────────────────────
@@ -1146,17 +1046,9 @@ class MainWindow(QMainWindow):
         self._closed_today = True
 
 
-        # 보유 포지션 강제청산 (EOD 포지션 제외)
+        # 보유 포지션 강제청산 + 전일 거래량 캐시 저장
         self.trading_controller.liquidate_all_positions()
-
-
-        # 전일 거래량 캐시 저장
-        try:
-            if hasattr(self, "_smart_scanner") and self._smart_scanner is not None:
-                self._smart_scanner.save_prev_volumes()
-                logger.info("[15:20] prev_volumes 저장 완료")
-        except Exception as _e:
-            logger.warning("[15:20] prev_volumes 저장 실패: %s", _e)
+        self.trading_controller.on_market_closing()
 
 
         # 자동매매 OFF
@@ -1295,7 +1187,6 @@ class MainWindow(QMainWindow):
         )
 
 
-    # (Moved to TradingController)
 
 
     def _on_investor_refresh_tick(self) -> None:
@@ -1402,64 +1293,6 @@ def _launch_log_monitor():
 
 
 
-
-class _FeedbackWorker(QObject):
-    """Feedback Loop 를 별도 스레드에서 실행하는 워커."""
-    finished = pyqtSignal(object)   # FeedbackResult
-
-
-    @pyqtSlot()
-    def run(self) -> None:
-        from datetime import date as _date
-        import logging as _logging
-        _log = _logging.getLogger(__name__)
-
-
-        today = _date.today()
-
-
-        try:
-            from analysis.feedback_engine import FeedbackEngine
-            from analysis.daily_report import DailyReporter
-
-
-            engine = FeedbackEngine()
-            result = engine.run_daily(today)
-
-
-            audits = engine.parse_audit(today)
-            reporter = DailyReporter()
-            report_path = reporter.generate(result, audits)
-            result.report_path = str(report_path)
-
-
-        except Exception as e:
-            _log.error("[FeedbackWorker] 피드백 오류: %s", e, exc_info=True)
-            from analysis.feedback_engine import FeedbackResult
-            result = FeedbackResult(
-                date=today, total_realized=0, total_trades=0,
-                profitable=False, category_hits={}, adjustments=[],
-                skipped_reasons=[f"오류 발생: {e}"], applied=False,
-            )
-
-
-        # ── LogAnalyzer: scanner.log + audit 파싱 → 텔레그램 메시지 생성 ──
-        try:
-            from analysis.log_analyzer import LogAnalyzer
-            analyzer = LogAnalyzer()
-            log_result = analyzer.run(today)
-            result.telegram_msg = analyzer.format_telegram_report(
-                scanner=log_result.scanner,
-                trades=log_result.trades,
-                feedback_adjustments=result.adjustments,
-                feedback_skipped=result.skipped_reasons,
-            )
-        except Exception as e:
-            _log.warning("[FeedbackWorker] LogAnalyzer 오류: %s", e, exc_info=True)
-            # 실패해도 기존 피드백 결과는 그대로 emit
-
-
-        self.finished.emit(result)
 
 
 

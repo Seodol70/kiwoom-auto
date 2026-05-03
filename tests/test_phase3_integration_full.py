@@ -96,7 +96,8 @@ class MockMainWindow(QObject):
         self.market_scheduler = MarketScheduler(self)
         self.risk_manager = RiskManager(self.order_mgr, self._scan_cfg, self)
         self.trading_controller = TradingController(
-            self.order_mgr, self._scan_cfg, self.risk_manager, parent=self
+            order_mgr=self.order_mgr, scan_cfg=self._scan_cfg,
+            risk_mgr=self.risk_manager, parent=self
         )
 
         # 신호 연결

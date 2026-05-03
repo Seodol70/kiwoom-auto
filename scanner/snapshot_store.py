@@ -679,6 +679,37 @@ class SnapshotStore:
                     return ranked.nsmallest(n, "rank").copy()
             return df.head(n).copy()
 
+    def cleanup_stale_data(self, active_codes: set[str]) -> int:
+        """active_codes에 없는 종목 데이터를 메모리에서 제거한다. 제거된 종목 수 반환.
+
+        일봉 데이터(_daily_data)는 재조회 비용이 크므로 유지한다.
+        """
+        with self._lock:
+            stale = set(self._prices.keys()) - active_codes
+            if not stale:
+                return 0
+
+            realtime_dicts = [
+                self._prices, self._chg_pcts, self._vols, self._amt,
+                self._mins, self._last_min, self._min_vols, self._last_vol,
+                self._min_opens, self._min_highs, self._min_lows,
+                self._cur_open, self._cur_high, self._cur_low,
+                self._chejan_str,
+                self._inv_foreign, self._inv_inst, self._inv_score, self._inv_updated_at,
+                self._trend_level, self._trend_prev_level,
+                self._tick_ts_vol, self._sector_cache,
+            ]
+            for code in stale:
+                for d in realtime_dicts:
+                    d.pop(code, None)
+
+            stale_in_df = [c for c in stale if c in self._df.index]
+            if stale_in_df:
+                self._df.drop(index=stale_in_df, inplace=True, errors="ignore")
+
+            logger.debug("[SnapshotStore] 메모리 정리 — %d종목 제거 (active=%d)", len(stale), len(active_codes))
+            return len(stale)
+
     def export_csv(self, path: str = "logs/snapshot.csv") -> None:
         """현재 스냅샷을 CSV 로 내보낸다."""
         with self._lock:

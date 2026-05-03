@@ -74,27 +74,15 @@ class StrategyState:
 # ---------------------------------------------------------------------------
 
 def calc_ma(closes: list[float], period: int) -> Optional[float]:
-    """단순 이동평균(SMA) — numpy 가속"""
-    if len(closes) < period:
-        return None
-    return float(np.mean(closes[-period:]))
+    """단순 이동평균(SMA) — IndicatorService 위임"""
+    from scanner.indicator_service import IndicatorService
+    return IndicatorService.calc_ma(closes, period)
 
 
 def calc_ema(closes: list[float], period: int) -> Optional[float]:
-    """지수이동평균(EMA) — 전체 시계열을 순차 계산 (Wilder smoothing)
-
-    k = 2 / (period + 1)
-    EMA_t = price_t * k + EMA_{t-1} * (1 - k)
-    초기값: 첫 period개의 단순평균
-    """
-    if len(closes) < period:
-        return None
-    arr = np.array(closes, dtype=np.float64)
-    k = 2.0 / (period + 1)
-    ema = float(arr[:period].mean())
-    for price in arr[period:]:
-        ema = float(price) * k + ema * (1.0 - k)
-    return ema
+    """지수이동평균(EMA) — IndicatorService 위임"""
+    from scanner.indicator_service import IndicatorService
+    return IndicatorService.calc_ema(closes, period)
 
 
 def calc_atr(
@@ -103,26 +91,9 @@ def calc_atr(
     closes: list[float],
     period: int = 14,
 ) -> Optional[float]:
-    """ATR(Average True Range) — Wilder smoothing 기반."""
-    if period <= 0:
-        return None
-    if len(highs) < period + 1 or len(lows) < period + 1 or len(closes) < period + 1:
-        return None
-
-    h = np.array(highs[-(period + 1):], dtype=np.float64)
-    l = np.array(lows[-(period + 1):], dtype=np.float64)
-    c = np.array(closes[-(period + 1):], dtype=np.float64)
-
-    prev_close = c[:-1]
-    tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - prev_close), np.abs(l[1:] - prev_close)))
-    if tr.size < period:
-        return None
-    atr = float(tr[:period].mean())
-    # period와 동일 길이면 초기값만으로 충분; 일반식 유지해 향후 확장 대비
-    alpha = 1.0 / period
-    for v in tr[period:]:
-        atr = (1.0 - alpha) * atr + alpha * float(v)
-    return atr
+    """ATR(Average True Range) — IndicatorService 위임"""
+    from scanner.indicator_service import IndicatorService
+    return IndicatorService.calc_atr(highs, lows, closes, period)
 
 
 def get_trend_status(

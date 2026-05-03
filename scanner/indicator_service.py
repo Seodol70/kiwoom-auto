@@ -68,13 +68,11 @@ class IndicatorService:
             return None
 
         try:
-            closes_arr = np.array(closes[-period - 50 :], dtype=np.float64)
-            ema = closes_arr[0]
+            arr = np.array(closes, dtype=np.float64)
             k = 2.0 / (period + 1)
-
-            for close in closes_arr[1:]:
-                ema = close * k + ema * (1 - k)
-
+            ema = float(arr[:period].mean())  # 초기값: 첫 period개의 단순 평균
+            for price in arr[period:]:
+                ema = float(price) * k + ema * (1.0 - k)
             return ema
         except Exception:
             return None
@@ -111,7 +109,11 @@ class IndicatorService:
             if len(tr_values) < period:
                 return None
 
-            atr = np.mean(tr_values[-period:])
+            tr_arr = np.array(tr_values, dtype=np.float64)
+            atr = float(tr_arr[:period].mean())  # 초기값: 첫 period개 단순 평균
+            alpha = 1.0 / period
+            for v in tr_arr[period:]:            # Wilder smoothing
+                atr = (1.0 - alpha) * atr + alpha * float(v)
             return atr
         except Exception:
             return None

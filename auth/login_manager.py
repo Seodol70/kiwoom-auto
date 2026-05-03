@@ -245,15 +245,6 @@ class LoginManager(QObject):
 
         # 모의투자: SetLoginInfo로 모의투자 플래그 설정 후 CommConnect
         # 실전투자: 플래그 없이 CommConnect
-        if not self.use_real:
-            try:
-                self._kiwoom._ocx.dynamicCall(
-                    "SetLoginInfo(QString, QString)", ["UseSimulInvest", "1"]
-                )
-                logger.info("모의투자 서버 설정 완료 (UseSimulInvest=1)")
-            except Exception:
-                # 구버전 API에서 미지원 — 로그인 창에서 직접 모의투자 선택 필요
-                logger.info("SetLoginInfo 미지원 버전 — 로그인 창에서 모의투자 서버 선택하세요")
         self._kiwoom._ocx.dynamicCall("CommConnect()")
         logger.info("CommConnect() 호출 — 키움 로그인 창 대기 중")
 

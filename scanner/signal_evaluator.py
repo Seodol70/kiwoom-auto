@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from typing import Optional, Tuple
 from datetime import datetime, time as dtime
 
@@ -6,6 +7,8 @@ from datetime import datetime, time as dtime
 from scanner.models import StockSnapshot
 from scanner.config import SmartScannerConfig
 from scanner.scanner_logger import ScannerLogger
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

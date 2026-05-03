@@ -62,10 +62,10 @@ class TradingController(QObject):
 
     def __init__(
         self,
-        kiwoom,
-        order_mgr,
-        scan_cfg,
-        risk_mgr,
+        kiwoom=None,
+        order_mgr=None,
+        scan_cfg=None,
+        risk_mgr=None,
         smart_scanner=None,
         snap_store=None,
         health_monitor=None,
@@ -101,17 +101,92 @@ class TradingController(QObject):
 
     @pyqtSlot(object)
     def handle_signal(self, sig: ScanSignal) -> bool:
-        """신호 필터링 (EntryStrategy 위임)"""
+        """신호 필터링 (Phase1 태깅 + EntryStrategy 위임)"""
+        # Phase1 태깅 및 한도 체크
+        if sig.signal_type == "OPENING_SCALP":
+            sig.entry_phase = 1
+            _ph1_max = int(getattr(self._scan_cfg, "phase1_max_positions", 3))
+            _ph1_count = sum(
+                1 for p in self._order_mgr.positions.values()
+                if getattr(p, "entry_phase", 0) == 1
+            )
+            if _ph1_count >= _ph1_max:
+                self.signal_rejected.emit(
+                    f"{sig.code}: Phase1 한도 — {_ph1_count}/{_ph1_max}"
+                )
+                self._record_signal(sig)
+                return False
+        else:
+            sig.entry_phase = 2
+
         passed, reason = self._entry_strategy.should_entry(sig, self._auto_trading)
-        
+
         if not passed:
             self.signal_rejected.emit(f"{sig.code}: {reason}")
+            self._record_signal(sig)
             return False
 
         # ✅ 모든 필터 통과 → 진입 신호 전송
         self._order_mgr.handle_signal(sig)
+        self._record_signal(sig)
         return True
 
+    def _record_signal(self, sig) -> None:
+        """HealthMonitor에 신호 기록 (매매 여부 무관)"""
+        if self._health_monitor is not None:
+            self._health_monitor.record_signal(sig.code, sig.name, sig.signal_type)
+
+    def on_fill_processed(self, fill_dict: dict) -> None:
+        """매도 체결 시 손익 기록 (HealthMonitor 위임)"""
+        if fill_dict.get("side") != "매도체결" or self._health_monitor is None:
+            return
+        _ab = fill_dict.get("avg_buy_price") or 0
+        _fp = fill_dict.get("filled_price", 0)
+        _fq = fill_dict.get("filled_qty", 0)
+        _pnl = (_fp - _ab) * _fq if _ab and _fp and _fq else 0.0
+        from analysis.health_monitor import TradeRecord
+        self._health_monitor.record_trade(TradeRecord(
+            code=fill_dict.get("code", ""),
+            pnl=float(_pnl),
+            entry_time=str(fill_dict.get("entry_time", "")),
+            exit_time=str(fill_dict.get("filled_time", "")),
+            reason=fill_dict.get("reason", ""),
+        ))
+
+    def on_market_closing(self) -> None:
+        """장마감 시 전일 거래량 캐시 저장"""
+        if self._smart_scanner is not None:
+            try:
+                self._smart_scanner.save_prev_volumes()
+                logger.info("[15:20] prev_volumes 저장 완료")
+            except Exception as _e:
+                logger.warning("[15:20] prev_volumes 저장 실패: %s", _e)
+
+
+    def manual_sell(self, code: str, name: str, qty: int) -> tuple[bool, str]:
+        """수동 매도 — 검증 후 시장가 매도. 반환: (성공여부, 로그메시지)"""
+        pos = self._order_mgr.positions.get(code)
+        if pos is None:
+            return False, f"⚠ 수동매도 오류 — {name}({code}) 포지션 없음"
+        if qty <= 0 or qty > pos.qty:
+            return False, f"⚠ 수동매도 오류 — 수량 {qty}주 (보유 {pos.qty}주)"
+        self._order_mgr.sell(code, name, qty, price=0)
+        return True, f"[수동매도] {name}({code}) {qty}주 시장가 요청"
+
+    def tick_investor_refresh(self) -> bool:
+        """수급 갱신 타이머 콜백 — 시간·상태 조건 충족 시 TR 호출. 반환: 조회 여부"""
+        if not getattr(self._scan_cfg, "investor_filter_enabled", False):
+            return False
+        if self._smart_scanner is None:
+            return False
+        from datetime import datetime, time
+        now = datetime.now().time()
+        if not (time(9, 0) <= now <= time(15, 30)):
+            return False
+        if getattr(self._kiwoom, "_tr_busy", False):
+            return False  # 호출부에서 재시도 처리
+        self._smart_scanner.trigger_investor_refresh()
+        return True
 
     # ─── 필터 헬퍼 ──────────────────────────────────────────────────
 
@@ -123,6 +198,7 @@ class TradingController(QObject):
 
     def check_and_exit_all(self) -> None:
         """모든 포지션 청산 판정 (매분 호출)"""
+        count = 0
         # 현재 시간 슬롯 감지
         now = datetime.now()
         exit_ctx = self._get_exit_context(now)
@@ -611,12 +687,6 @@ class TradingController(QObject):
 
     # ─── 상태 제어 ──────────────────────────────────────────────────
 
-
-    def set_auto_trading(self, enabled: bool) -> None:
-        """자동매매 플래그 설정"""
-        self._auto_trading = enabled
-
-
     @property
     def auto_trading(self) -> bool:
         """자동매매 활성화 여부"""
@@ -661,6 +731,14 @@ class TradingController(QObject):
             self.log_message.emit(f"[스캔] 완료 — 전체 {total_watched}종목 모니터링")
             self.scan_status_updated.emit(f"완료 / {total_watched}종목", True)
 
+            # SnapshotStore 메모리 정리 (감시 목록 + 보유 포지션 외 제거)
+            if self._snap_store and self._smart_scanner:
+                watch_codes = set(getattr(self._smart_scanner.watch_q, "subscribed", set()))
+                pos_codes = set(self._order_mgr.positions.keys())
+                removed = self._snap_store.cleanup_stale_data(watch_codes | pos_codes)
+                if removed:
+                    logger.info("[스캔] SnapshotStore 메모리 정리 — %d종목 제거", removed)
+
             # 일봉 갱신 대기 목록 처리 요청
             if self._smart_scanner:
                 _pending = list(getattr(self._smart_scanner, "_daily_refresh_pending", []))[:10]
@@ -692,8 +770,8 @@ class TradingController(QObject):
         self._kospi_chg_pct = kp['change_pct']
         self._kosdaq_chg_pct = kd['change_pct']
 
-        # 2. 급락 여부 판단
-        crash_limit = float(self._scan_cfg.get("market_crash_pct", -2.0))
+        # 2. 급락 여부 판단 (index_block_pct -1.5%보다 더 심한 -2.0% 기준)
+        crash_limit = -2.0
         is_crash = (self._kospi_chg_pct <= crash_limit or self._kosdaq_chg_pct <= crash_limit)
 
         # 3. 상태 업데이트 및 신규 진입 차단 설정
