@@ -65,8 +65,11 @@ def jang_dong_min_strategy(closes: list[float], idx: int) -> str:
     """
     최적화된 파라미터를 사용한 장동민 전략.
     MA골든크로스 + RSI 범위 진입, MA데드크로스 청산.
+
+    IndicatorService를 사용하여 일관된 지표 계산 보장
     """
-    from strategy.jang_dong_min import StrategyConfig, calc_ma, calc_rsi
+    from strategy.jang_dong_min import StrategyConfig
+    from scanner.indicator_service import IndicatorService
 
     # 백테스트 최적 파라미터 적용
     cfg = StrategyConfig(
@@ -81,16 +84,16 @@ def jang_dong_min_strategy(closes: list[float], idx: int) -> str:
     if len(window) < cfg.ma_long + 1:
         return "HOLD"
 
-    ma_short = calc_ma(window, cfg.ma_short)
-    ma_long  = calc_ma(window, cfg.ma_long)
-    rsi      = calc_rsi(window, cfg.rsi_period)
+    ma_short = IndicatorService.calc_ma(window, cfg.ma_short)
+    ma_long  = IndicatorService.calc_ma(window, cfg.ma_long)
+    rsi      = IndicatorService.calc_rsi(window, cfg.rsi_period)
 
     if any(v is None for v in [ma_short, ma_long, rsi]):
         return "HOLD"
 
     prev_window  = window[:-1]
-    prev_short   = calc_ma(prev_window, cfg.ma_short)
-    prev_long    = calc_ma(prev_window, cfg.ma_long)
+    prev_short   = IndicatorService.calc_ma(prev_window, cfg.ma_short)
+    prev_long    = IndicatorService.calc_ma(prev_window, cfg.ma_long)
 
     if prev_short is None or prev_long is None:
         return "HOLD"
