@@ -18,17 +18,24 @@ class IndicatorService:
 
     @staticmethod
     def calc_rsi(closes: list[float], period: int = 14) -> Optional[float]:
+        """Wilder's Smoothing(SMMA) 방식의 RSI 계산"""
         if not closes or len(closes) < period + 1:
             return None
         try:
-            arr = np.array(closes[-(period + 1):], dtype=np.float64)
+            arr = np.array(closes, dtype=np.float64)
             deltas = np.diff(arr)
             gains = np.where(deltas > 0, deltas, 0.0)
             losses = np.where(deltas < 0, -deltas, 0.0)
-            
-            avg_gain = gains.mean()
-            avg_loss = losses.mean()
-            
+
+            # 첫 번째 평균값은 단순 산술평균(SMA)으로 시작
+            avg_gain = np.mean(gains[:period])
+            avg_loss = np.mean(losses[:period])
+
+            # 이후 값들은 Wilder's Smoothing 적용 (가중치 1/period)
+            for i in range(period, len(gains)):
+                avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+                avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
             if avg_loss == 0: return 100.0
             rs = avg_gain / avg_loss
             return float(100.0 - (100.0 / (1.0 + rs)))
@@ -57,13 +64,24 @@ class IndicatorService:
 
     @staticmethod
     def calc_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> Optional[float]:
-        if not closes or len(closes) < period: return None
+        """Wilder's Smoothing 방식의 ATR 계산"""
+        if not closes or len(closes) < period + 1: return None
         try:
             tr_values = []
             for i in range(1, len(closes)):
-                tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+                tr = max(highs[i] - lows[i], 
+                         abs(highs[i] - closes[i-1]), 
+                         abs(lows[i] - closes[i-1]))
                 tr_values.append(tr)
-            return float(np.mean(tr_values[-period:]))
+            
+            # 첫 ATR은 SMA
+            atr = np.mean(tr_values[:period])
+            
+            # 이후는 Wilder's Smoothing
+            for i in range(period, len(tr_values)):
+                atr = (atr * (period - 1) + tr_values[i]) / period
+            
+            return float(atr)
         except Exception:
             return None
 

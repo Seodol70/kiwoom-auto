@@ -241,8 +241,8 @@ class OrderManager(QObject):
         self.on_position_opened: Optional[Callable[[str], None]] = None
         self.on_position_closed: Optional[Callable[[str], None]] = None
 
-        # TradeAuditLogger 주입 (MainWindow._setup_modules에서 설정)
-        self._audit = None
+        self.state = None  # AppState 주입용
+        self._health = None  # HealthMonitor 주입용
 
         self._connect_chejan()
 
@@ -252,6 +252,16 @@ class OrderManager(QObject):
         if self._executor:
             self._executor.set_account(account)
         logger.info("[OrderManager] 계좌번호 설정 완료: %s", account)
+
+    def set_state(self, state):
+        """AppState 주입 (MainWindow에서 호출)"""
+        self.state = state
+        logger.info("[OrderManager] AppState 주입 완료")
+
+    def set_health_monitor(self, monitor):
+        """HealthMonitor 주입 (MainWindow에서 호출)"""
+        self._health = monitor
+        logger.info("[OrderManager] HealthMonitor 주입 완료")
 
     # -----------------------------------------------------------------------
     # 속성
@@ -386,6 +396,15 @@ class OrderManager(QObject):
             logger.info("잔고 동기화 완료 — 예수금 %s원 (서버=%s / 투자=%s) / 보유 %d종목",
                         f"{self.cash:,}", f"{server_cash:,}", f"{invested:,}",
                         len(self.positions))
+            
+            # [NEW] AppState 직접 업데이트 (Single Source of Truth)
+            if self.state:
+                self.state.update_portfolio(self.cash, dict(self.positions))
+
+            # [NEW] HealthMonitor 데이터 신선도 갱신
+            if self._health:
+                self._health.record_portfolio_sync()
+
             self._sync_daily_realized_from_broker()
         except Exception as e:
             logger.error("잔고 동기화 실패: %s", e)
@@ -451,6 +470,15 @@ class OrderManager(QObject):
                 self.cash = server_cash
             logger.info("잔고 동기화(2단계) 완료 — 예수금 %s원 / 보유 %d종목",
                         f"{self.cash:,}", len(self.positions))
+            
+            # [NEW] AppState 직접 업데이트
+            if self.state:
+                self.state.update_portfolio(self.cash, dict(self.positions))
+
+            # [NEW] HealthMonitor 데이터 신선도 갱신
+            if self._health:
+                self._health.record_portfolio_sync()
+
             self._sync_daily_realized_from_broker()
         except Exception as e:
             logger.error("_sync_with_balance 실패: %s", e)
@@ -892,7 +920,20 @@ class OrderManager(QObject):
         self._roll_daily_state_if_needed()
 
     def _is_buy_allowed(self, code: str, name: str) -> bool:
-        """ETF/ETN/관리·정지·투자경고 종목을 매수 직전에 강제 차단한다."""
+        """매수 직전 강제 차단 (유니버스 필터 + 전역 리스크 필터)."""
+        # 0) 전역 리스크 및 지수 급락 체크 (AppState 기반)
+        if self.state:
+            if self.state.risk_locked:
+                msg = f"매수 차단 — 리스크 잠금 상태 (손절 한도 초과 등) ({name})"
+                logger.warning(msg)
+                self.order_failed.emit(msg)
+                return False
+            if self.state.is_crash:
+                msg = f"매수 차단 — 지수 급락 감지 상태 ({name})"
+                logger.warning(msg)
+                self.order_failed.emit(msg)
+                return False
+
         from scanner.universe import is_pure_equity_name
         
         # 1) 이름 키워드 차단
@@ -1462,6 +1503,12 @@ class OrderManager(QObject):
         }
         if avg_buy_for_log is not None:
             payload["avg_buy_price"] = avg_buy_for_log
+
+        # [NEW] AppState 직접 업데이트 (체결 즉시 UI 반영)
+        if self.state:
+            self.state.update_portfolio(self.cash, dict(self.positions))
+
+        self.order_filled.emit(payload)
 
         if order_type == OrderType.SELL and avg_buy_for_log is not None:
             logger.info(

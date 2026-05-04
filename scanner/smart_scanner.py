@@ -47,7 +47,7 @@ from scanner.universe import (
 )
 from scanner.snapshot_store import SnapshotStore
 from scanner.indicator_service import IndicatorService
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -161,9 +161,10 @@ from scanner.signal_evaluator import (
 # ---------------------------------------------------------------------------
 
 
-class SmartScanner:
+class SmartScanner(QObject):
     """
     3단계 스마트 스캐너 (메모리 최적화 + 로그 + 터미널 뷰 통합).
+    QObject를 상속받아 표준 pyqtSignal로 신호를 전달합니다.
 
 
     사용 예)
@@ -173,7 +174,11 @@ class SmartScanner:
     """
 
 
+    # ── Qt 시그널 ──────────────────────────────────────────────────────────
+    signal_detected = pyqtSignal(object)  # ScanSignal 객체 전달
+
     def __init__(self, kiwoom, cfg: Optional[SmartScannerConfig] = None) -> None:
+        super().__init__()
         self._kiwoom = kiwoom
         self.cfg     = cfg or SmartScannerConfig()
 
@@ -210,9 +215,9 @@ class SmartScanner:
         # 첫 스캔 시 전체 종목 1분봉 일괄 로딩 플래그
         # True가 되면 이후 사이클은 12종목/사이클 제한으로 복귀
         self._initial_candle_load_done: bool = False
-
-
-        self.on_signal:        Optional[Callable[[ScanSignal], None]] = None
+        # 큐 및 상태
+        self._tr_q_last_ts = 0.0
+        self._last_signal_ts:  dict[str, float] = {}
         self.on_index_update:  Optional[Callable[[str, float, float], None]] = None  # (idx_code, current, chg_pct)
 
 
@@ -649,12 +654,8 @@ class SmartScanner:
         self.display.alert(sig)
 
 
-        if self.on_signal:
-            if threading.current_thread() is threading.main_thread():
-                self.on_signal(sig)
-            else:
-                # ScanLoop 스레드 → 메인 스레드로 안전 위임
-                QTimer.singleShot(0, lambda s=sig: self.on_signal(s))
+        # ④ 시그널 발행 (주문 엔진/UI 전송)
+        self.signal_detected.emit(sig)
 
 
     # -----------------------------------------------------------------------
@@ -863,10 +864,12 @@ class SmartScanner:
         finally:
             self._opt10030_fetching = False
 
-
+        # 모든 재시도 실패 — 이전 캐시 재사용 (있으면) 또는 5대장 fallback
+        if self._last_volume_rows:
+            logger.info("[opt10030] 조회 실패 — 이전 캐시 %d종목 재사용", len(self._last_volume_rows))
             return self._last_volume_rows[:target]
 
-        logger.warning("[opt10030] 실제 조회 실패 — fallback 5대장 대체")
+        logger.warning("[opt10030] 캐시 없음 — fallback 5대장 대체")
         return [
             {"code": "005930", "name": "삼성전자", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
             {"code": "000660", "name": "SK하이닉스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},

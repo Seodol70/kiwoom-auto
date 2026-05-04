@@ -1,269 +1,76 @@
+# -*- coding: utf-8 -*-
 """
-MainWindow — 통합 대시보드 (PyQt5 · Deep Dark)
-
-
-레이아웃
-  ┌─────────────────────────────────────────────────────────┐
-  │  HEADER : 계좌 / 서버 모드 / 연결 상태 / 당일 손익     │
-  ├────────────┬──────────────────────────┬─────────────────┤
-  │  SCANNER   │       CHART              │   PORTFOLIO     │
-  │  (좌 패널) │  (캔들 + MA + Volume)   │   (우 패널)    │
-  │  포착 종목 │                          │   보유 현황    │
-  ├────────────┴──────────────────────────┴─────────────────┤
-  │  LOG : 주문 전송 / 체결 / 스캐너 이벤트               │
-  └─────────────────────────────────────────────────────────┘
-
-
-스레딩 설계
-  메인 스레드 : Qt 이벤트 루프 + Kiwoom OCX (QAxWidget)
-  ScannerWorker(QThread) : SnapshotStore 읽기 + 신호 판단 (순수 Python)
-  PortfolioWorker(QThread) : 잔고 동기화 (kiwoom TR 호출 — QMetaObject 경유)
-
-
-  규칙: UI 위젯 갱신은 반드시 메인 스레드 pyqtSlot 에서만 수행
+MainWindow — 통합 대시보드 (오케스트레이터)
+Mixin 패턴을 사용하여 UI 구성과 이벤트 처리를 분리함.
 """
-
 
 from __future__ import annotations
-
-
 import os
 import time
-import threading
 import logging
-import logging.handlers
 from datetime import datetime
 from typing import Any
 
+from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QThread
+from PyQt5.QtWidgets import QMainWindow, QApplication
+
+from ui.main_window_ui import MainWindowUI
+from ui.main_window_slots import MainWindowSlots
+from app.state import AppState
+from app.config_manager import config_manager as cfg
+from engine.workers import ScannerWorker, PortfolioWorker
 
 logger = logging.getLogger(__name__)
 
-
-os.environ.setdefault("PYQTGRAPH_QT_LIB", "PyQt5")
-import pyqtgraph as pg
-from ui.style_sheets import _DARK_QSS
-from PyQt5.QtCore import (
-    Qt, QTimer,
-    pyqtSlot,
-)
-from PyQt5.QtGui import QColor, QFont, QTextCursor
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget,
-    QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QTableWidget, QTableWidgetItem,
-    QTextEdit, QSplitter, QFrame, QHeaderView,
-    QSizePolicy, QProgressBar, QDoubleSpinBox, QSpinBox,
-    QDialog, QDialogButtonBox, QComboBox,
-)
-
-
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from engine.workers import ScannerWorker, PortfolioWorker
-from app.state import AppState
-
-
-from logging_config import position_log
-from app.config_manager import config_manager as cfg
-# _TG 대신 cfg.TELEGRAM 사용 가능
-from telegram_bot import TelegramBot
-from scanner.smart_scanner import format_trade_amount_korean
-
-
-# pyqtgraph Dark 설정 (import 직후 바로)
-pg.setConfigOption("background", "#0d0d14")
-pg.setConfigOption("foreground", "#cdd6f4")
-
-
-
-
-
-
-# UI Components
-from ui.components.common import _hline, _NoWheelSpinBox, _NoWheelDoubleSpinBox
-from ui.components.header_bar import HeaderBar, ManualBuyDialog
-from ui.components.scanner_panel import ScannerPanel
-from ui.components.chart_panel import ChartPanel
-from ui.components.portfolio_panel import PortfolioPanel
-from ui.components.investor_panel import InvestorPanel, ScanStatusBar
-from ui.components.log_panel import ScannerLogHandler, SysLogQtHandler, LogPanel
-from ui.signal_manager import SignalManager
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# ── MainWindow ───────────────────────────────────────────────────────────────
-# ---------------------------------------------------------------------------
-
-
-class MainWindow(QMainWindow):
+class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
     """
     통합 대시보드 메인 윈도우.
-
-
-    사용 예)
-        app = QApplication(sys.argv)
-        kiwoom = KiwoomManager()
-        win = MainWindow(kiwoom)
-        win.show()
-        sys.exit(app.exec())
+    UI 구성을 MainWindowUI에, 슬롯 처리를 MainWindowSlots에 위임함.
     """
-
 
     def __init__(self, kiwoom, parent=None) -> None:
         super().__init__(parent)
         self._kiwoom = kiwoom
 
-
-        # time.monotonic() 기준 — 이 시각 이전에는 _auto_sell_by_pnl 미실행
+        # 상태 및 플래그 초기화
         self._sl_tp_warmup_end: float = 0.0
-        # 블로킹 방지 플래그
         self._scan_in_progress: bool = False
         self._liquidate_in_progress: bool = False
-        # 급락 감지로 자동매매가 OFF된 상태 — 수동으로 켜야만 해제됨
         self._market_crash_off: bool = False
-
-
-        self.setWindowTitle("키움 자동매매 대시보드")
-        self.resize(1600, 900)
-        self.setMinimumSize(1200, 800)  # 최소 크기 지정 (자유로운 크기 조절 보장)
-        self.setStyleSheet(_DARK_QSS)
-
-        # [Log Buffering] 실시간 로그 폭주 시 UI 프리징 방지
+        self._already_started: bool = False
+        self._opened_today: bool = False
+        self._closed_today: bool = False
+        self._feedback_done_today: bool = False
         self._log_queue: list[str] = []
-        self._log_timer = QTimer(self)
-        self._log_timer.timeout.connect(self._flush_logs)
-        self._log_timer.start(500)  # 0.5초마다 일괄 업데이트
-        self._today_watch: dict[str, Any] = {} # 감시 종목 추적
+        self._today_watch: dict[str, Any] = {}
 
-        # [상태 관리] 중앙 상태 관리자 초기화
+        # 중앙 상태 관리자
         self.state = AppState()
 
+        # [Step 1] UI 초기화 (MainWindowUI Mixin)
+        self._init_window_settings()
         self._build_ui()
+
+        # [Step 2] 모듈 및 워커 설정
         self._setup_modules()
         self._setup_timers()
 
-        self._opened_today:       bool = False
-        self._closed_today:       bool = False
-        self._feedback_done_today: bool = False
-        self._feedback_thread = None   # GC 방지용 참조
-        
-        # [Risk] 파라미터는 이제 AppState에서 관리함
+        # 로그 타이머 시작
+        self._log_timer = QTimer(self)
+        self._log_timer.timeout.connect(self._flush_logs)
+        self._log_timer.start(500)
 
-    def append_log(self, text: str) -> None:
-        """로그를 큐에 쌓는다. (실제 UI 반영은 0.5초마다 일괄 수행)"""
-        if not text:
-            return
-        ts = datetime.now().strftime("%H:%M:%S")
-        self._log_queue.append(f"[{ts}] {text}")
-
-    def _flush_logs(self) -> None:
-        """큐에 쌓인 로그를 log_panel에 일괄 추가한다."""
-        if not self._log_queue:
-            return
-        # 스크롤바가 하단에 있는지 확인
-        scrollbar = self.log_panel.verticalScrollBar()
-        is_at_bottom = scrollbar.value() >= scrollbar.maximum() - 20
-        
-        self.log_panel.append("\n".join(self._log_queue))
-        self._log_queue.clear()
-        
-        if is_at_bottom:
-            scrollbar.setValue(scrollbar.maximum())
-
-
-
-    # -----------------------------------------------------------------------
-    # UI 구성
-    # -----------------------------------------------------------------------
-
-
-    def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-
-        # 상단 헤더
-        self.header = HeaderBar()
-        root.addWidget(self.header)
-
-
-        # 구분선
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setObjectName("h_sep")
-        root.addWidget(sep)
-
-
-        # 메인 영역 — 좌(스캐너 40%) | 우(보유현황+차트 60%)
-        h_split = QSplitter(Qt.Horizontal)
-        h_split.setHandleWidth(6)
-
-
-        # 좌: 스캐너 감시 종목
-        self.scanner_panel = ScannerPanel()
-        h_split.addWidget(self.scanner_panel)
-
-
-        # 우: 보유현황(위) + 차트(아래) 세로 분할
-        right_v = QSplitter(Qt.Vertical)
-        right_v.setHandleWidth(6)
-        _RISK = cfg.RISK
-        self.portfolio_panel = PortfolioPanel(
-            tp_init=_RISK.get("take_profit_pct", 3.0),
-            sl_init=_RISK.get("stop_loss_pct",  -1.2),
-        )
-        self.chart_panel     = ChartPanel()
-        right_v.addWidget(self.portfolio_panel)
-        right_v.addWidget(self.chart_panel)
-        right_v.setSizes([320, 520])   # 보유현황:차트 ≈ 38:62
-        h_split.addWidget(right_v)
-
-
-        # 4 : 6 비율
-        h_split.setSizes([640, 960])
-
-
-        root.addWidget(h_split, stretch=1)
-
-
-        # 구분선
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setObjectName("h_sep")
-        root.addWidget(sep2)
-
-
-        # 스캔 상태바
-        self.scan_status = ScanStatusBar()
-        root.addWidget(self.scan_status)
-
-
-        # 하단 로그
-        self.log_panel = LogPanel()
-        root.addWidget(self.log_panel)
-
-
-    # -----------------------------------------------------------------------
-    # 모듈 / 워커 / 시그널 연결
-    # -----------------------------------------------------------------------
-
+        logger.info("[MainWindow] 초기화 완료")
 
     def _setup_modules(self) -> None:
         """핵심 모듈 초기화 및 서비스 시작"""
         from app.core import ApplicationContext
         self.app_context = ApplicationContext(self._kiwoom, parent=self)
         
-        # 기본 속성 바인딩
+        # 의존성 바인딩
         self.login_mgr = self.app_context.login_mgr
         self.order_mgr = self.app_context.order_mgr
+        self._health_monitor = self.app_context.health_monitor
         self._audit = self.app_context.audit
         self._snap_store = self.app_context.snap_store
         self._scan_cfg = self.app_context.scan_cfg
@@ -271,20 +78,24 @@ class MainWindow(QMainWindow):
         self.market_scheduler = self.app_context.market_scheduler
         self.risk_manager = self.app_context.risk_manager
         self.trading_controller = self.app_context.trading_controller
-        self.trading_controller._ctx = self.state  # AppState 주입
-        self._health_monitor = self.app_context.health_monitor
+        
+        # 상태 주입
+        self.trading_controller._ctx = self.state
+        self.order_mgr.set_state(self.state)
+        self.order_mgr.set_health_monitor(self._health_monitor)
         self._tg = getattr(self.app_context, "tg_bot", None)
 
-        # 서브 시스템 설정
+        # 서브 시스템 설정 (Mixin 및 로컬 메서드)
         self._setup_logging_handlers()
         self._setup_news_analyzer()
         self._setup_background_workers()
         
-        # [NEW] SignalManager 중앙 관리
+        # 시그널 관리자 시작
+        from ui.signal_manager import SignalManager
         self.signal_manager = SignalManager(self)
         self.signal_manager.bind_all()
 
-        # [NEW] 연결 감시 (Self-Healing Watchdog)
+        # 연결 감시 (Watchdog)
         from app.connection_watchdog import ConnectionWatchdog
         self._watchdog = ConnectionWatchdog(
             kiwoom=self._kiwoom,
@@ -292,1030 +103,77 @@ class MainWindow(QMainWindow):
             smart_scanner=self._smart_scanner,
             parent=self,
         )
-        # self._watchdog 시그널은 SignalManager에서 일괄 연결됨
         self._watchdog.start()
 
-        self.append_log("[시스템] 모든 모듈 및 서비스 초기화 완료")
-
-    def _setup_logging_handlers(self) -> None:
-        """시스템 및 스캐너 로그 핸들러 설정"""
-        from scanner.smart_scanner import scan_log
-        from ui.components.log_panel import ScannerLogHandler, SysLogQtHandler
+    def _setup_timers(self) -> None:
+        """주기적 작업 타이머 설정"""
+        # 1. 포트폴리오 동기화 (10초)
+        self._port_refresh_timer = QTimer(self)
+        self._port_refresh_timer.timeout.connect(self._port_worker.sync)
         
-        # 1. 스캐너 전용 로그
-        self._scan_log_handler = ScannerLogHandler(self)
-        self._scan_log_handler.log_entry.connect(self.log_panel.append_scanner)
-        scan_log.addHandler(self._scan_log_handler)
-
-        # 2. 시스템 전역 로그
-        self._sys_log_handler = SysLogQtHandler(self)
-        self._sys_log_handler.log_entry.connect(self.log_panel.append_syslog)
-        import logging
-        logging.getLogger().addHandler(self._sys_log_handler)
-        logging.getLogger("kiwoom_api").info("[SysLog] 시스템 로그 패널 연결 완료")
-
-    def _setup_news_analyzer(self) -> None:
-        """뉴스 분석 엔진 시작"""
-        import queue as _queue
-        from scanner.news_analyzer import NewsAnalyzer
-        self._news_queue = _queue.Queue()
-        self._news_analyzer = NewsAnalyzer(on_result=lambda r: self._news_queue.put(r))
-        self._news_analyzer.start()
-        self.append_log("[뉴스] NewsAnalyzer 백그라운드 스레드 시작")
+        # 2. 스캐너 주기적 스캔 (60초)
+        self._scan_refresh_timer = QTimer(self)
+        self._scan_refresh_timer.timeout.connect(self.trading_controller.run_periodic_scan)
+        
+        # 3. 장 종료 후 분석 (15:35)
+        self._feedback_timer = QTimer(self)
+        self._feedback_timer.timeout.connect(self._check_market_close_feedback)
+        self._feedback_timer.start(60_000)
 
     def _setup_background_workers(self) -> None:
-        """백그라운드 스레드 및 워커 설정"""
-        from engine.workers import ScannerWorker, PortfolioWorker
-        from PyQt5.QtCore import QThread
-        
-        # 1. ScannerWorker (별도 스레드)
+        """배경 스레드 워커 설정"""
+        # 1. 잔고 동기화 워커
+        self._port_thread = QThread(self)
+        self._port_worker = PortfolioWorker(self._kiwoom, self.order_mgr)
+        self._port_worker.moveToThread(self._port_thread)
+        self._port_thread.started.connect(self._port_worker.run)
+        self._port_thread.start()
+
+        # 2. 스캐너 워커 (레거시 지원용으로 유지 가능, SmartScanner와 병행)
         self._scan_thread = QThread(self)
         self._scan_worker = ScannerWorker(self._snap_store, self._scan_cfg, self.order_mgr)
-        self._scan_worker._audit = self._audit
         self._scan_worker.moveToThread(self._scan_thread)
         self._scan_thread.started.connect(self._scan_worker.run)
         self._scan_thread.start()
 
-        # 2. PortfolioWorker (메인 스레드 대기열 활용)
-        self._port_worker = PortfolioWorker(self.order_mgr, parent=self)
-
-    # -----------------------------------------------------------------------
-    # 슬롯 — 이벤트 처리
-    # -----------------------------------------------------------------------
-
-    @pyqtSlot(float, float, float, float, bool)
-    def _on_market_data_updated(self, kp_cur: float, kp_chg: float, kd_cur: float, kd_chg: float, is_crash: bool) -> None:
-        """TradingController로부터 수신한 지수 정보를 UI에 반영"""
-        logging.info("[MainWindow] 지수 수신: KOSPI %.2f(%.2f%%), KOSDAQ %.2f(%.2f%%)", 
-                     kp_cur, kp_chg, kd_cur, kd_chg)
-        self.header.set_index(kp_cur, kp_chg, kd_cur, kd_chg, is_crash)
-
-    @pyqtSlot(float)
-    def _on_tp_changed(self, val: float) -> None:
-        self.ctx.set_risk_params(tp=val)
-        self.append_log(f"[설정] 익절 기준 변경: {val}%")
-        self.trading_controller.set_risk_params(tp=val)
-
-    @pyqtSlot(float)
-    def _on_sl_changed(self, val: float) -> None:
-        self.ctx.set_risk_params(sl=val)
-        self.append_log(f"[설정] 손절 기준 변경: {val}%")
-        self.trading_controller.set_risk_params(sl=val)
-
-    @pyqtSlot(str, str, int)
-    def _on_manual_sell(self, code: str, name: str, qty: int) -> None:
-        success, msg = self.trading_controller.manual_sell(code, name, qty)
-        self.append_log(msg)
-
-    @pyqtSlot()
-    def _on_reload_config(self) -> None:
-        """설정 파일(adaptive_params.json) 실시간 리로드"""
-        if hasattr(self, "_scan_cfg"):
-            success = self._scan_cfg.update_from_file()
-            if success:
-                self.append_log("✅ 설정 실시간 리로드 완료 (장중 파라미터 반영)")
-                if hasattr(self, "risk_manager"):
-                    self.risk_manager.update_config(self._scan_cfg)
-            else:
-                self.append_log("⚠ 설정 리로드 실패 (파일 확인 필요)")
-
-
-    def _setup_timers(self) -> None:
-        """QTimer — 모두 메인 스레드에서 실행 (Kiwoom OCX 스레드 규칙 준수)"""
-        self._selected_code: str = ""
-        
-        # [수급 필터] 외국인/기관 순매수 opt10059 주기 갱신 (지연 없이 즉시 할당)
-        _investor_ms = int(self._scan_cfg.investor_refresh_min * 60 * 1000)
-        self._investor_timer = QTimer(self)
-        self._investor_timer.timeout.connect(self._on_investor_refresh_tick)
-        self._investor_timer.start(_investor_ms)  # 기본 10분
-
-
-        # 차트 갱신 + 현재가 기반 포트폴리오 갱신 (2초)
-        self._chart_timer = QTimer(self)
-        self._chart_timer.timeout.connect(self._refresh_chart)
-        self._chart_timer.timeout.connect(self.trading_controller.update_portfolio_prices)
-        self._chart_timer.start(5000)  # 2026-04-23: 2s→5s (메인 스레드 이벤트 루프 부하 감소, Watchdog ACK 우선순위)
-
-
-        # [지수] 급락 감지 및 지수 업데이트 (1분 주기)
-        self._crash_check_timer = QTimer(self)
-        self._crash_check_timer.timeout.connect(self.trading_controller.check_market_crash)
-        self._crash_check_timer.start(60_000)
-
-
-        # 앱 시작 2초 후 최초 1회 실행 (KOSPI/KOSDAQ 실시간 반영)
-        QTimer.singleShot(2_000, self.trading_controller.check_market_crash)
-
-
-        # 잔고 동기화 (1분) — scan_refresh_timer(60s)와 발화 시간 어긋나도록 5s 지연 시작
-        self._balance_timer = QTimer(self)
-        self._balance_timer.timeout.connect(self._port_worker.sync)
-        # QTimer.singleShot으로 첫 발화를 5s 늦춰 scan timer와 충돌 방지
-        QTimer.singleShot(5_000, lambda: self._balance_timer.start(60_000))
-
-
-        # Phase 3: MarketScheduler가 시장 시간 스케줄링을 전담함
-
-
-        from app.background_tasks import SystemMonitor
-        self.sys_monitor = SystemMonitor(self)
-        self.sys_monitor.news_drain_requested.connect(self._drain_news_queue)
-        self.sys_monitor.cleanup_requested.connect(self._cleanup_memory)
-        self.sys_monitor.health_check_requested.connect(self._perform_self_healing)
-        self.sys_monitor.start()
-
-
-
-        # opt10030 주기 스캔 (1분마다) — 메인 스레드에서 호출 (Kiwoom TR은 메인 스레드만 지원)
-        self._scan_refresh_timer = QTimer(self)
-        self._scan_refresh_timer.timeout.connect(self.trading_controller.run_periodic_scan)
-        # 장 시작 전까지는 타이머만 등록, start_after_login 후 가동
-
-        # 텔레그램 1시간 보고 (1시간마다)
-        self._tg_report_timer = QTimer(self)
-        self._tg_report_timer.timeout.connect(self._send_tg_status)
-        self._tg_report_timer.start(60 * 60 * 1000)
-
-        # Watchdog ACK (5초마다)
-        self._watchdog_ack_timer = QTimer(self)
-        self._watchdog_ack_timer.timeout.connect(
-            lambda: getattr(self, "_health_monitor", None) and self._health_monitor.ack()
-        )
-        self._watchdog_ack_timer.start(5_000)
-
-        # Phase 3: MarketScheduler 시작 (1분마다 시장 시간 체크)
-        self.market_scheduler.start()
-
-
-    def _perform_self_healing(self) -> None:
-        """자가 치유: 멈춘 스레드나 워커가 있으면 재시작 시도"""
-        # 1. 스캐너 스레드 체크
-        if hasattr(self, "_scan_thread") and not self._scan_thread.isRunning():
-            logger.error("[Self-Healing] Scanner thread STOPPED! Restarting...")
-            self._scan_thread.start()
-        
-        # 2. 메인 스레드 타이머 체크 (중요 타이머가 멈췄는지 여부)
-        if hasattr(self, "_chart_timer") and not self._chart_timer.isActive():
-            logger.warning("[Self-Healing] Chart timer was inactive. Restarting...")
-            self._chart_timer.start()
-            
-        logger.info("[Health] 시스템 헬스 체크 완료 (정상)")
-
-
-    # -----------------------------------------------------------------------
-    # 로그인 후 워커 시작
-    # -----------------------------------------------------------------------
-
+    def _setup_news_analyzer(self) -> None:
+        """뉴스 분석기 초기화"""
+        from analysis.news_analyzer import NewsAnalyzer
+        self._news_analyzer = NewsAnalyzer()
 
     def start_after_login(self) -> None:
-        """로그인 완료 후 호출"""
-        self._kiwoom._account   = self.login_mgr.account
-        self.order_mgr._account = self.login_mgr.account
-        
-        # [NEW] 즉시 잔고 동기화 (60초 지연 방지)
+        """로그인 후 실질적 시스템 가동"""
         self._port_worker.sync()
-
-
-        # 지수 업데이트는 이제 TradingController -> AppState -> MainWindow 흐름으로 처리됨
-
-
-        # 포지션 실시간 현재가 갱신 + 동적 감시 중단/재개 콜백 연결
-        # (_order_mgr 주입은 ApplicationContext에서 처리됨)
-        max_pos = self.order_mgr.max_positions
-
-
-        def _on_pos_opened(code: str):
-            self._smart_scanner.add_position_realtime(code)
-            # 포지션이 max에 도달했으면 유니버스 감시 중단
-            if len(self.order_mgr.positions) >= max_pos:
-                pos_codes = list(self.order_mgr.positions.keys())
-                self._smart_scanner.pause_universe_watch(pos_codes)
-
-
-        def _on_pos_closed(code: str):
-            self._smart_scanner.remove_position_realtime(code)
-            # on_position_closed는 del positions[code] 이전에 호출되므로 현재 포지션 수 - 1
-            remaining = len(self.order_mgr.positions) - 1
-            if remaining < max_pos:
-                self._smart_scanner.resume_universe_watch()
-
-
-        self.order_mgr.on_position_opened = _on_pos_opened
-        self.order_mgr.on_position_closed = _on_pos_closed
-        self.log_panel.append("[실시간] 포지션 현재가 갱신 + 동적 감시 중단/재개 콜백 연결")
-
-
-        # [NEW] 기존 보유 포지션 실시간 등록 (앱 외부에서 매수한 포지션 포함)
-        for code in self.order_mgr.positions:
-            self._smart_scanner.add_position_realtime(code)
-
-
-        # [NEW] 잔고 동기화 완료(2~3초) 후 초기 감시 상태 결정
-        # — 포지션 풀이면 자동으로 유니버스 감시 중단
-        def _init_watch_state():
-            if len(self.order_mgr.positions) >= max_pos:
-                pos_codes = list(self.order_mgr.positions.keys())
-                self._smart_scanner.pause_universe_watch(pos_codes)
-
-
-        QTimer.singleShot(3000, _init_watch_state)
-
-
-        # HealthMonitor 시작
-        self._health_monitor.start()
-        self.log_panel.append("[HealthMonitor] 자가 진단 시작")
-
-
-        # opt10030 첫 스캔을 1초 후 실행 (로그인 직후 여유)
-        self.log_panel.append("[스캔] 1초 후 opt10030 초기 스캔 예약...")
-        QTimer.singleShot(1000, self.trading_controller.run_periodic_scan)
-
-
-        # 지수 초기 조회 — 스캔(1s) 완료 후 5s 뒤 (TR 충돌 회피)
-        QTimer.singleShot(2_000, self.trading_controller.check_market_crash)
-
-
-        # 수급 초기 조회 — 스캔 + 지수 완료 후 10s 뒤
-        QTimer.singleShot(12_000, self._on_investor_refresh_tick)
-
-
-        # 이후 1분마다 반복 스캔
+        self._port_refresh_timer.start(10_000)
         self._scan_refresh_timer.start(60_000)
-        self.log_panel.append("[스캔] 1분 주기 스캔 타이머 시작 (타임아웃 2초)")
+        
+        # 초기 스캔 즉시 실행
+        QTimer.singleShot(1000, self.trading_controller.run_periodic_scan)
+        self.append_log("🚀 [시스템] 로그인 후 자동 동기화 및 스캔 시작")
 
-
-    def closeEvent(self, event) -> None:
-        self._audit.flush_all()
-
-        # ── 리소스 정리 (Orchestration) ───────────────────────────────────
-        stoppables = [
-            self.market_scheduler,
-            getattr(self, "sys_monitor", None),
-            getattr(self, "_balance_timer", None),
-            getattr(self, "_crash_check_timer", None),
-            getattr(self, "_chart_timer", None),
-            getattr(self, "_scan_refresh_timer", None),
-            getattr(self, "_tg_report_timer", None),
-            getattr(self, "_investor_timer", None),
-            getattr(self, "_watchdog_ack_timer", None),
-            getattr(self, "_news_analyzer", None),
-            getattr(self, "_health_monitor", None),
-            getattr(self, "_scan_worker", None),
-        ]
-
-        for obj in stoppables:
-            if obj and hasattr(obj, "stop"):
-                try:
-                    obj.stop()
-                except Exception:
-                    pass
-
-        # 스레드 종료 대기
-        if hasattr(self, "_scan_thread") and self._scan_thread.isRunning():
-            self._scan_thread.quit()
-            self._scan_thread.wait(3000)
-        # log_monitor 자식 프로세스 종료
-        proc = getattr(self, "_log_monitor_proc", None)
-        if proc is not None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        # 로그 핸들러 정리 — root logger에서 제거 (프로그램 종료 후 시그널 emit 방지)
-        logging.getLogger().removeHandler(self._sys_log_handler)
-        if self._tg:
-            # 종료 알림 발송 (타임아웃 2초로 빨리 처리)
-            import requests
-            try:
-                requests.post(
-                    f"https://api.telegram.org/bot{self._tg._token}/sendMessage",
-                    json={"chat_id": self._tg._chat_id, "text": "🛑 프로그램 종료됨"},
-                    timeout=2,
-                )
-            except Exception:
-                pass
-            self._tg.stop()
-        super().closeEvent(event)
-
-
-    # -----------------------------------------------------------------------
-    # 슬롯 — 이벤트 처리
-    # -----------------------------------------------------------------------
-    # 연결 감시 (Watchdog) 슬롯
-    # -----------------------------------------------------------------------
-
-    @pyqtSlot()
-    def _on_connection_lost(self) -> None:
-        """Watchdog: 연결 끊김 감지 — 헤더 상태 변경 + 로그"""
-        self.header.set_connected("—", "연결끊김")
-        self.append_log("🔴 [연결끊김] 키움 API 연결이 끊어졌습니다. 자동 재연결 시도 중...")
-
-    @pyqtSlot()
-    def _on_connection_recovered(self) -> None:
-        """Watchdog: 재연결 성공 — 헤더 복원 + 로그"""
-        acct = self.login_mgr.account
-        mode = self.login_mgr.server_mode
-        self.header.set_connected(acct, mode)
-        self.append_log(f"🟢 [재연결] 키움 API 재연결 성공 — {acct} ({mode})")
-
-    @pyqtSlot(str)
-    def _on_reconnect_failed(self, reason: str) -> None:
-        """Watchdog: 최대 재시도 초과 — 경고 + 사용자 안내"""
-        self.append_log(f"⛔ [재연결 실패] {reason} — 수동 재시작이 필요합니다.")
-
-    # -----------------------------------------------------------------------
-
-
-    @pyqtSlot(str, str)
-    def _on_login_success(self, account: str, mode: str) -> None:
-        import time as _time
-        _RISK2 = cfg.RISK
-
-
-        self.header.set_connected(account, mode)
-        self.log_panel.append(f"로그인 성공 — {mode} / 계좌: {account}")
-
-
-        # 재연결(reconnect_silent) 시 start_after_login() 재호출 차단
-        # → CommConnect 중복 호출(err=-101) 및 워밍업 리셋으로 인한 오청산 방지
-        if getattr(self, "_already_started", False):
-            # 계좌 정보만 최신화하고 잔고 재동기화
-            if hasattr(self._kiwoom, "_account"):
-                self._kiwoom._account = account
-            if hasattr(self.order_mgr, "_account"):
-                self.order_mgr._account = account
-            self._port_worker.sync()
-            self.log_panel.append(f"[재연결] 계좌 재설정 완료 — {mode} / {account}")
-            return
-
-
-        self._already_started = True
-        self._today_watch.clear()           # 로그인 시 당일 감시 목록 초기화
-        self._news_analyzer.reset_daily()   # 뉴스 분석 캐시 초기화
-        _wu = float(_RISK2.get("sl_tp_warmup_sec", 45.0))
-        self._sl_tp_warmup_end = _time.monotonic() + max(0.0, _wu)
-        if _wu > 0:
-            self.log_panel.append(
-                f"[리스크] 로그인 후 {_wu:.0f}초간 자동 손절·익절 보류 (잔고·시세 안정화)"
-            )
-        # 텔레그램 시작 알림
-        if self._tg:
-            self._tg.send(f"🚀 프로그램 시작됨\n계좌: {account}\n모드: {mode}")
-        self.start_after_login()
-
-
-    @pyqtSlot(dict)
-    def _on_order_filled(self, d: dict) -> None:
-        ab = d.get("avg_buy_price")
-        if d.get("side") == "매도체결" and ab is not None:
-            line = (
-                f"✅ {d['side']} — {d['name']}({d['code']}) {d['filled_qty']}주 "
-                f"매수가 {ab:,}원 → 매도가 {d['filled_price']:,}원"
-            )
-            # 매도 완료 종목은 감시 목록에서 제거
-            self._today_watch.pop(d.get("code", ""), None)
-        else:
-            line = (
-                f"✅ {d['side']} — {d['name']}({d['code']}) "
-                f"{d['filled_qty']}주 @{d['filled_price']:,}원"
-            )
-        self.log_panel.append(line)
-        # 텔레그램 알림 발송
-        if self._tg:
-            self._tg.send(line)
-        # 포트폴리오 즉시 갱신 트리거
-        self._on_portfolio_refresh({
-            "cash":      self.order_mgr.cash,
-            "positions": dict(self.order_mgr.positions),
-        })
-        self.trading_controller.on_fill_processed(d)
-
-
-
-
-
-
-
+    def _check_market_close_feedback(self) -> None:
+        """15:35분 장 마감 피드백 실행 여부 확인"""
+        if self._feedback_done_today: return
+        now = datetime.now()
+        if now.hour == 15 and now.minute >= 35:
+            self._feedback_done_today = True
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, self._run_feedback_loop)
 
     def _run_feedback_loop(self) -> None:
-        """15:35에 호출 — FeedbackEngine을 QThread에서 실행, 완료 시 _on_feedback_done() 호출."""
-        from PyQt5.QtCore import QThread
+        """피드백 엔진 실행 (QThread)"""
         from app.feedback_worker import FeedbackWorker
         self.log_panel.append("📊 [피드백] 장 마감 분석 시작...")
-        thread = QThread(self)
+        self._fb_thread = QThread(self)
         worker = FeedbackWorker()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
+        worker.moveToThread(self._fb_thread)
+        self._fb_thread.started.connect(worker.run)
         worker.finished.connect(self._on_feedback_done)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.start()
-        self._feedback_thread = thread  # GC 방지
-
-
-    @pyqtSlot(object)
-    def _on_feedback_done(self, result) -> None:
-        """피드백 완료 콜백 — UI 갱신 및 로그 출력"""
-        from datetime import date as _date
-        pnl_str  = f"{result.total_realized:+,.0f}원"
-        color    = "#a6e3a1" if result.profitable else "#f38ba8"
-
-
-        self.log_panel.append(
-            f"📊 [피드백] {result.total_trades}건 분석 완료 | 손익 {pnl_str}"
-        )
-        if result.profitable:
-            self.log_panel.append("  └─ 수익 당일 — 파라미터 유지")
-        elif result.adjustments:
-            for adj in result.adjustments:
-                arrow = "▲" if adj.new_val > adj.old_val else "▼"
-                self.log_panel.append(
-                    f"  └─ {adj.param}: {adj.old_val} {arrow} {adj.new_val}"
-                    f"  ({adj.reason})"
-                )
-        for reason in result.skipped_reasons:
-            self.log_panel.append(f"  └─ [보류] {reason}")
-
-
-        if result.report_path:
-            self.log_panel.append(f"  └─ 리포트: {result.report_path}")
-
-
-        # Telegram 알림 — LogAnalyzer가 생성한 상세 리포트 우선 사용
-        _tg = getattr(self, "_tg", None)
-        if _tg:
-            if result.telegram_msg:
-                msg = result.telegram_msg
-            else:
-                # LogAnalyzer 실패 시 단순 fallback
-                adj_lines = "\n".join(
-                    f"  {a.param}: {a.old_val}→{a.new_val}"
-                    for a in result.adjustments
-                ) or "  (변경 없음)"
-                msg = (
-                    f"[피드백] {result.date} 장 마감 분석\n"
-                    f"손익: {pnl_str} | 체결 {result.total_trades}건\n"
-                    f"파라미터 조정 {len(result.adjustments)}개:\n{adj_lines}"
-                )
-            try:
-                _tg.send(msg)
-            except Exception:
-                pass
-
-
-
-
-
-
-    def _reload_adaptive_config(self) -> None:
-        from app.config_manager import reload_adaptive
-        self.log_panel.append(reload_adaptive(self._scan_cfg))
-
-
-
-
-
-
-
-
-
-
-    @pyqtSlot(bool)
-    def _on_auto_trade_toggle(self, enabled: bool) -> None:
-        import logging as _log
-        _log.getLogger(__name__).info("[자동매매] 토글 수신: enabled=%s", enabled)
-        self.ctx.auto_trading = enabled
-        
-        # 수동으로 자동매매를 다시 켜면 급락 감지 플래그 리셋 (재활성화 허용)
-        if enabled:
-            self._market_crash_off = False
-        
-        state = "시작" if enabled else "정지"
-        self.log_panel.append(f"{'🟢' if enabled else '🔴'} 자동매매 {state}")
-        self.log_panel.append(
-            f"[상태] auto_trading={self.ctx.auto_trading} "
-            f"SnapshotStore={len(self._snap_store)}종목"
-        )
-
-
-    @pyqtSlot(bool)
-    def _on_overnight_mode_toggle(self, enabled: bool) -> None:
-        """야간보유 모드 토글 — SmartScannerConfig.overnight_mode_enabled 실시간 반영"""
-        self.ctx.overnight_mode = enabled
-        self._scan_cfg.overnight_mode_enabled = enabled
-        
-        state = "ON" if enabled else "OFF"
-        icon  = "🌙" if enabled else "☀️"
-        self.log_panel.append(
-            f"{icon} 야간보유 모드 {state} "
-            f"({'14:40~14:55 EOD 신호 활성화 / 당일 청산 제외' if enabled else '종가매매 신호 비활성화'})"
-        )
-        if enabled:
-            self.log_panel.append(
-                "  └─ 갭 상승 +2% 즉시 익절 / 갭 하락 -1.5% 즉시 손절 / 09:30 타임컷 적용"
-            )
-        logger.info("[overnight_mode] %s", state)
-
-
-    @pyqtSlot()
-    def _on_switch_real_requested(self) -> None:
-        import os
-        from PyQt5.QtWidgets import QMessageBox
-        msg = (
-            "🚨 [서버 모드 전환] 안내\n\n"
-            "실전/모의 서버를 전환하시겠습니까?\n"
-            "전환 시 프로그램이 재시작되며 키움 로그인 창이 나타납니다.\n\n"
-            "⚠️ 중요 (로그인 창 설정):\n"
-            "- 실전 전환 시: '모의투자' 체크박스 해제(V 표시 없앰)\n"
-            "- 모의 전환 시: '모의투자' 체크박스 선택(V 표시 활성)\n\n"
-            "※ 자동 로그인이 설정되어 있다면 키움 트레이 아이콘 메뉴에서 '계좌비밀번호 저장' 설정을 먼저 해제해 주세요.\n\n"
-            "계속하시겠습니까?"
-        )
-        reply = QMessageBox.question(
-            self, '서버 모드 전환', msg,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            # 다음 부팅 시 어떤 모드로 들어갈지 임시 저장 (1: 실전, 0: 모의)
-            current_is_real = (getattr(self.ctx, "server_mode", "") == "실전투자")
-            target_mode = "0" if current_is_real else "1"
-            
-            with open("force_mode.tmp", "w") as f:
-                f.write(target_mode)
-
-            # 계좌 캐시 파일 삭제 (절대 경로로 확실히 처리)
-            _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            cache_file = os.path.join(_ROOT, "params", "last_account.txt")
-            if os.path.exists(cache_file):
-                try:
-                    os.remove(cache_file)
-                except Exception as e:
-                    logger.warning("[Switch] 캐시 삭제 실패: %s", e)
-            
-            # 재시작 호출
-            self.header._on_restart_clicked()
-
-
-    def _on_manual_unlock_requested(self) -> None:
-        """
-        사용자 수동 개입으로 일일 손익 락을 해제한다 (RiskManager 연동).
-        """
-        # RiskManager 상태 업데이트
-        self.risk_manager.unlock_entry_manual()
-        
-        # UI 업데이트
-        self.header.set_risk_status("SAFE")
-        self.log_panel.append(
-            "🔓 [수동해제] 일일 손익 락 해제 완료 — 금일 자동 재락 일시 중단"
-        )
-
-
-    # 수급/리스크 설정 변경 슬롯은 상단에 중복 정의된 부분을 사용하거나 이쪽으로 통일합니다.
-    @pyqtSlot(str, str, int)
-    def _on_health_param_relax(self, params: dict) -> None:
-        msg = "  ".join(f"{k}={v}" for k, v in params.items())
-        logger.info("[HealthMonitor] 파라미터 완화 적용: %s", msg)
-        if not hasattr(self, "_health_relax_msgs"):
-            self._health_relax_msgs: list = []
-        self._health_relax_msgs.append(msg)
-        from PyQt5.QtCore import QMetaObject, Qt as _Qt
-        QMetaObject.invokeMethod(self, "_health_relax_ui", _Qt.QueuedConnection)
-
-    @pyqtSlot()
-    def _health_relax_ui(self) -> None:
-        msgs = getattr(self, "_health_relax_msgs", [])
-        while msgs:
-            m = msgs.pop(0)
-            self.log_panel.append(f"🔧 [가뭄완화] 파라미터 자동 완화: {m}")
-
-    @pyqtSlot(str, str, int)
-    def _on_manual_buy(self, code: str, name: str, price: int) -> None:
-        """스캐너 수동 매수 버튼 처리 — 다이얼로그 → trading_controller.manual_buy()."""
-        dlg = ManualBuyDialog(code, name, price, parent=self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-
-        qty, otype, oprice = dlg.result_values()
-
-        # 포지션 한도 초과 경고 (차단은 하지 않음 — 수동이므로 사용자 판단 우선)
-        n_pos = len(self.order_mgr.positions)
-        max_pos = getattr(self.order_mgr, "max_positions", 5)
-        if n_pos >= max_pos:
-            self.log_panel.append(
-                f"⚠ [수동매수] 포지션 {n_pos}/{max_pos}개 한도 초과 상태로 주문합니다"
-            )
-
-        success, msg = self.trading_controller.manual_buy(code, name, qty, price=oprice, order_type=otype)
-        self.append_log(msg)
-
-
-
-
-
-
-    @pyqtSlot(object)
-    def _on_scan_signal_direct(self, sig) -> None:
-        """SmartScanner.on_signal 콜백 — 메인 스레드에서 직접 호출됨"""
-        self._on_scan_signal(sig)
-
-
-    @pyqtSlot(object)
-    def _on_scan_signal(self, sig) -> None:
-        """신호 수신 — 로그 출력 + 당일 감시 목록 누적 (UI만 담당).
-        비즈니스 로직(필터링/진입)은 TradingController.handle_signal에 위임됩니다.
-        """
-        self.log_panel.append(
-            f"🚨 [{sig.signal_type}] {sig.name}({sig.code}) "
-            f"@{sig.price:,}원  {sig.reason}"
-        )
-        # 당일 감시 목록 누적 (포트폴리오 패널 "감시중" 표시용)
-        self._today_watch[sig.code] = {
-            "name":        sig.name,
-            "price":       sig.price,
-            "signal_type": sig.signal_type,
-        }
-        # 뉴스 분석 요청 (백그라운드, 즉시 반환)
-        self._news_analyzer.analyze(sig.code, sig.name)
-
-
-    @pyqtSlot()
-    def _on_auto_trade_started(self) -> None:
-        """첫 감시 신호 발생 — TradingController.auto_trade_started 연결.
-        자동매매 자동 활성화 (UI만 담당).
-        """
-        if not self._auto_trading and not self._market_crash_off:
-            self.header._btn_auto.setChecked(True)
-            self.header._on_auto_clicked(True)
-            self.log_panel.append("🟢 감시 종목 발생 — 자동매매 자동 시작")
-
-
-    @pyqtSlot(str, bool)
-    def _on_scan_status_updated(self, msg: str, done: bool) -> None:
-        """스캔 상태바 갱신"""
-        if done:
-            self.scan_status.done(msg)
-        else:
-            self.scan_status.reset()
-
-
-    @pyqtSlot(dict)
-    def _on_order_sent(self, d: dict) -> None:
-        """주문 전송 로그"""
-        self.append_log(
-            f"{d['side']} 주문 전송 — {d['name']}({d['code']}) {d['qty']}주 {d['price']}원"
-        )
-
-
-
-    # ────────────────────────────────────────────────────────────────────────
-    # Phase 3: Application Layer 신호 처리 슬롯
-    # ────────────────────────────────────────────────────────────────────────
-    @pyqtSlot()
-    def _on_market_opened(self) -> None:
-        """08:00 장개시 신호 처리"""
-        if self._opened_today:
-            return
-        self._opened_today = True
-        self._reload_adaptive_config()
-        self.header._btn_auto.setChecked(True)
-        self.header._on_auto_clicked(True)
-        self.log_panel.append("📈 08:00 자동매매 시작")
-
-
-    @pyqtSlot()
-    def _on_market_closing(self) -> None:
-        """15:20 장마감 + 강제청산 신호 처리"""
-        if self._closed_today:
-            return
-        self._closed_today = True
-
-
-        # 보유 포지션 강제청산 + 전일 거래량 캐시 저장
-        self.trading_controller.liquidate_all_positions()
-        self.trading_controller.on_market_closing()
-
-
-        # 자동매매 OFF
-        self.header._btn_auto.setChecked(False)
-        self.header._on_auto_clicked(False)
-        self.log_panel.append("📉 시장 종료 — 자동매매 중지")
-
-
-    @pyqtSlot()
-    def _on_profit_locked(self) -> None:
-        """수익 목표 달성 → 신규 매수 차단"""
-        profit_target = self._scan_cfg.daily_profit_lock_won
-        self.header.set_risk_status("WARNING", "PROFIT LOCK")
-        self.log_panel.append(
-            f"🔒 [수익 락] 일일 수익 {profit_target:,}원 달성 — 신규 매수 차단"
-        )
-
-
-    @pyqtSlot()
-    def _on_loss_cut(self) -> None:
-        """손절 한도 도달 → 전량 청산"""
-        loss_limit = self._scan_cfg.daily_loss_cut_won
-        self.header.set_risk_status("DANGER", "LOSS CUT")
-        self.log_panel.append(
-            f"🔴 [손절 한도] 일일 손실 -{loss_limit:,}원 도달 — 전량 강제청산 진행..."
-        )
-        # 모든 보유 포지션 강제청산
-        self.trading_controller.liquidate_all_positions()
-
-
-    @pyqtSlot()
-    def _on_day_reset(self) -> None:
-        """자정 플래그 리셋"""
-        self._opened_today = False
-        self._closed_today = False
-        self._feedback_done_today = False
-        self._new_entry_locked = False
-        self._daily_loss_cut_done = False
-        self._manual_unlock_active = False
-        self.risk_manager.reset()
-        logger.info("[자정] 당일 플래그 리셋")
-
-
-    @pyqtSlot()
-    def _on_feedback_triggered(self) -> None:
-        """15:35 피드백 루프 신호"""
-        if self._feedback_done_today:
-            return
-        self._feedback_done_today = True
-        self._run_feedback_loop()
-
-
-    def _drain_news_queue(self) -> None:
-        """
-        뉴스 분석 결과를 메인 스레드에서 안전하게 처리.
-
-
-        NewsAnalyzer 백그라운드 스레드가 결과를 Queue에 넣으면
-        이 메서드(QTimer 1초 주기)가 꺼내 로그에 표시한다.
-        Qt 위젯 접근은 항상 메인 스레드에서만 이뤄진다.
-        """
-        try:
-            while not self._news_queue.empty():
-                result = self._news_queue.get_nowait()
-                self.log_panel.append(result.summary())
-        except Exception:
-            pass
-
-
-    @pyqtSlot(dict)
-    def _on_portfolio_refresh(self, data: dict) -> None:
-        self.header.set_pnl(self.order_mgr.daily_realized_pnl)
-        data["watch_today"] = self._today_watch
-        data["max_positions"] = self.order_mgr.max_positions
-        self.portfolio_panel.refresh(data)
-
-
-    @pyqtSlot(str)
-    def _on_code_selected(self, code: str) -> None:
-        self._selected_code = code
-        self._refresh_chart()
-
-
-    @pyqtSlot()
-    def _on_tg_status_requested(self) -> None:
-        """텔레그램 봇 /status 명령어 대응 — 현재 계좌/감시 상태 요약 발송."""
-        if not self._tg:
-            return
-
-        from app.reporting import StatusReporter
-        reporter = StatusReporter(self.order_mgr, self._snap_store, self._today_watch)
-        msg = reporter.generate_report()
-        self._tg.send(msg)
-
-
-    def _send_tg_status(self) -> None:
-        """1시간 주기 텔레그램 자동 보고 — 자동매매 ON일 때, 08:00~15:30 에만."""
-        from datetime import datetime, time
-        now_time = datetime.now().time()
-        if time(8, 0) <= now_time <= time(15, 30):
-            if self.ctx.auto_trading and self._tg:
-                self._on_tg_status_requested()
-
-
-    def _refresh_chart(self) -> None:
-        if not self._selected_code:
-            return
-        snap = self._snap_store.get_snapshot(self._selected_code)
-        if snap is None:
-            return
-        closes  = snap.closes_1min or [snap.current_price]
-        volumes = list(snap.volumes_1min) if snap.volumes_1min else []
-        pos     = self.order_mgr.positions.get(self._selected_code)
-
-
-        # [Trail] 트레일 가격 계산 (ExitStrategy 위임)
-        trail_price = 0
-        if pos:
-            trail_price = self.trading_controller._exit_strategy.get_trail_price(pos)
-
-
-        self.chart_panel.update_chart(
-            closes, volumes, snap.code, snap.name,
-            position=pos,
-            trail_price=trail_price,
-            sl_pct=self.ctx.sl_pct,
-        )
-
-
-
-
-    def _on_investor_refresh_tick(self) -> None:
-        """
-        수급 갱신 타이머 콜백.
-
-
-        - investor_refresh_min 변수로 갱신 주기 조정 가능 (기본 10분).
-          adaptive_params.json 에서 변경하면 다음 틱에 타이머 간격이 자동으로 재설정됨.
-        - 정규장 시간(09:00~15:30) + 자동매매 ON 상태에서만 TR 호출.
-        """
-        # ── 갱신 주기가 변경됐으면 타이머 재시작 ──────────────────────────
-        _timer = getattr(self, "_investor_timer", None)
-        if _timer is None:
-            return
-
-        _want_ms = int(self._scan_cfg.investor_refresh_min * 60 * 1000)
-        if _timer.interval() != _want_ms:
-            _timer.setInterval(_want_ms)
-            logger.info(
-                "[수급필터] 갱신 주기 변경 → %d분", self._scan_cfg.investor_refresh_min
-            )
-
-
-        if not self._scan_cfg.investor_filter_enabled:
-            return
-        scanner = getattr(self, "_smart_scanner", None)
-        if scanner is None:
-            return
-        # 정규장 시간(09:00~15:30)에만 조회 — 자동매매 ON/OFF 무관 (표시용)
-        from datetime import datetime, time
-        now = datetime.now().time()
-        if not (time(9, 0) <= now <= time(15, 30)):
-            return
-        # 다른 TR 진행 중이면 5초 후 재시도 — 단순 return 시 다음 10분 틱까지 대기하게 됨
-        if getattr(self._kiwoom, "_tr_busy", False):
-            QTimer.singleShot(5_000, self._on_investor_refresh_tick)
-            return
-        scanner.trigger_investor_refresh()
-
-
-    @pyqtSlot()
-    def _cleanup_memory(self) -> None:
-        """[P2] 1시간마다 오래된 데이터를 삭제해 메모리 누수를 방지한다."""
-        active_codes: set[str] = set(self.order_mgr.positions.keys())
-        cleaned = 0
-
-        # 1. ScannerWorker 내부 정리
-        if hasattr(self, "_scan_worker") and self._scan_worker:
-            cleaned += self._scan_worker.cleanup_stale_data(active_codes)
-
-        # 2. OrderManager 내부 정리
-        cleaned += self.order_mgr.cleanup_stale_data(active_codes)
-
-        # 3. MainWindow 로컬 데이터 정리 (오늘 감시 종목)
-        if len(self._today_watch) > 300:
-            keep = set(list(self._today_watch.keys())[-200:]) | active_codes
-            removed = [c for c in list(self._today_watch) if c not in keep]
-            for c in removed:
-                del self._today_watch[c]
-            cleaned += len(removed)
-
-        if cleaned:
-            logger.info("[메모리정리] 총 %d개 항목 제거 — positions=%d, orders=%d, today_watch=%d",
-                        cleaned, len(active_codes), len(self.order_mgr.orders), len(self._today_watch))
-
-
-
-
-# (QSS Style Sheet is now moved to ui/style_sheets.py)
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# 진입점
-# ---------------------------------------------------------------------------
-
-
-def _launch_log_monitor():
-    """별도 콘솔 창에서 log_monitor.py 를 자동 실행한다 (Windows 전용).
-
-
-    Returns:
-        subprocess.Popen | None — 메인 창 종료 시 terminate() 호출용
-    """
-    import subprocess
-    monitor_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "log_monitor.py",
-    )
-    if not os.path.exists(monitor_path):
-        return None
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, monitor_path],
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-        return proc
-    except Exception as e:
-        print(f"[WARN] log_monitor 자동 실행 실패: {e}")
-        return None
-
-
-
-
-
-
-
-def launch(kiwoom) -> None:
-    """
-    대시보드를 실행한다.
-
-
-    사용 예)
-        from ui.main_window import launch
-        launch(kiwoom)
-    """
-    import sys
-    app = QApplication.instance() or QApplication(sys.argv)
-    win = MainWindow(kiwoom)
-    win.show()
-
-
-    # 실시간 로그 감시 대시보드 — 비활성화 (스레드 부하 감소)
-    win._log_monitor_proc = None  # _launch_log_monitor()
-
-
-    # 로그인 다이얼로그 — 창이 보인 뒤 실행
-    QTimer.singleShot(100, win.login_mgr.show_and_login)
-
-
-    import os as _os
-    _os._exit(app.exec())
-
-
-
-
-if __name__ == "__main__":
-    import sys, os, logging
-    sys.path.insert(0, os.path.dirname(__file__) + "/..")
-
-
-    # QApplication을 가장 먼저 생성 (pyqtgraph 포함 모든 Qt 코드보다 앞서야 함)
-    from PyQt5.QtWidgets import QApplication
-    _app = QApplication(sys.argv)
-
-
-    # 콘솔 + 파일 로그 설정
-    log_dir = "logs"
-    os.makedirs(log_dir, exist_ok=True)
-
-
-    # 파일 핸들러 (kiwoom_auto.log)
-    file_handler = logging.handlers.RotatingFileHandler(
-        os.path.join(log_dir, "kiwoom_auto.log"),
-        maxBytes=20 * 1024 * 1024,  # 20 MB
-        backupCount=10,
-        encoding="utf-8",  # UTF-8 강제 (한글 대시 EM-dash 지원)
-    )
-    file_handler.setLevel(logging.INFO)
-
-
-    # 콘솔 핸들러 (Windows 기본 인코딩 유지, 에러만 무시)
-    import sys
-    sys.stdout.reconfigure(errors='replace')
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-
-
-    # 포매터
-    formatter = logging.Formatter(
-        "%(asctime)s\t%(levelname)s\t%(name)s\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-
-
-    # 루트 로거 설정
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[file_handler, console_handler],
-    )
-
-
-    try:
-        from kiwoom_api import KiwoomManager
-        kiwoom = KiwoomManager()
-    except Exception as e:
-        print(f"[WARN] KiwoomManager init failed ({e}) -- Mock mode")
-        from kiwoom_api import MockKiwoomManager
-        kiwoom = MockKiwoomManager()
-    launch(kiwoom)
+        worker.finished.connect(self._fb_thread.quit)
+        self._fb_thread.start()
+
+    def closeEvent(self, event) -> None:
+        """프로그램 종료 시 자원 정리"""
+        self.append_log("👋 프로그램 종료 중...")
+        if self._tg: self._tg.stop()
+        super().closeEvent(event)

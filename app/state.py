@@ -20,6 +20,7 @@ class AppState(QObject):
     account_changed = pyqtSignal(str, str)         # (account, server_mode)
     market_data_updated = pyqtSignal(float, float, float, float, bool) # (kp_cur, kp_chg, kd_cur, kd_chg, is_crash)
     portfolio_updated = pyqtSignal(dict)           # {cash: int, positions: dict}
+    risk_locked_changed = pyqtSignal(bool)         # 리스크 락 상태 변경
     log_requested = pyqtSignal(str)                # 전역 로그 요청
 
     def __init__(self):
@@ -33,6 +34,7 @@ class AppState(QObject):
         self._account = "—"
         self._server_mode = "미연결"
         self._is_crash = False
+        self._risk_locked = False
         
         # 포트폴리오 상태
         self._cash = 0
@@ -108,6 +110,17 @@ class AppState(QObject):
     @property
     def is_crash(self) -> bool:
         return self._is_crash
+
+    @property
+    def risk_locked(self) -> bool:
+        return self._risk_locked
+
+    @risk_locked.setter
+    def risk_locked(self, value: bool):
+        if self._risk_locked != value:
+            self._risk_locked = value
+            logger.warning("[AppState] 리스크 잠금 상태 변경 -> %s", "LOCKED" if value else "UNLOCKED")
+            self.risk_locked_changed.emit(value)
 
     def update_market_data(self, kp_cur: float, kp_chg: float, kd_cur: float, kd_chg: float, is_crash: bool):
         """지수 데이터 업데이트 및 크래시 상태 반영"""

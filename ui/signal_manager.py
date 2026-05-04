@@ -50,8 +50,7 @@ class SignalManager:
         self.tc.signal_rejected.connect(lambda msg: self.win.append_log(f"❌ [진입거절] {msg}"))
         self.tc.log_message.connect(self.win.append_log)
         
-        # 포트폴리오 업데이트 — AppState 시그널로 일원화 가능 (현재는 TC 시그널 유지)
-        self.tc.portfolio_updated.connect(self.win._on_portfolio_refresh)
+        # 포트폴리오 업데이트 — 이제 AppState.portfolio_updated 시그널로 일원화됨
         self.tc.scan_status_updated.connect(self.win._on_scan_status_updated)
 
         # 첫 신호 자동매매 시작 — TC에서 판단, UI만 반응
@@ -107,9 +106,13 @@ class SignalManager:
             rm.daily_loss_cut.connect(self.win._on_loss_cut)
             rm.daily_loss_cut.connect(lambda: self.win.append_log("🔴 [리스크] 당일 손익 락 발동 (매수 차단)"))
             rm.daily_loss_cut.connect(lambda: self.win.header.set_risk_status("DANGER", "LOSS CUT"))
+            # [Step 3] AppState에 리스크 락 상태 반영
+            rm.daily_loss_cut.connect(lambda: setattr(self.state, "risk_locked", True))
             
             rm.daily_profit_locked.connect(self.win._on_profit_locked)
             rm.daily_profit_locked.connect(lambda: self.win.header.set_risk_status("WARNING", "PROFIT LOCK"))
+            # 익절 락은 보통 매수 차단까지는 아니지만, 필요시 설정 가능
+            # rm.daily_profit_locked.connect(lambda: setattr(self.state, "risk_locked", True))
             
         # [NEW] 주문 관리자 -> 헤더 사이징 표시 (초기화 시 한 번)
         mode = getattr(self.win._scan_cfg, "position_sizing_mode", "EQUAL")
@@ -119,10 +122,10 @@ class SignalManager:
         """SmartScanner 신호 경로 중앙화 (Critical 4)"""
         ss = getattr(self.win, "_smart_scanner", None)
         if ss:
-            # SmartScanner.on_signal 콜백을 MainWindow의 슬롯에 연결
-            # (이 슬롯에서 다시 TC.handle_signal을 호출하거나 직접 처리)
-            ss.on_signal = self.win._on_scan_signal_direct
-            logger.info("[SignalManager] SmartScanner 콜백 연결 완료 (_on_scan_signal_direct)")
+            # [Step 2] 콜백 대신 pyqtSignal 연결 방식으로 전환
+            ss.signal_detected.connect(self.tc.handle_signal)
+            ss.signal_detected.connect(self.win._on_scan_signal)
+            logger.info("[SignalManager] SmartScanner 시그널 연결 완료 (tc.handle_signal & win._on_scan_signal)")
 
     def _bind_context_updates(self):
         """중앙 상태 관리자와 UI 동기화"""

@@ -57,9 +57,6 @@ class TradingController(QObject):
     daily_refresh_requested = pyqtSignal(list)
     """일봉 데이터 수집 요청 (codes)"""
 
-    portfolio_updated = pyqtSignal(dict)
-    """포트폴리오 데이터 갱신 (cash, positions)"""
-
     auto_trade_started = pyqtSignal()
     """첫 감시 신호 발생으로 자동매매가 자동 시작될 때 발행"""
 
@@ -619,8 +616,6 @@ class TradingController(QObject):
         }
         if self._ctx:
             self._ctx.update_portfolio(_data["cash"], _data["positions"])
-            
-        self.portfolio_updated.emit(_data)
 
         # 청산 판정 및 미체결 관리
         self.check_and_exit_all()

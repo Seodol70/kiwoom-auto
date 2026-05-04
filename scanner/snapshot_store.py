@@ -595,11 +595,15 @@ class SnapshotStore:
             for code in stale:
                 self._states.pop(code, None)
 
+            # [Phase 4] 내부 분봉 프로세서 상태 정리
+            if hasattr(self, "_processor") and self._processor:
+                self._processor.cleanup_stale_data(active_codes)
+
             stale_in_df = [c for c in stale if c in self._df.index]
             if stale_in_df:
                 self._df.drop(index=stale_in_df, inplace=True, errors="ignore")
 
-            logger.debug("[SnapshotStore] 메모리 정리 — %d종목 제거", len(stale))
+            logger.info("[SnapshotStore] 메모리 정리 완료 — %d종목 데이터 제거", len(stale))
             return len(stale)
 
     def export_csv(self, path: str = "logs/snapshot.csv") -> None:

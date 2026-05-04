@@ -84,3 +84,14 @@ class TickToCandleProcessor:
     def get_current_candle(self, code: str) -> Optional[MinuteCandle]:
         """현재 진행 중인(미완성) 분봉을 반환"""
         return self._cur_candle.get(code)
+
+    def cleanup_stale_data(self, active_codes: set[str]) -> None:
+        """active_codes에 없는 종목의 상태 데이터를 제거한다."""
+        stale_min = set(self._last_min.keys()) - active_codes
+        for c in stale_min: self._last_min.pop(c, None)
+
+        stale_cur = set(self._cur_candle.keys()) - active_codes
+        for c in stale_cur: self._cur_candle.pop(c, None)
+
+        stale_vol = set(self._last_cum_vol.keys()) - active_codes
+        for c in stale_vol: self._last_cum_vol.pop(c, None)

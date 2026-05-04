@@ -71,29 +71,18 @@ class ScannerLogger:
     """신호 선정/탈락 기록 담당"""
 
     @staticmethod
-    def passed(code: str, name: str, reason: str, values: dict = None) -> None:
-        """선정된 신호 기록.
-
-        Args:
-            code: 종목 코드
-            name: 종목명
-            reason: 신호 발생 사유
-            values: 추가 메타 데이터 (RSI, EMA 등)
-        """
+    def passed(code: str, name: str, filter_name: str, detail: str = "", values: dict = None) -> None:
+        """선정된 신호 기록."""
+        reason = f"[{filter_name}] {detail}" if detail else filter_name
         msg = f"✅ [통과] {code}({name}) {reason}"
         scan_log.info(msg)
         if values:
             ScannerLogger._write_csv("scanner_passed.csv", code, name, reason, values)
 
     @staticmethod
-    def rejected(code: str, name: str, reason: str) -> None:
-        """탈락 신호 기록.
-
-        Args:
-            code: 종목 코드
-            name: 종목명
-            reason: 탈락 사유
-        """
+    def rejected(code: str, name: str, filter_name: str, detail: str = "") -> None:
+        """탈락 신호 기록."""
+        reason = f"[{filter_name}] {detail}" if detail else filter_name
         msg = f"❌ [탈락] {code}({name}) {reason}"
         scan_log.debug(msg)
         ScannerLogger._write_csv("scanner_rejected.csv", code, name, reason, {})
@@ -108,6 +97,16 @@ class ScannerLogger:
         msg = f"🚨 [신호] {sig.code}({sig.name}) [{sig.signal_type}] {sig.reason}"
         scan_log.warning(msg)
         ScannerLogger._write_csv("scanner_signal.csv", sig.code, sig.name, sig.reason, sig.values or {})
+
+    @staticmethod
+    def near_miss(
+        code: str, name: str, filter_name: str,
+        actual=None, threshold=None, reason: str = "",
+    ) -> None:
+        """거의 통과할 뻔한 탈락 (near-miss) 기록 — DEBUG 레벨."""
+        detail = reason or f"actual={actual} threshold={threshold}"
+        msg = f"⚡ [근접탈락] {code}({name}) [{filter_name}] {detail}"
+        scan_log.debug(msg)
 
     @staticmethod
     def _write_csv(filename: str, code: str, name: str, reason: str, values: dict) -> None:
