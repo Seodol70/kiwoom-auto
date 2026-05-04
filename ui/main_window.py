@@ -61,7 +61,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from engine.workers import ScannerWorker, PortfolioWorker
-from app.context import AppContext
+from app.state import AppState
 
 
 from logging_config import position_log
@@ -140,8 +140,8 @@ class MainWindow(QMainWindow):
         self._log_timer.start(500)  # 0.5초마다 일괄 업데이트
         self._today_watch: dict[str, Any] = {} # 감시 종목 추적
 
-        # [상태 관리] 중앙 컨텍스트 초기화
-        self.ctx = AppContext()
+        # [상태 관리] 중앙 상태 관리자 초기화
+        self.state = AppState()
 
         self._build_ui()
         self._setup_modules()
@@ -152,7 +152,7 @@ class MainWindow(QMainWindow):
         self._feedback_done_today: bool = False
         self._feedback_thread = None   # GC 방지용 참조
         
-        # [Risk] 파라미터는 이제 AppContext에서 관리함
+        # [Risk] 파라미터는 이제 AppState에서 관리함
 
     def append_log(self, text: str) -> None:
         """로그를 큐에 쌓는다. (실제 UI 반영은 0.5초마다 일괄 수행)"""
@@ -271,6 +271,7 @@ class MainWindow(QMainWindow):
         self.market_scheduler = self.app_context.market_scheduler
         self.risk_manager = self.app_context.risk_manager
         self.trading_controller = self.app_context.trading_controller
+        self.trading_controller._ctx = self.state  # AppState 주입
         self._health_monitor = self.app_context.health_monitor
         self._tg = getattr(self.app_context, "tg_bot", None)
 
@@ -291,9 +292,8 @@ class MainWindow(QMainWindow):
             smart_scanner=self._smart_scanner,
             parent=self,
         )
-        self._watchdog.connection_lost.connect(self._on_connection_lost)
-        self._watchdog.connection_recovered.connect(self._on_connection_recovered)
-        self._watchdog.reconnect_failed.connect(self._on_reconnect_failed)
+        )
+        # self._watchdog 시그널은 SignalManager에서 일괄 연결됨
         self._watchdog.start()
 
         self.append_log("[시스템] 모든 모듈 및 서비스 초기화 완료")
@@ -421,7 +421,6 @@ class MainWindow(QMainWindow):
 
         from app.background_tasks import SystemMonitor
         self.sys_monitor = SystemMonitor(self)
-        self.sys_monitor.connection_check_requested.connect(self._check_connection)
         self.sys_monitor.news_drain_requested.connect(self._drain_news_queue)
         self.sys_monitor.cleanup_requested.connect(self._cleanup_memory)
         self.sys_monitor.health_check_requested.connect(self._perform_self_healing)
@@ -474,9 +473,12 @@ class MainWindow(QMainWindow):
         """로그인 완료 후 호출"""
         self._kiwoom._account   = self.login_mgr.account
         self.order_mgr._account = self.login_mgr.account
+        
+        # [NEW] 즉시 잔고 동기화 (60초 지연 방지)
+        self._port_worker.sync()
 
 
-        # 지수 업데이트는 이제 TradingController -> AppContext -> MainWindow 흐름으로 처리됨
+        # 지수 업데이트는 이제 TradingController -> AppState -> MainWindow 흐름으로 처리됨
 
 
         # 포지션 실시간 현재가 갱신 + 동적 감시 중단/재개 콜백 연결
@@ -691,15 +693,6 @@ class MainWindow(QMainWindow):
         self.trading_controller.on_fill_processed(d)
 
 
-    @pyqtSlot()
-    def _check_connection(self) -> None:
-        """15분마다 연결 상태 확인 — 끊김 감지 시 자동 재로그인"""
-        if not self._kiwoom.is_connected():
-            self.log_panel.append("⚠️ 연결 끊김 감지 — 자동 재로그인 시도 중...")
-            if hasattr(self, "login_mgr") and self.login_mgr:
-                self.login_mgr.reconnect_silent()
-            else:
-                self._kiwoom.auto_reconnect()
 
 
 

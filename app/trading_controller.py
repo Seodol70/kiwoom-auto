@@ -84,7 +84,7 @@ class TradingController(QObject):
         self._smart_scanner = smart_scanner
         self._snap_store = snap_store
         self._health_monitor = health_monitor
-        self._ctx = ctx  # AppContext 참조 (선택적)
+        self._ctx = ctx  # AppState 참조 (선택적)
         self._auto_trading = False
         self._first_signal_received = False  # 첫 신호 여부 추적
         
@@ -612,11 +612,15 @@ class TradingController(QObject):
             logger.warning("[TradingController] 포트폴리오 가격 갱신 실패: %s", e)
             return
 
-        # 갱신된 데이터 발행 (UI 업데이트용)
-        self.portfolio_updated.emit({
+        # 갱신된 데이터 발행 (AppState 및 UI 시그널)
+        _data = {
             "cash":      self._order_mgr.cash,
             "positions": dict(positions),
-        })
+        }
+        if self._ctx:
+            self._ctx.update_portfolio(_data["cash"], _data["positions"])
+            
+        self.portfolio_updated.emit(_data)
 
         # 청산 판정 및 미체결 관리
         self.check_and_exit_all()

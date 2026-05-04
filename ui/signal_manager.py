@@ -16,7 +16,7 @@ class SignalManager:
     
     def __init__(self, win):
         self.win = win
-        self.ctx = win.ctx
+        self.state = win.state
         self.tc = win.trading_controller
         self.om = win.order_mgr
         self.lm = win.login_mgr
@@ -27,8 +27,10 @@ class SignalManager:
         self._bind_trading_core()
         self._bind_ui_interactions()
         self._bind_background_workers()
+        self._bind_scanner_core()
         self._bind_context_updates()
         self._bind_external()
+        self._bind_watchdog()
         logger.info("[SignalManager] 모든 시그널 연결 완료")
 
     def _bind_auth(self):
@@ -47,6 +49,8 @@ class SignalManager:
         # 컨트롤러 피드백
         self.tc.signal_rejected.connect(lambda msg: self.win.append_log(f"❌ [진입거절] {msg}"))
         self.tc.log_message.connect(self.win.append_log)
+        
+        # 포트폴리오 업데이트 — AppState 시그널로 일원화 가능 (현재는 TC 시그널 유지)
         self.tc.portfolio_updated.connect(self.win._on_portfolio_refresh)
         self.tc.scan_status_updated.connect(self.win._on_scan_status_updated)
 
@@ -66,8 +70,8 @@ class SignalManager:
 
         # 패널 조작
         self.win.portfolio_panel.manual_sell.connect(self.win._on_manual_sell)
-        self.win.portfolio_panel.tp_changed.connect(self.ctx.set_risk_params)
-        self.win.portfolio_panel.sl_changed.connect(lambda v: self.ctx.set_risk_params(sl=v))
+        self.win.portfolio_panel.tp_changed.connect(self.state.set_risk_params)
+        self.win.portfolio_panel.sl_changed.connect(lambda v: self.state.set_risk_params(sl=v))
         self.win.portfolio_panel.row_clicked.connect(self.win._on_code_selected)
 
         self.win.scanner_panel.row_clicked.connect(self.win._on_code_selected)
@@ -111,16 +115,28 @@ class SignalManager:
         mode = getattr(self.win._scan_cfg, "position_sizing_mode", "EQUAL")
         self.win.header.set_sizing_mode(mode)
 
+    def _bind_scanner_core(self):
+        """SmartScanner 신호 경로 중앙화 (Critical 4)"""
+        ss = getattr(self.win, "_smart_scanner", None)
+        if ss:
+            # SmartScanner.on_signal 콜백을 MainWindow의 슬롯에 연결
+            # (이 슬롯에서 다시 TC.handle_signal을 호출하거나 직접 처리)
+            ss.on_signal = self.win._on_scan_signal_direct
+            logger.info("[SignalManager] SmartScanner 콜백 연결 완료 (_on_scan_signal_direct)")
+
     def _bind_context_updates(self):
-        """중앙 컨텍스트와 UI 동기화"""
-        self.ctx.auto_trading_changed.connect(self.win.header._btn_auto.setChecked)
-        self.ctx.overnight_mode_changed.connect(self.win.header._btn_overnight.setChecked)
-        self.ctx.market_data_updated.connect(self.win._on_market_data_updated)
-        self.ctx.account_changed.connect(self.win.header.set_connected)
-        self.ctx.log_requested.connect(self.win.append_log)
+        """중앙 상태 관리자와 UI 동기화"""
+        self.state.auto_trading_changed.connect(self.win.header._btn_auto.setChecked)
+        self.state.overnight_mode_changed.connect(self.win.header._btn_overnight.setChecked)
+        self.state.market_data_updated.connect(self.win._on_market_data_updated)
+        self.state.account_changed.connect(self.win.header.set_connected)
+        self.state.log_requested.connect(self.win.append_log)
         
-        # 컨트롤러-컨텍스트 직접 연결
-        self.tc.market_data_updated.connect(self.ctx.update_market_data)
+        # AppState 포트폴리오 변경 시 UI 패널 갱신
+        self.state.portfolio_updated.connect(self.win._on_portfolio_refresh)
+        
+        # 컨트롤러-상태 직접 연결
+        self.tc.market_data_updated.connect(self.state.update_market_data)
 
     def _bind_external(self):
         """텔레그램 등 외부 연동"""
@@ -129,3 +145,13 @@ class SignalManager:
             self.win._tg.cmd_stop.connect(lambda: self.win._on_auto_trade_toggle(False))
             self.win._tg.cmd_status.connect(self.win._on_tg_status_requested)
             self.win.append_log("[연결] 텔레그램 봇 시그널 바인딩 완료")
+    def _bind_watchdog(self):
+        """연결 감시(Self-Healing) 관련 시그널"""
+        wd = getattr(self.win, "_watchdog", None)
+        if not wd:
+            return
+            
+        wd.connection_lost.connect(self.win._on_connection_lost)
+        wd.connection_recovered.connect(self.win._on_connection_recovered)
+        wd.reconnect_failed.connect(self.win._on_reconnect_failed)
+        logger.info("[SignalManager] ConnectionWatchdog 시그널 연결 완료")

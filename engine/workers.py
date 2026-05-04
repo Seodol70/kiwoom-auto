@@ -646,7 +646,10 @@ class PortfolioWorker(QObject):
         _mw = self.parent()
         
         # _tr_busy 또는 _scan_in_progress 중이면 3초 뒤 재시도
-        if (_kw and getattr(_kw, "_tr_busy", False)) or (_mw and getattr(_mw, "_scan_in_progress", False)):
+        tc = getattr(_mw, 'trading_controller', None)
+        scan_busy = tc and getattr(tc, '_scan_in_progress', False)
+        
+        if (_kw and getattr(_kw, "_tr_busy", False)) or scan_busy:
             QTimer.singleShot(3000, self.sync)
             return
         try:

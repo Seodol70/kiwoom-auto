@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 """
-AppContext - 프로그램 전체의 상태를 관리하는 중앙 컨텍스트 클래스
+AppState - 프로그램 전체의 상태를 관리하는 중앙 상태 클래스
 """
 
 from PyQt5.QtCore import QObject, pyqtSignal
@@ -8,9 +7,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class AppContext(QObject):
+class AppState(QObject):
     """
-    프로그램의 모든 동적 상태를 관리하는 중앙 컨텍스트.
+    프로그램의 모든 동적 상태를 관리하는 중앙 상태 관리자.
     Single Source of Truth 역할을 하며, 상태 변경 시 시그널을 통해 UI/엔진에 알림을 보냅니다.
     """
     
@@ -20,6 +19,7 @@ class AppContext(QObject):
     risk_params_changed = pyqtSignal(float, float) # (tp_pct, sl_pct)
     account_changed = pyqtSignal(str, str)         # (account, server_mode)
     market_data_updated = pyqtSignal(float, float, float, float, bool) # (kp_cur, kp_chg, kd_cur, kd_chg, is_crash)
+    portfolio_updated = pyqtSignal(dict)           # {cash: int, positions: dict}
     log_requested = pyqtSignal(str)                # 전역 로그 요청
 
     def __init__(self):
@@ -33,6 +33,10 @@ class AppContext(QObject):
         self._account = "—"
         self._server_mode = "미연결"
         self._is_crash = False
+        
+        # 포트폴리오 상태
+        self._cash = 0
+        self._positions = {}
         
         # 지수 정보 캐시
         self._market_data = {
@@ -114,6 +118,20 @@ class AppContext(QObject):
         self._is_crash = is_crash
         # 지수 정보는 빈번하게 업데이트되므로 로그는 필요한 경우만 남기거나 생략
         self.market_data_updated.emit(kp_cur, kp_chg, kd_cur, kd_chg, is_crash)
+        
+    @property
+    def cash(self) -> int:
+        return self._cash
+        
+    @property
+    def positions(self) -> dict:
+        return self._positions
+
+    def update_portfolio(self, cash: int, positions: dict):
+        """잔고/포지션 정보 업데이트"""
+        self._cash = cash
+        self._positions = positions
+        self.portfolio_updated.emit({"cash": cash, "positions": positions})
 
     def append_log(self, msg: str):
         """UI 패널에 로그 출력을 요청하는 헬퍼"""
