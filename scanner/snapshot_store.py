@@ -21,6 +21,7 @@ import pandas as pd
 
 from scanner.models import StockSnapshot
 from scanner.universe import is_ordinary_stock, is_pure_equity_name, filter_equity_rows
+from scanner.snapshot import TickToCandleProcessor, MinuteCandle
 
 logger = logging.getLogger(__name__)
 
@@ -75,15 +76,10 @@ class SnapshotStore:
     def __init__(self) -> None:
         self._df   = pd.DataFrame(columns=_DF_COLS).set_index("code")
         self._mins: dict[str, list[float]] = {}   # code → 1분봉 종가
-        self._last_min: dict[str, int] = {}        # code → 마지막 기록된 분(minute)
-        self._min_vols:  dict[str, list[int]]   = {}   # code → 1분봉 별 거래량 델타
-        self._last_vol:  dict[str, int]         = {}   # code → 직전 분 경계 누적거래량
         self._min_opens: dict[str, list[float]] = {}   # code → 1분봉 시가
         self._min_highs: dict[str, list[float]] = {}   # code → 1분봉 고가
         self._min_lows:  dict[str, list[float]] = {}   # code → 1분봉 저가
-        self._cur_open:  dict[str, float]       = {}   # code → 현재 분 시가 (첫 틱)
-        self._cur_high:  dict[str, float]       = {}   # code → 현재 분 고가 (진행중)
-        self._cur_low:   dict[str, float]       = {}   # code → 현재 분 저가 (진행중)
+        self._min_vols:  dict[str, list[int]]   = {}   # code → 1분봉 별 거래량 델타
         self._chejan_str: dict[str, float]      = {}   # code → 체결강도 (FID 20)
         self._daily_data: dict[str, list[dict]] = {}   # code → 일봉 OHLCV 리스트 (최신순)
         self._daily_updated_at: dict[str, datetime] = {}  # code → 마지막 갱신 시각
@@ -99,6 +95,10 @@ class SnapshotStore:
         self._chg_pcts: dict[str, float] = {}          # code → 등락률 (고속 캐시)
         self._vols: dict[str, int] = {}                # code → 누적 거래량
         self._amt: dict[str, int] = {}                 # code → 누적 거래대금
+        
+        # [Phase 3] 분봉 생성 전담 프로세서
+        self._processor = TickToCandleProcessor()
+        
         self._lock = threading.Lock()
         self._daily_cache_path: Path = self._get_daily_cache_path()
         self._load_daily_cache()
@@ -228,37 +228,18 @@ class SnapshotStore:
             _cutoff_70 = _ts_now - 70.0
             while _tq and _tq[0][0] < _cutoff_70:
                 _tq.popleft()
-            cur_min = (datetime.now().hour * 60 +
-                       datetime.now().minute)
-            cp = float(current_price)
-            if self._last_min.get(code, -1) != cur_min:
-                if code in self._cur_open:
-                    def _append120(lst, val):
-                        lst.append(val)
-                        if len(lst) > 120:
-                            lst.pop(0)
-                    _append120(self._mins.setdefault(code, []),       cp)
-                    _append120(self._min_opens.setdefault(code, []),  self._cur_open[code])
-                    _append120(self._min_highs.setdefault(code, []),  self._cur_high[code])
-                    _append120(self._min_lows.setdefault(code,  []),  self._cur_low[code])
-                    prev_cumvol = self._last_vol.get(code, volume)
-                    delta = max(0, volume - prev_cumvol)
-                    _append120(self._min_vols.setdefault(code, []), delta)
-                    self._last_vol[code] = volume
-                self._last_min[code] = cur_min
-                self._cur_open[code] = cp
-                self._cur_high[code] = cp
-                self._cur_low[code]  = cp
-            else:
-                if code in self._cur_open:
-                    if cp > self._cur_high[code]:
-                        self._cur_high[code] = cp
-                    if cp < self._cur_low[code]:
-                        self._cur_low[code] = cp
-                else:
-                    self._cur_open[code] = cp
-                    self._cur_high[code] = cp
-                    self._cur_low[code]  = cp
+            # [Phase 3] 분봉 프로세서에게 위임
+            completed = self._processor.process_tick(code, float(current_price), volume)
+            if completed:
+                def _append_limit(lst, val, limit=120):
+                    lst.append(val)
+                    if len(lst) > limit: lst.pop(0)
+
+                _append_limit(self._mins.setdefault(code, []),      completed.close)
+                _append_limit(self._min_opens.setdefault(code, []), completed.open)
+                _append_limit(self._min_highs.setdefault(code, []), completed.high)
+                _append_limit(self._min_lows.setdefault(code, []),  completed.low)
+                _append_limit(self._min_vols.setdefault(code, []),  completed.volume)
 
     def get_snapshot(self, code: str) -> Optional[StockSnapshot]:
         """단일 종목 스냅샷을 반환한다 (API 호출 없음). 락 범위 최소화 버전."""
@@ -503,6 +484,15 @@ class SnapshotStore:
             self._min_highs[code]  = [float(c["high"])   for c in candles if c.get("high")]
             self._min_lows[code]   = [float(c["low"])    for c in candles if c.get("low")]
             self._min_vols[code]   = [int(c.get("volume", 0)) for c in candles]
+            
+            # [Phase 3] 프로세서 동기화
+            if self._mins[code]:
+                now = datetime.now()
+                # 마지막 분봉이 현재 분이면 last_min을 현재분으로 설정하여 중복 생성 방지
+                # TR 데이터는 과거 데이터이므로 단순히 0으로 두거나 실제 시간을 파싱해야 함
+                # 여기선 안전하게 마지막 틱 기반 동기화만 수행
+                last_vol = int(getattr(candles[-1], "cum_volume", 0) or candles[-1].get("volume", 0))
+                self._processor.set_initial_state(code, -1, last_vol)
 
     @staticmethod
     def _get_1min_cache_path() -> Path:
@@ -537,6 +527,10 @@ class SnapshotStore:
                         self._min_lows[code]   = [float(x) for x in lows]
                         self._min_vols[code]   = [int(x)   for x in vols]
                         loaded += 1
+                        
+                        # [Phase 3] 프로세서 동기화
+                        if self._mins[code]:
+                            self._processor.set_initial_state(code, -1, self._vols.get(code, 0))
             if loaded:
                 logger.info("[1분봉캐시] 로드 완료 — %d종목 (%s)", loaded, self._1min_cache_path.name)
         except Exception as e:

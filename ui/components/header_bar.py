@@ -314,119 +314,197 @@ class HeaderBar(QWidget):
 
 
 class ManualBuyDialog(QDialog):
-    """수동 매수 확인 다이얼로그 — 시장가/지정가, 수량 입력."""
-
+    """수동 매수 확인 다이얼로그 — 현대적인 UI 디자인 적용"""
 
     def __init__(self, code: str, name: str, price: int, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("수동 매수")
-        self.setFixedWidth(280)
+        self.setWindowTitle("Manual Order - 수동 매수")
+        self.setFixedWidth(360)
         self.setModal(True)
-
+        
+        # ── 테마 스타일링 ───────────────────────────────────────────────
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e2e;
+                border: 1px solid #313244;
+                border-radius: 8px;
+            }
+            QLabel {
+                color: #cdd6f4;
+            }
+            QComboBox, QSpinBox, QDoubleSpinBox {
+                background-color: #313244;
+                color: #cdd6f4;
+                border: 1px solid #45475a;
+                border-radius: 4px;
+                padding: 4px;
+                min-height: 25px;
+            }
+            QComboBox::drop-down {
+                border: 0px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #313244;
+                color: #cdd6f4;
+                selection-background-color: #585b70;
+            }
+            QPushButton#btn_ok {
+                background-color: #a6e3a1;
+                color: #11111b;
+                border-radius: 6px;
+                font-weight: bold;
+                padding: 8px;
+            }
+            QPushButton#btn_ok:hover {
+                background-color: #94e2d5;
+            }
+            QPushButton#btn_cancel {
+                background-color: #45475a;
+                color: #cdd6f4;
+                border-radius: 6px;
+                padding: 8px;
+            }
+            QPushButton#btn_cancel:hover {
+                background-color: #585b70;
+            }
+        """)
 
         self._code  = code
         self._price = price
 
+        main_lay = QVBoxLayout(self)
+        main_lay.setContentsMargins(20, 20, 20, 20)
+        main_lay.setSpacing(15)
 
-        lay = QVBoxLayout(self)
-        lay.setSpacing(10)
+        # ── 상단 종목 정보 헤더 ────────────────────────────────────────
+        header_lay = QVBoxLayout()
+        header_lay.setSpacing(5)
+        
+        self._lbl_name = QLabel(name)
+        self._lbl_name.setFont(QFont("Malgun Gothic", 14, QFont.Bold))
+        self._lbl_name.setStyleSheet("color: #89dceb;") # Sky Blue
+        self._lbl_name.setAlignment(Qt.AlignCenter)
+        
+        self._lbl_code = QLabel(f"Ticker: {code}")
+        self._lbl_code.setFont(QFont("Consolas", 10))
+        self._lbl_code.setStyleSheet("color: #7f849c;") # Overlay
+        self._lbl_code.setAlignment(Qt.AlignCenter)
+        
+        header_lay.addWidget(self._lbl_name)
+        header_lay.addWidget(self._lbl_code)
+        main_lay.addLayout(header_lay)
 
+        main_lay.addWidget(_hline())
 
-        # ── 종목 정보 ──────────────────────────────────────────────────
-        info = QLabel(f"<b>{name}</b>  ({code})")
-        info.setAlignment(Qt.AlignCenter)
-        lay.addWidget(info)
+        # ── 입력 폼 (그리드 레이아웃) ──────────────────────────────────
+        from ui.components.common import _NoWheelSpinBox
+        
+        form_lay = QGridLayout()
+        form_lay.setColumnStretch(1, 1)
+        form_lay.setVerticalSpacing(12)
+        form_lay.setHorizontalSpacing(15)
 
-
-        self._lbl_price = QLabel(f"현재가: {price:,} 원")
-        self._lbl_price.setAlignment(Qt.AlignCenter)
-        lay.addWidget(self._lbl_price)
-
-
-        lay.addWidget(_hline())
-
-
-        # ── 주문유형 ──────────────────────────────────────────────────
-        g = QGridLayout()
-        g.setColumnStretch(1, 1)
-
-
-        g.addWidget(QLabel("주문유형"), 0, 0)
+        # 주문 유형
+        lbl_type = QLabel("주문 유형")
+        lbl_type.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        form_lay.addWidget(lbl_type, 0, 0)
+        
         self._combo_type = QComboBox()
-        self._combo_type.addItems(["시장가", "지정가"])
+        self._combo_type.addItems(["시장가 (Market)", "지정가 (Limit)"])
         self._combo_type.currentTextChanged.connect(self._on_type_changed)
-        g.addWidget(self._combo_type, 0, 1)
+        form_lay.addWidget(self._combo_type, 0, 1)
 
-
-        g.addWidget(QLabel("수량"), 1, 0)
-        self._spin_qty = QSpinBox()
-        self._spin_qty.setRange(1, 9999)
+        # 수량
+        lbl_qty = QLabel("주문 수량")
+        lbl_qty.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        form_lay.addWidget(lbl_qty, 1, 0)
+        
+        self._spin_qty = _NoWheelSpinBox()
+        self._spin_qty.setRange(1, 99999)
         self._spin_qty.setValue(10)
         self._spin_qty.setSuffix(" 주")
+        self._spin_qty.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self._spin_qty.valueChanged.connect(self._update_estimate)
-        g.addWidget(self._spin_qty, 1, 1)
+        form_lay.addWidget(self._spin_qty, 1, 1)
 
-
-        g.addWidget(QLabel("지정가"), 2, 0)
-        self._spin_lmt = QSpinBox()
+        # 가격 (지정가 전용)
+        self._lbl_lmt = QLabel("지정 가격")
+        self._lbl_lmt.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        self._lbl_lmt.setStyleSheet("color: #6c7086;") # 기본은 비활성 색상
+        form_lay.addWidget(self._lbl_lmt, 2, 0)
+        
+        self._spin_lmt = _NoWheelSpinBox()
         self._spin_lmt.setRange(1, 99_999_999)
         self._spin_lmt.setValue(price)
         self._spin_lmt.setSingleStep(10)
         self._spin_lmt.setSuffix(" 원")
-        self._spin_lmt.setEnabled(False)   # 시장가가 기본
+        self._spin_lmt.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._spin_lmt.setEnabled(False) # 초기 시장가 모드
         self._spin_lmt.valueChanged.connect(self._update_estimate)
-        g.addWidget(self._spin_lmt, 2, 1)
+        form_lay.addWidget(self._spin_lmt, 2, 1)
 
+        main_lay.addLayout(form_lay)
 
-        lay.addLayout(g)
+        # ── 하단 예상 금액 영역 ────────────────────────────────────────
+        est_frame = QFrame()
+        est_frame.setStyleSheet("background-color: #181825; border-radius: 6px; padding: 10px;")
+        est_lay = QVBoxLayout(est_frame)
+        
+        self._lbl_est_title = QLabel("예상 주문 금액")
+        self._lbl_est_title.setFont(QFont("Malgun Gothic", 9))
+        self._lbl_est_title.setStyleSheet("color: #9399b2;")
+        self._lbl_est_title.setAlignment(Qt.AlignCenter)
+        
+        self._lbl_est_val = QLabel("0 원")
+        self._lbl_est_val.setFont(QFont("Malgun Gothic", 15, QFont.Bold))
+        self._lbl_est_val.setStyleSheet("color: #fab387;") # Peach Accent
+        self._lbl_est_val.setAlignment(Qt.AlignCenter)
+        
+        est_lay.addWidget(self._lbl_est_title)
+        est_lay.addWidget(self._lbl_est_val)
+        main_lay.addWidget(est_frame)
 
+        # ── 푸터 버튼 ──────────────────────────────────────────────────
+        btn_lay = QHBoxLayout()
+        btn_lay.setSpacing(10)
+        
+        self._btn_ok = QPushButton("매수 주문 실행")
+        self._btn_ok.setObjectName("btn_ok")
+        self._btn_ok.clicked.connect(self.accept)
+        
+        self._btn_cancel = QPushButton("닫기")
+        self._btn_cancel.setObjectName("btn_cancel")
+        self._btn_cancel.clicked.connect(self.reject)
+        
+        btn_lay.addWidget(self._btn_cancel, 1)
+        btn_lay.addWidget(self._btn_ok, 2)
+        main_lay.addLayout(btn_lay)
 
-        # ── 예상금액 ──────────────────────────────────────────────────
-        self._lbl_est = QLabel()
-        self._lbl_est.setAlignment(Qt.AlignCenter)
-        self._lbl_est.setStyleSheet("color:#fab387; font-weight:bold;")
-        lay.addWidget(self._lbl_est)
         self._update_estimate()
 
-
-        lay.addWidget(_hline())
-
-
-        # ── 버튼 ──────────────────────────────────────────────────────
-        btns = QDialogButtonBox()
-        self._btn_ok     = btns.addButton("매수 확인", QDialogButtonBox.AcceptRole)
-        self._btn_cancel = btns.addButton("취소",      QDialogButtonBox.RejectRole)
-        self._btn_ok.setStyleSheet("background:#a6e3a1; color:#1e1e2e; font-weight:bold;")
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        lay.addWidget(btns)
-
-
-    # ── 내부 슬롯 ────────────────────────────────────────────────────
     def _on_type_changed(self, t: str) -> None:
-        is_limit = (t == "지정가")
+        is_limit = ("지정가" in t)
         self._spin_lmt.setEnabled(is_limit)
+        color = "#89dceb" if is_limit else "#6c7086"
+        self._lbl_lmt.setStyleSheet(f"color: {color};")
         self._update_estimate()
-
 
     def _update_estimate(self) -> None:
         qty = self._spin_qty.value()
-        if self._combo_type.currentText() == "지정가":
+        if "지정가" in self._combo_type.currentText():
             p = self._spin_lmt.value()
         else:
             p = self._price
-        self._lbl_est.setText(f"예상금액: {qty * p:,} 원")
+        self._lbl_est_val.setText(f"{qty * p:,} 원")
 
-
-    # ── 결과 접근 ────────────────────────────────────────────────────
     def result_values(self) -> tuple[int, str, int]:
         """(수량, 주문유형코드, 가격) — 시장가=03, 지정가=00"""
-        qty  = self._spin_qty.value()
-        if self._combo_type.currentText() == "지정가":
+        qty = self._spin_qty.value()
+        if "지정가" in self._combo_type.currentText():
             otype = "00"
             oprice = self._spin_lmt.value()
         else:
-            otype  = "03"
+            otype = "03"
             oprice = 0
         return qty, otype, oprice
 

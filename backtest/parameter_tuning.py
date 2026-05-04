@@ -48,7 +48,9 @@ def jang_dong_min_strategy(
     rsi_overbought: float = 70.0,
 ) -> str:
     """조정 가능한 파라미터를 갖는 장동민 전략"""
-    from strategy.jang_dong_min import calc_ma, calc_rsi
+    from scanner.indicator_service import IndicatorService
+    calc_ma = IndicatorService.calc_ma
+    calc_rsi = IndicatorService.calc_rsi
 
     window = closes[: idx + 1]
 

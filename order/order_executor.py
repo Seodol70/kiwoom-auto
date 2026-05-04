@@ -38,6 +38,7 @@ class OrderExecutor:
         name: str,
         qty: int,
         price: int = 0,
+        price_type: str = "",
     ) -> tuple[int, str]:
         """
         Kiwoom SendOrder 호출.
@@ -48,13 +49,15 @@ class OrderExecutor:
             name: 종목명
             qty: 수량
             price: 지정가 (0이면 시장가)
+            price_type: "00"(지정가), "03"(시장가) 등. 비어있으면 price에 따라 자동 결정.
 
         Returns:
             (ret: int, rq_name: str)
-            - ret == 0: 성공
-            - ret != 0: 실패
         """
-        price_type = PriceType.MARKET if price == 0 else PriceType.LIMIT
+        # price_type 이 명시되지 않은 경우 자동 결정 (하위 호환)
+        if not price_type:
+            price_type = PriceType.MARKET if price == 0 else PriceType.LIMIT
+            
         rq_name = f"{'매수' if order_type == OrderType.BUY else '매도'}_{code}"
 
         ret = self._kiwoom._ocx.dynamicCall(

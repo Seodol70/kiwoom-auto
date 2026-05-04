@@ -234,10 +234,18 @@ class TradingController(QObject):
         if qty <= 0:
             return False, f"⚠ 수동매수 오류 — 수량 {qty}주 부족"
         
+        if not self._kiwoom or not self._kiwoom.get_login_state():
+            return False, "⚠ 수동매수 실패 — 키움 API 미연결 상태입니다"
+
         # OrderManager의 buy 메서드 호출 (order_type: "03"=시장가, "00"=지정가)
-        self._order_mgr.buy(code, name, qty, price=price, order_type=order_type)
+        order_no = self._order_mgr.buy(code, name, qty, price=price, order_type=order_type)
+        
         otype_str = "시장가" if order_type == "03" else f"지정가({price:,}원)"
-        return True, f"[수동매수] {name}({code}) {qty}주 {otype_str} 요청"
+        
+        if not order_no or order_no == "0":
+            return False, f"❌ [수동매수] {name}({code}) 주문 전송 실패 (API 리턴값 확인 필요)"
+            
+        return True, f"✅ [수동매수] {name}({code}) {qty}주 {otype_str} 요청 완료 (ID: {order_no})"
 
     def tick_investor_refresh(self) -> bool:
         """수급 갱신 타이머 콜백 — 시간·상태 조건 충족 시 TR 호출. 반환: 조회 여부"""

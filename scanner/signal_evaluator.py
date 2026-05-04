@@ -122,10 +122,10 @@ def check_testa_alignment(
         return None
 
 
-    from strategy.jang_dong_min import calc_ma
-    ma10 = calc_ma(closes, 10)
-    ma20 = calc_ma(closes, 20)
-    ma50 = calc_ma(closes, 50)
+    from scanner.indicator_service import IndicatorService
+    ma10 = IndicatorService.calc_ma(closes, 10)
+    ma20 = IndicatorService.calc_ma(closes, 20)
+    ma50 = IndicatorService.calc_ma(closes, 50)
 
 
     if any(v is None for v in [ma10, ma20, ma50]):
@@ -311,8 +311,8 @@ def check_disparity_from_ma(
     closes = snap.closes_1min
     if len(closes) < ma_period:
         return None   # 데이터 부족 시 bypass (초반 20분간 허용)
-    from strategy.jang_dong_min import calc_ma
-    ma = calc_ma(closes, ma_period)
+    from scanner.indicator_service import IndicatorService
+    ma = IndicatorService.calc_ma(closes, ma_period)
     if ma is None or ma <= 0:
         return None
     disp = (snap.current_price - ma) / ma * 100
@@ -338,8 +338,8 @@ def check_ema20_filter(snap: StockSnapshot, period: int = 20) -> Optional[str]:
         ScannerLogger.rejected(snap.code, snap.name, "EMA20",
                                f"데이터 부족 ({len(closes)}/{period})")
         return None
-    from strategy.jang_dong_min import calc_ema
-    ema20 = calc_ema(closes, period)
+    from scanner.indicator_service import IndicatorService
+    ema20 = IndicatorService.calc_ema(closes, period)
     if ema20 is None:
         return None
     if snap.current_price <= ema20:
@@ -783,12 +783,12 @@ def check_eod_entry(
         return None
 
 
-    from strategy.jang_dong_min import get_daily_context, check_daily_alignment
+    from scanner.indicator_service import IndicatorService
 
 
     # ① 일봉 20MA 상방 + 신고가 근처
     _near_thr = float(getattr(cfg, "eod_near_high_threshold_pct", 3.0))
-    _dctx = get_daily_context(snap.daily_closes, snap.current_price, _near_thr)
+    _dctx = IndicatorService.get_daily_context(snap.daily_closes, snap.current_price, _near_thr)
 
 
     if not _dctx["above_ma20"] and _dctx["daily_ma20"] > 0:
@@ -809,7 +809,8 @@ def check_eod_entry(
 
 
     # ② 일봉 정배열
-    if not check_daily_alignment(snap.daily_closes):
+    _align = IndicatorService.check_daily_alignment(snap.daily_closes, snap.current_price)
+    if not _align["is_aligned"]:
         ScannerLogger.rejected(
             snap.code, snap.name, "EOD_ALIGN",
             f"일봉 정배열 미충족 (5MA > 10MA > 20MA)",
@@ -1329,7 +1330,8 @@ def check_jdm_entry(
     # [NEW] 일봉 정배열 확인 (5일 > 10일 > 20일)
     # 일봉 데이터 20개 미만(로드 전)이면 fail-open — 데이터 없다고 차단하지 않음
     if cfg.daily_alignment_enabled and len(snap.daily_closes) >= 20:
-        if not check_daily_alignment(snap.daily_closes):
+        _align = IndicatorService.check_daily_alignment(snap.daily_closes, snap.current_price)
+        if not _align["is_aligned"]:
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM_ALIGN",
                 f"일봉 정배열 미충족 (5MA > 10MA > 20MA, 데이터={len(snap.daily_closes)}개)",
@@ -1338,9 +1340,8 @@ def check_jdm_entry(
 
 
     # [NEW] 일봉 20MA 가격 필터 — 현재가가 일봉 20일선 아래면 차단 (가짜 신호 여과)
-    from strategy.jang_dong_min import get_daily_context as _get_daily_ctx
     _near_high_thr = float(getattr(cfg, "daily_near_high_threshold_pct", 3.0))
-    _daily_ctx = _get_daily_ctx(snap.daily_closes, snap.current_price, _near_high_thr)
+    _daily_ctx = IndicatorService.get_daily_context(snap.daily_closes, snap.current_price, _near_high_thr)
     if getattr(cfg, "daily_ma20_filter_enabled", True):
         if not _daily_ctx["above_ma20"] and _daily_ctx["daily_ma20"] > 0:
             ScannerLogger.rejected(
@@ -1386,9 +1387,9 @@ def check_pullback_entry(
     if len(closes) < 20:
         return None
 
-    from strategy.jang_dong_min import calc_ema, calc_rsi
-    ema20 = calc_ema(closes, 20)
-    rsi = calc_rsi(closes, 14)
+    from scanner.indicator_service import IndicatorService
+    ema20 = IndicatorService.calc_ema(closes, 20)
+    rsi = IndicatorService.calc_rsi(closes, 14)
     if ema20 is None or rsi is None:
         return None
 

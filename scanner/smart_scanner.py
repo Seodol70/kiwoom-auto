@@ -41,7 +41,12 @@ from typing import Callable, ClassVar, Optional
 import pandas as pd
 
 
-from scanner.universe import is_ordinary_stock, is_pure_equity_name, filter_equity_rows
+from scanner.universe import (
+    UniverseManager, is_ordinary_stock, is_pure_equity_name, filter_equity_rows,
+    format_trade_amount_korean, apply_watch_pool_cap, apply_universe_score_cap
+)
+from scanner.snapshot_store import SnapshotStore
+from scanner.indicator_service import IndicatorService
 from PyQt5.QtCore import QTimer
 from rich.console import Console
 from rich.live import Live
@@ -148,65 +153,18 @@ _EOK_WON = 100_000_000
 
 
 
-def format_trade_amount_korean(amount_won: int) -> str:
-    """
-    거래대금(원)을 읽기 편한 한글 형식으로 표기.
-
-
-    예시:
-    - 487,000,000,000원 → "4,870억" (조 미포함) 또는 "0.487조"
-    - 1,234,000,000,000원 → "1.2조 340억" (조 포함 시 소수점)
-    - 12,340,000원 → "1,234만원"
-    """
-    try:
-        n = int(amount_won)
-    except (TypeError, ValueError):
-        return "0원"
-    if n <= 0:
-        return "0원"
-
-
-    jo = n // _JO_WON  # 1조 = 1,000,000,000,000
-    rem = n % _JO_WON
-    eok_int = rem // _EOK_WON  # 1억 = 100,000,000
-
-
-    parts: list[str] = []
-
-
-    # 조 단위 표기 (1조 이상)
-    if jo > 0:
-        if eok_int > 0:
-            # 조와 억을 함께 표시 (예: "1.2조 340억")
-            jo_decimal = jo + eok_int / 1_0000  # 1조 + n억을 소수점으로
-            parts.append(f"{jo_decimal:.1f}조")
-        else:
-            # 억이 없으면 조만 (예: "1조")
-            parts.append(f"{jo}조")
-    elif eok_int > 0:
-        # 1조 미만이면 억으로 표시 (예: "1,234억")
-        parts.append(f"{eok_int:,}억")
-    else:
-        # 1억 미만이면 만원, 원으로 표시
-        man = n // 10_000
-        if man > 0:
-            return f"{man:,}만원"
-        return f"{n:,}원"
-
-
-    return " ".join(parts)
-
-
 
 
 def format_trade_amount_growth(current: int, baseline: Optional[int]) -> str:
     """거래대금 증가율(%) — baseline 이 없거나 0이면 '—'."""
     if baseline is None or baseline <= 0:
         return "증가율(9시대비) —"
+    from scanner.universe import UniverseManager
+    dummy_mgr = UniverseManager(None) # 임시 인스턴스
     pct = (current - baseline) / baseline * 100.0
     return (
         f"증가율(9시대비) {pct:+.1f}% "
-        f"(기준 {format_trade_amount_korean(baseline)})"
+        f"(기준 {dummy_mgr.format_trade_amount(baseline)})"
     )
 
 
@@ -237,146 +195,7 @@ from scanner.config import SmartScannerConfig
 
 
 
-def apply_watch_pool_cap(rows: list[dict], watch_pool_max: int) -> list[dict]:
-    """거래대금 내림차순으로 상위 watch_pool_max 종목만 유지. (레거시 — apply_universe_score_cap 사용 권장)"""
-    if not rows:
-        return []
-    rows = sorted(
-        rows,
-        key=lambda r: int(r.get("trade_amount", 0) or 0),
-        reverse=True,
-    )
-    return rows[:watch_pool_max]
-
-
-
-
-def _vol_pace_ratio(today_vol: int, prev_volume: int) -> float:
-    """
-    거래량 페이스 비율 (시간대 편향 보정).
-
-
-    단순 today_vol/prev_volume 은 장 초반(09:00~09:30)에 항상 극소값이 되어
-    vol_ratio 가중치가 무의미해지는 문제가 있다.
-
-
-    이를 해결하기 위해 '경과시간 대비 기대 거래량'으로 정규화한다:
-        pace_ratio = today_vol / (prev_volume × elapsed_ratio)
-
-
-    여기서 elapsed_ratio = 장 시작 후 경과 분 / 390(총 거래 시간 분).
-    최소 5분 보정으로 장 정확히 열리는 순간의 분모 0 방지.
-
-
-    해석: pace_ratio = 1.0 → 전일과 동일한 속도 / 2.0 → 전일의 2배 속도
-    이 값은 시간대에 무관하게 동일한 의미를 가진다.
-
-
-    Returns
-    -------
-    pace_ratio : float  (0.0 이면 계산 불가 — 중립 처리)
-    """
-    if prev_volume <= 0 or today_vol <= 0:
-        return 0.0
-
-
-    _MARKET_OPEN_MIN   = 9 * 60   # 09:00 분 기준
-    _TOTAL_TRADING_MIN = 390      # 09:00 ~ 15:30
-    _MIN_ELAPSED_MIN   = 5        # 극초반 분모 0 방어
-
-
-    now = datetime.now().time()   # 모듈 최상위 from datetime import datetime
-    now_min = now.hour * 60 + now.minute
-    elapsed = max(now_min - _MARKET_OPEN_MIN, _MIN_ELAPSED_MIN)
-
-
-    # 장외 시간(사전/사후)은 전체 거래 시간 기준으로 클램프
-    elapsed = min(elapsed, _TOTAL_TRADING_MIN)
-    elapsed_ratio = elapsed / _TOTAL_TRADING_MIN
-
-
-    return today_vol / (prev_volume * elapsed_ratio)
-
-
-
-
-def apply_universe_score_cap(
-    rows: list[dict],
-    watch_pool_max: int,
-    cfg: "SmartScannerConfig",
-    prev_volumes: dict[str, int],
-) -> list[dict]:
-    """
-    거래대금 순위 × 거래량 페이스 × 등락률을 복합 스코어링해 상위 watch_pool_max 종목 반환.
-
-
-    Hybrid score = trade_amt_score×w1 + vol_pace_score×w2 + chg_pct_score×w3
-
-
-    vol_pace_score 는 거래량 페이스 비율(_vol_pace_ratio) 기반:
-      - pace_ratio  = today_vol / (prev_volume × elapsed_ratio)
-      - 장 초반이어도 "같은 시간대 기준 전일 대비 몇 배 속도인지"로 비교
-      - min(pace_ratio / 3.0, 1.0)  — 전일 대비 3배 속도=만점
-      - 전일 데이터 없으면 0.5 (중립)
-    """
-    if not rows:
-        return []
-
-
-    n = len(rows)
-    w_amt = getattr(cfg, "universe_trade_amt_weight", 0.4)
-    w_vol = getattr(cfg, "universe_vol_ratio_weight", 0.4)
-    w_chg = getattr(cfg, "universe_chg_pct_weight",   0.2)
-
-
-    # 거래대금 내림차순 순위 → 정규화 점수
-    sorted_by_amt = sorted(rows, key=lambda r: int(r.get("trade_amount", 0) or 0), reverse=True)
-    amt_rank: dict[str, float] = {}
-    for i, r in enumerate(sorted_by_amt):
-        # i=0 (1위) → 1.0, i=n-1 (꼴찌) → 0.0
-        amt_rank[r["code"]] = 1.0 - (i / max(n - 1, 1))
-
-
-    scored: list[tuple[float, dict]] = []
-    for r in rows:
-        code = r["code"]
-
-
-        # ① 거래대금 스코어
-        s_amt = amt_rank.get(code, 0.5)
-
-
-        # ② 거래량 페이스 스코어 (시간대 편향 보정)
-        pv = prev_volumes.get(code, 0)
-        today_vol = int(r.get("volume", 0) or 0)
-        pace = _vol_pace_ratio(today_vol, pv)
-        if pace > 0:
-            r["vol_ratio"]   = round(pace, 4)  # SnapshotStore에 시간 보정 배율 저장
-            r["prev_volume"] = pv
-            s_vol = min(pace / 3.0, 1.0)       # pace 3배 = 만점
-        else:
-            r["vol_ratio"]   = 0.0
-            r["prev_volume"] = pv
-            s_vol = 0.5                         # 전일 데이터 없으면 중립
-
-
-        # ③ 등락률 스코어
-        chg = float(r.get("change_pct", 0) or 0)
-        s_chg = min(max(chg / 10.0, 0.0), 1.0)
-
-
-        score = s_amt * w_amt + s_vol * w_vol + s_chg * w_chg
-        scored.append((score, r))
-
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    result = [r for _, r in scored[:watch_pool_max]]
-    logger.debug(
-        "[유니버스스코어] pool %d→%d, top5: %s",
-        n, len(result),
-        [(r["code"], round(sc, 3)) for sc, r in scored[:5]],
-    )
-    return result
+# (Universe scoring logic moved to scanner.universe.UniverseManager)
 
 
 
@@ -518,10 +337,11 @@ class SmartScanner:
         # ① DataFrame 캐시
         self.store   = SnapshotStore()
 
+        # [NEW] 유니버스 관리자 (필터링/스코어링 전담)
+        self.universe_mgr = UniverseManager(self.cfg)
 
         # TR 요청 큐 — 키움 API 간격 보장
         self._tr_q   = TRRequestQueue()
-
 
         # 컴포넌트
         self.top_mgr = TopVolumeManager(
@@ -532,7 +352,6 @@ class SmartScanner:
             screen_no=self.cfg.screen_realtime,
             max_subs=self.cfg.realtime_sub_max,
         )
-
 
         # ③ 터미널 뷰
         self.display = ScannerDisplay(self.store, self.cfg)
@@ -586,10 +405,8 @@ class SmartScanner:
         self._last_volume_rows: list[dict] = []
         self._last_volume_updated: float = 0.0  # 마지막 캐시 갱신 시각 (time.monotonic)
         self._opt10030_fetching: bool = False   # opt10030 중복 호출 방지 플래그
-        # 전일 거래량 캐시 — hybrid universe score vol_ratio 계산용
-        # {code: prev_volume}; 매일 장 마감(15:20) save_prev_volumes() 로 갱신
-        self._prev_volumes: dict[str, int] = {}
-        self._load_prev_volumes()
+        # 전일 거래량 캐시 (UniverseManager에서 관리)
+        self._prev_volumes = self.universe_mgr._prev_volumes
         # 동일 종목/신호 중복 emit 방지 (signal_cooldown_sec)
         self._last_signal_ts: dict[tuple[str, str], float] = {}
 
@@ -600,68 +417,22 @@ class SmartScanner:
     # ── 전일 거래량 캐시 save/load ────────────────────────────────────────────
 
 
-    def _prev_volumes_path(self) -> Path:
-        return Path("logs") / "prev_volumes.json"
-
-
-    def _load_prev_volumes(self) -> None:
-        """
-        logs/prev_volumes.json 에서 전일 거래량 캐시를 로드.
-        파일에 저장된 날짜가 오늘이거나 4일 이상 지난 경우 사용하지 않는다.
-        """
-        # json 은 모듈 최상위에서 이미 임포트됨
-        path = self._prev_volumes_path()
-        if not path.exists():
-            logger.info("[prev_volumes] 캐시 파일 없음 — vol_ratio 중립(0.5)으로 동작")
-            return
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            saved_date_str = data.get("date", "")
-            saved_date = date.fromisoformat(saved_date_str) if saved_date_str else None
-            today = date.today()
-            if saved_date is None:
-                logger.warning("[prev_volumes] 날짜 정보 없음 — 캐시 무효")
-                return
-            if saved_date >= today:
-                logger.info("[prev_volumes] 저장 날짜(%s)가 오늘 이후 — 무효 (장중 저장본)", saved_date)
-                return
-            age_days = (today - saved_date).days
-            if age_days > 4:
-                logger.warning("[prev_volumes] 캐시가 %d일 경과 — 무효 (주말/연휴 등)", age_days)
-                return
-            volumes: dict = data.get("volumes", {})
-            self._prev_volumes = {k: int(v) for k, v in volumes.items() if int(v or 0) > 0}
-            logger.info("[prev_volumes] 로드 완료 — %d종목 (%s 기준)", len(self._prev_volumes), saved_date)
-        except Exception as e:
-            logger.warning("[prev_volumes] 로드 실패: %s", e)
-
-
     def save_prev_volumes(self) -> None:
-        """
-        현재 SnapshotStore의 거래량을 전일 거래량으로 저장 (15:20 강제청산 시 호출).
-        저장 형식: {"date": "YYYY-MM-DD", "volumes": {"code": volume, ...}}
-        """
-        # json 은 모듈 최상위에서 이미 임포트됨
+        """현재 SnapshotStore의 거래량을 전일 거래량으로 저장 (15:20 강제청산 시 호출)."""
         try:
             with self.store._lock:
                 snap_df = self.store._df.copy()
             if snap_df.empty or "volume" not in snap_df.columns:
-                logger.warning("[prev_volumes] 스냅샷 데이터 없음 — 저장 스킵")
                 return
             volumes = {
                 str(code): int(row["volume"])
                 for code, row in snap_df.iterrows()
                 if int(row.get("volume", 0) or 0) > 0
             }
-            path = self._prev_volumes_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"date": date.today().isoformat(), "volumes": volumes}, f, ensure_ascii=False)
-            logger.info("[prev_volumes] 저장 완료 — %d종목 (%s)", len(volumes), date.today())
-            self._prev_volumes = volumes  # 메모리 캐시도 갱신
+            self.universe_mgr.save_prev_volumes(volumes)
+            self._prev_volumes = volumes # 메모리 캐시 동기화
         except Exception as e:
-            logger.warning("[prev_volumes] 저장 실패: %s", e)
+            logger.warning("[SmartScanner] 전일 거래량 저장 실패: %s", e)
 
 
     def _roll_amt_baseline_date(self) -> None:
@@ -685,7 +456,7 @@ class SmartScanner:
         """Pre-Filter 등 로그용: 조·억 표기 + 9시대비 증가율."""
         a = int(amt or 0)
         self._touch_trade_amt_baseline(code, a)
-        ta = format_trade_amount_korean(a)
+        ta = self.universe_mgr.format_trade_amount(a)
         gr = format_trade_amount_growth(a, self._amt_baseline.get(code))
         return f"거래대금 {ta} · {gr}"
 
@@ -756,7 +527,7 @@ class SmartScanner:
 
 
         rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n)
-        rows, _ = filter_equity_rows(rows)
+        rows, _ = self.universe_mgr.filter_equity_rows(rows)
         mc = self.cfg.max_change_pct
         _n0 = len(rows)
         rows = [r for r in rows if float(r.get("change_pct", 0) or 0) < mc]
@@ -765,7 +536,7 @@ class SmartScanner:
                 "  등락률 상한 %.1f%% 미만만 유지 — %d → %d종목",
                 mc, _n0, len(rows),
             )
-        rows = apply_universe_score_cap(rows, self.cfg.watch_pool_max, self.cfg, self._prev_volumes)
+        rows = self.universe_mgr.apply_scoring_cap(rows, self.cfg.watch_pool_max)
         if not rows:
             logger.warning("  ⚠ Pre-Filter — 필터 후 종목 없음, Pre-Filter 생략")
             return
@@ -876,7 +647,6 @@ class SmartScanner:
 
         # ②-bis 요셉 시그널 추세 단계 갱신 (분 단위 1회)
         if getattr(self.cfg, "yosep_trend_enabled", True):
-            from scanner.indicator_service import IndicatorService
             trend_level = IndicatorService.get_trend_status(
                 closes=list(snap.closes_1min or []),
                 highs=list(snap.highs_1min or []),
@@ -981,7 +751,8 @@ class SmartScanner:
         reason = " | ".join(r for r in [r_ema20, r_disp, r_jdm] if r)
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
         # 일봉 맥락 — TP 상향 여부 판단
-        from strategy.jang_dong_min import get_daily_context as _gdc
+        from scanner.indicator_service import IndicatorService
+        _gdc = IndicatorService.get_daily_context
         _dctx = _gdc(snap.daily_closes, snap.current_price,
                      float(getattr(self.cfg, "daily_near_high_threshold_pct", 3.0)))
         return ScanSignal(

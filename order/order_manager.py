@@ -918,12 +918,10 @@ class OrderManager(QObject):
         name:  str,
         qty:   int,
         price: int = 0,
+        order_type: str = "",
     ) -> str:
         """시장가(price=0) 또는 지정가 매수 주문을 전송한다."""
-        # sync_balance() 는 주문 직후 호출하지 않음:
-        # 모의투자 서버가 즉시 0원 반환해 예수금을 잘못 덮어쓰는 문제 방지.
-        # 정확한 잔고는 OnReceiveChejanData 콜백 + 주기 sync_balance(5분)에서 반영.
-        return self._send(OrderType.BUY, code, name, qty, price)
+        return self._send(OrderType.BUY, code, name, qty, price, order_type)
 
     @staticmethod
     def _price_tick(price: int) -> int:
@@ -1097,9 +1095,10 @@ class OrderManager(QObject):
         name:  str,
         qty:   int,
         price: int = 0,
+        order_type: str = "",
     ) -> str:
         """시장가 또는 지정가 매도 주문을 전송한다."""
-        return self._send(OrderType.SELL, code, name, qty, price)
+        return self._send(OrderType.SELL, code, name, qty, price, order_type)
 
     def partial_exit(
         self,
@@ -1155,9 +1154,10 @@ class OrderManager(QObject):
         name: str,
         qty:  int,
         price: int,
+        price_type: str = "",
     ) -> str:
         # OrderExecutor에 위임
-        ret, rq_name = self._executor.send(order_type, code, name, qty, price)
+        ret, rq_name = self._executor.send(order_type, code, name, qty, price, price_type)
 
         side = "매수" if order_type == OrderType.BUY else "매도"
         if ret != 0:

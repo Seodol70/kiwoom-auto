@@ -59,7 +59,8 @@ class ScannerWorker(QObject):
         )
         from scanner.universe import is_pure_equity_name
 
-        from strategy.jang_dong_min import get_trend_status as _gts
+        from scanner.indicator_service import IndicatorService
+        _gts = IndicatorService.get_trend_status
         self._running = True
         self.log_message.emit("[ScannerWorker] 시작 — SnapshotStore 데이터 대기 중...")
         _log.info("[ScannerWorker] run() 진입")

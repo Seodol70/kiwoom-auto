@@ -1,76 +1,48 @@
 """
 IndicatorService — 기술지표 계산 단일 진입점
-
-현재 jang_dong_min.py, smart_scanner.py 등에 분산된
-calc_rsi, calc_atr, calc_ema, calc_ma 등을 통합.
-
-SmartScanner, ScannerWorker, TradingEngine이 모두 이 모듈에서 import.
 """
+
 from __future__ import annotations
-
-from typing import Optional
-
+import logging
 import numpy as np
+from typing import Optional, Any, TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from scanner.models import StockSnapshot
+    from scanner.config import SmartScannerConfig
+
+logger = logging.getLogger(__name__)
 
 class IndicatorService:
     """기술지표 계산 서비스 — 모든 지표 계산을 여기서 담당"""
 
     @staticmethod
     def calc_rsi(closes: list[float], period: int = 14) -> Optional[float]:
-        """
-        RSI(상대강도지수) 계산.
-
-        Args:
-            closes: 종가 리스트 (최신값이 마지막)
-            period: RSI 기간 (기본 14)
-
-        Returns:
-            RSI 값 (0~100), 계산 불가 시 None
-        """
         if not closes or len(closes) < period + 1:
             return None
-
         try:
-            closes_arr = np.array(closes[-period - 1 :], dtype=np.float64)
-            deltas = np.diff(closes_arr)
-            seed = deltas[:period]
-
-            up = seed[seed >= 0].sum() / period
-            down = -seed[seed < 0].sum() / period
-
-            rs = up / down if down else 0
-            rsi = 100.0 - 100.0 / (1.0 + rs) if rs >= 0 else 0.0
-
-            for d in deltas[period:]:
-                up = (up * (period - 1) + (d if d >= 0 else 0)) / period
-                down = (down * (period - 1) + (-d if d < 0 else 0)) / period
-                rs = up / down if down else 0
-                rsi = 100.0 - 100.0 / (1.0 + rs) if rs >= 0 else 0.0
-
-            return rsi
+            arr = np.array(closes[-(period + 1):], dtype=np.float64)
+            deltas = np.diff(arr)
+            gains = np.where(deltas > 0, deltas, 0.0)
+            losses = np.where(deltas < 0, -deltas, 0.0)
+            
+            avg_gain = gains.mean()
+            avg_loss = losses.mean()
+            
+            if avg_loss == 0: return 100.0
+            rs = avg_gain / avg_loss
+            return float(100.0 - (100.0 / (1.0 + rs)))
         except Exception:
             return None
 
     @staticmethod
     def calc_ema(closes: list[float], period: int) -> Optional[float]:
-        """
-        EMA(지수이동평균) 계산 — 최신 값 반환.
-
-        Args:
-            closes: 종가 리스트 (최신값이 마지막)
-            period: EMA 기간
-
-        Returns:
-            최신 EMA 값, 계산 불가 시 None
-        """
         if not closes or len(closes) < period:
             return None
-
         try:
             arr = np.array(closes, dtype=np.float64)
             k = 2.0 / (period + 1)
-            ema = float(arr[:period].mean())  # 초기값: 첫 period개의 단순 평균
+            ema = float(arr[:period].mean())
             for price in arr[period:]:
                 ema = float(price) * k + ema * (1.0 - k)
             return ema
@@ -78,222 +50,134 @@ class IndicatorService:
             return None
 
     @staticmethod
-    def calc_atr(
-        highs: list[float], lows: list[float], closes: list[float], period: int = 14
-    ) -> Optional[float]:
-        """
-        ATR(평균진정범위) 계산.
-
-        Args:
-            highs: 고가 리스트
-            lows: 저가 리스트
-            closes: 종가 리스트
-            period: ATR 기간 (기본 14)
-
-        Returns:
-            ATR 값, 계산 불가 시 None
-        """
+    def calc_ma(closes: list[float], period: int) -> Optional[float]:
         if not closes or len(closes) < period:
             return None
+        return float(np.mean(closes[-period:]))
 
+    @staticmethod
+    def calc_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> Optional[float]:
+        if not closes or len(closes) < period: return None
         try:
             tr_values = []
-            for i in range(1, min(len(closes), len(highs), len(lows))):
-                high = highs[i]
-                low = lows[i]
-                prev_close = closes[i - 1]
-
-                tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            for i in range(1, len(closes)):
+                tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
                 tr_values.append(tr)
-
-            if len(tr_values) < period:
-                return None
-
-            tr_arr = np.array(tr_values, dtype=np.float64)
-            atr = float(tr_arr[:period].mean())  # 초기값: 첫 period개 단순 평균
-            alpha = 1.0 / period
-            for v in tr_arr[period:]:            # Wilder smoothing
-                atr = (1.0 - alpha) * atr + alpha * float(v)
-            return atr
+            return float(np.mean(tr_values[-period:]))
         except Exception:
             return None
 
     @staticmethod
-    def calc_ma(closes: list[float], period: int) -> Optional[float]:
-        """
-        단순이동평균(SMA) 계산.
-
-        Args:
-            closes: 종가 리스트 (최신값이 마지막)
-            period: 이동평균 기간
-
-        Returns:
-            MA 값, 계산 불가 시 None
-        """
-        if not closes or len(closes) < period:
-            return None
-
+    def calc_bollinger_bands(closes: list[float], period: int = 20, std_mult: float = 2.0) -> Optional[dict[str, float]]:
+        if len(closes) < period: return None
         try:
-            return np.mean(closes[-period:])
+            arr = np.array(closes[-period:], dtype=np.float64)
+            mid = float(arr.mean())
+            std = float(arr.std())
+            return {
+                "upper": mid + std_mult * std,
+                "middle": mid,
+                "lower": mid - std_mult * std
+            }
         except Exception:
             return None
 
     @staticmethod
-    def calc_bollinger_bands(
-        closes: list[float], period: int = 20, num_std: float = 2.0
-    ) -> Optional[dict]:
-        """
-        볼린저 밴드 계산.
-
-        Args:
-            closes: 종가 리스트
-            period: 이동평균 기간 (기본 20)
-            num_std: 표준편차 배수 (기본 2.0)
-
-        Returns:
-            {'middle': MA, 'upper': 상단, 'lower': 하단}, 계산 불가 시 None
-        """
-        if not closes or len(closes) < period:
-            return None
-
-        try:
-            closes_arr = np.array(closes[-period:], dtype=np.float64)
-            middle = np.mean(closes_arr)
-            std = np.std(closes_arr)
-            upper = middle + (std * num_std)
-            lower = middle - (std * num_std)
-            return {"middle": middle, "upper": upper, "lower": lower}
-        except Exception:
-            return None
-
-    @staticmethod
-    def get_trend_status(
-        closes: list[float],
-        highs: list[float],
-        lows: list[float],
-        volumes: list[int],
-        ema_period: int = 20,
-        atr_period: int = 14,
-        volume_lookback: int = 20,
-    ) -> int:
-        """
-        [고도화] 추세 강도 판정 알고리즘 (Level 0~3).
+    def get_trend_status(closes: list[float], highs: list[float], lows: list[float], volumes: list[int], **kwargs) -> int:
+        """추세 강도 판정 (0~3)"""
+        ema_period = kwargs.get("ema_period", 20)
+        atr_period = kwargs.get("atr_period", 14)
         
-        평가 요소:
-        1. 가격 위치 (Distance): EMA 대비 ATR 단위 거리
-        2. 기울기 (Slope): EMA의 단기 기울기
-        3. 가속도 (Acceleration): 기울기의 변화량 (추세 강화 확인)
-        4. 수급 (Volume): 최근 평균 대비 거래량 폭발력
-        """
-        need_price = max(ema_period + 5, atr_period + 1)
-        if len(closes) < need_price or len(highs) < need_price or len(lows) < need_price:
-            return 0
-
-        # ── 지표 계산 ──
+        if len(closes) < ema_period + 2: return 0
+        
         ema_now = IndicatorService.calc_ema(closes, ema_period)
         ema_prev = IndicatorService.calc_ema(closes[:-1], ema_period)
-        ema_prev2 = IndicatorService.calc_ema(closes[:-2], ema_period)
         atr = IndicatorService.calc_atr(highs, lows, closes, atr_period)
         
-        if any(v is None for v in [ema_now, ema_prev, ema_prev2, atr]) or atr <= 0:
-            return 0
-
-        cur_price = float(closes[-1])
+        if not ema_now or not ema_prev or not atr: return 0
         
-        # [필수] 상승 추세 기초 조건: 가격 > EMA AND EMA 기울기 > 0
-        if cur_price <= ema_now or ema_now <= ema_prev:
-            return 0
-
-        # 1️⃣ 거리 점수 (Distance Score)
+        cur_price = closes[-1]
+        if cur_price <= ema_now or ema_now <= ema_prev: return 0
+        
         dist_atr = (cur_price - ema_now) / atr
         
-        # 2️⃣ 가속도 점수 (Slope Acceleration)
-        slope_now = ema_now - ema_prev
-        slope_prev = ema_prev - ema_prev2
-        is_accelerating = (slope_now > slope_prev)
-
-        # 3️⃣ 수급 점수 (Volume Score)
-        need_vol = volume_lookback + 1
-        has_vol = (len(volumes) >= need_vol and any(v > 0 for v in volumes[-need_vol:]))
-        vol_ratio = 1.0
-        if has_vol:
-            avg_vol = float(np.mean(np.array(volumes[-(need_vol):-1], dtype=np.float64)))
-            if avg_vol > 0:
-                vol_ratio = float(volumes[-1]) / avg_vol
-            else:
-                has_vol = False
-
-        # 4️⃣ 박스권 응축 확인 (Consolidation) - 변동성이 극도로 낮아진 상태
-        # ATR이 가격의 0.4% 이하이면 응축으로 판단
-        is_consolidating = (atr / cur_price < 0.004)
-
-        # ── 종합 판정 ──
-        # [Level 3: Strong] 강력한 추세 + 수급 + 가속 (또는 응축 후 돌파)
-        if dist_atr >= 1.2 and vol_ratio >= 1.5 and is_accelerating:
-            return 3
-        if dist_atr >= 0.8 and vol_ratio >= 2.0 and is_consolidating:
-            # 박스권 응축 후 거래량 실린 돌파는 거리가 짧아도 강력
-            return 3
-        if dist_atr >= 1.5 and vol_ratio >= 1.2:
-            return 3
-        
-        # [Level 2: Medium] 안정적 추세 + 수급
-        if dist_atr >= 0.7 and vol_ratio >= 1.1:
-            return 2
-        if dist_atr >= 1.0:
-            return 2
-            
-        # [Level 1: Weak] 추세 시작 초기
-        if dist_atr >= 0.2:
-            return 1
-            
+        if dist_atr >= 1.5: return 3
+        if dist_atr >= 1.0: return 2
+        if dist_atr >= 0.3: return 1
         return 0
 
     @staticmethod
-    def check_daily_alignment(
+    def check_daily_alignment(daily_closes: list[float], current_price: Optional[float] = None) -> dict:
+        """일봉 정배열 확인"""
+        res = {"is_aligned": False, "ma5": 0.0, "ma10": 0.0, "ma20": 0.0}
+        if len(daily_closes) < 20: return res
+        
+        closes = list(daily_closes)
+        if current_price:
+            closes.append(current_price)
+            
+        res["ma5"] = IndicatorService.calc_ma(closes, 5) or 0.0
+        res["ma10"] = IndicatorService.calc_ma(closes, 10) or 0.0
+        res["ma20"] = IndicatorService.calc_ma(closes, 20) or 0.0
+        
+        res["is_aligned"] = res["ma5"] > res["ma10"] > res["ma20"]
+        return res
+
+    @staticmethod
+    def get_daily_context(
         daily_closes: list[float],
-        current_price: int,
-        ma_periods: tuple[int, int, int] = (7, 15, 20),
+        current_price: float,
+        near_high_threshold_pct: float = 3.0,
     ) -> dict:
         """
-        일봉 기반 정배열 확인.
-
-        Args:
-            daily_closes: 일봉 종가 리스트
-            current_price: 현재 시간대 현재가
-            ma_periods: (단기, 중기, 장기) MA 기간
-
-        Returns:
-            {
-                'is_aligned': bool,
-                'ma_short': float,
-                'ma_mid': float,
-                'ma_long': float,
-            }
+        일봉 데이터 기반 매매 맥락 정보를 반환한다. (jang_dong_min.py 로직 복구)
         """
-        short_period, mid_period, long_period = ma_periods
         result = {
-            "is_aligned": False,
-            "ma_short": None,
-            "ma_mid": None,
-            "ma_long": None,
+            "above_ma20": True, "near_high": False, 
+            "daily_ma20": 0.0, "high_25d": 0.0,
+            "above_ma60": True, "daily_ma60": 0.0,
+            "ma20_slope_up": True
         }
 
-        if not daily_closes:
+        if len(daily_closes) < 20 or current_price <= 0:
             return result
 
-        try:
-            ma_short = IndicatorService.calc_ma(daily_closes, short_period)
-            ma_mid = IndicatorService.calc_ma(daily_closes, mid_period)
-            ma_long = IndicatorService.calc_ma(daily_closes, long_period)
+        # 최근 20일 이동평균
+        daily_ma20 = sum(daily_closes[-20:]) / 20
+        result["daily_ma20"] = daily_ma20
+        result["above_ma20"] = current_price >= daily_ma20
 
-            result["ma_short"] = ma_short
-            result["ma_mid"] = ma_mid
-            result["ma_long"] = ma_long
+        # MA20 기울기 (최근 3거래일 전 대비)
+        if len(daily_closes) >= 23:
+            ma20_prev = sum(daily_closes[-23:-3]) / 20
+            result["ma20_slope_up"] = daily_ma20 > ma20_prev
 
-            if ma_short and ma_mid and ma_long:
-                result["is_aligned"] = ma_short > ma_mid > ma_long
+        # MA60
+        if len(daily_closes) >= 60:
+            daily_ma60 = sum(daily_closes[-60:]) / 60
+            result["daily_ma60"] = daily_ma60
+            result["above_ma60"] = current_price >= daily_ma60
 
-            return result
-        except Exception:
-            return result
+        # 25일 신고가 근처 판정
+        n = min(25, len(daily_closes))
+        high_25d = max(daily_closes[-n:])
+        result["high_25d"] = high_25d
+        if high_25d > 0:
+            result["near_high"] = current_price >= high_25d * (1.0 - near_high_threshold_pct / 100.0)
+
+        return result
+
+    @staticmethod
+    def get_technical_summary(snap: StockSnapshot, cfg: SmartScannerConfig) -> dict[str, Any]:
+        """종목의 모든 기술적 상태를 한 번에 계산하여 반환"""
+        closes = snap.closes_1min
+        summary = {
+            "rsi": IndicatorService.calc_rsi(closes, 14),
+            "ema20": IndicatorService.calc_ema(closes, 20),
+            "ma20": IndicatorService.calc_ma(closes, 20),
+            "daily": IndicatorService.get_daily_context(snap.daily_closes, snap.current_price),
+            "trend_level": snap.trend_level
+        }
+        bb = IndicatorService.calc_bollinger_bands(closes, 20)
+        if bb: summary["bb"] = bb
+        return summary
