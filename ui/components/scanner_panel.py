@@ -175,9 +175,9 @@ class ScannerPanel(QWidget):
                 btn.setProperty("code", _code)
                 btn.setFixedHeight(22)
                 btn.setStyleSheet(
-                    "QPushButton{background:#45475a;color:#cdd6f4;border-radius:3px;font-size:11px;}"
-                    "QPushButton:hover{background:#89dceb;color:#1e1e2e;}"
-                    "QPushButton:pressed{background:#74c7ec;}"
+                    "QPushButton{background:#fab387;color:#11111b;border-radius:3px;font-size:11px;font-weight:bold;}"
+                    "QPushButton:hover{background:#f9e2af;color:#1e1e2e;}"
+                    "QPushButton:pressed{background:#eba0ac;}"
                 )
                 btn.clicked.connect(
                     lambda _chk, c=_code, n=_name, p=_price:

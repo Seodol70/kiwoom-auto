@@ -73,13 +73,13 @@ class LoginDialog(QDialog):
         layout.addWidget(line)
 
         # 서버 선택 체크박스
-        self._chk_real = QCheckBox("  실전투자 서버로 접속")
-        self._chk_real.setFont(QFont("Malgun Gothic", 10))
-        self._chk_real.setChecked(False)      # 기본값: 모의투자
-        self._chk_real.toggled.connect(self._on_toggle)
-        layout.addWidget(self._chk_real)
+        self._chk_mock = QCheckBox("  모의투자 서버로 접속 (체크 해제 시 실전)")
+        self._chk_mock.setFont(QFont("Malgun Gothic", 10))
+        self._chk_mock.setChecked(True)      # 기본값: 모의투자 (체크됨)
+        self._chk_mock.toggled.connect(self._on_toggle)
+        layout.addWidget(self._chk_mock)
 
-        self._lbl_mode = QLabel("● 모의투자 서버 (기본값)")
+        self._lbl_mode = QLabel("● 모의투자 서버 (안전 모드)")
         self._lbl_mode.setObjectName("mode_mock")
         self._lbl_mode.setFont(QFont("Malgun Gothic", 9))
         layout.addWidget(self._lbl_mode)
@@ -100,12 +100,12 @@ class LoginDialog(QDialog):
         layout.addLayout(btn_row)
 
     def _on_toggle(self, checked: bool) -> None:
-        self._use_real = checked
-        if checked:
-            self._lbl_mode.setText("⚠ 실전투자 서버 - 실제 돈이 사용됩니다!")
+        self._use_real = not checked  # 체크 해제 시 실전
+        if self._use_real:
+            self._lbl_mode.setText("⚠ 실전투자 서버 - 실제 자산이 사용됩니다!")
             self._lbl_mode.setObjectName("mode_real")
         else:
-            self._lbl_mode.setText("● 모의투자 서버 (기본값)")
+            self._lbl_mode.setText("● 모의투자 서버 (안전 모드)")
             self._lbl_mode.setObjectName("mode_mock")
         # QSS 동적 갱신
         self._lbl_mode.style().unpolish(self._lbl_mode)
@@ -202,6 +202,12 @@ class LoginManager(QObject):
                 os.remove(self._account_cache_file)
             logger.warning("캐시로 자동 접속 실패! 서버 선택 창으로 넘어갑니다.")
 
+        # [NEW] 실전/모의 전환 버튼을 통한 재시작인 경우 다이얼로그 생략
+        import os
+        if os.path.exists("force_mode.tmp"):
+            logger.info("모드 전환 요청 감지 - 다이얼로그 생략")
+            return self._connect()
+
         dlg = LoginDialog()
         if dlg.exec() != QDialog.Accepted:
             logger.info("로그인 취소")
@@ -241,15 +247,29 @@ class LoginManager(QObject):
         return self._connect(preferred_account=self.account)
 
     def _connect(self, preferred_account: str = "") -> bool:
-        """CommConnect -> OnEventConnect 대기 -> 계좌 선택.
-
-        preferred_account: 재연결 시 이전 계좌번호. 지정되면 다이얼로그 없이 자동 선택.
-        """
+        """CommConnect -> OnEventConnect 대기 -> 계좌 선택."""
         self._err_code = -999
+        
+        # force_mode.tmp 파일이 있으면 해당 설정으로 강제(1: 실전, 0: 모의)
+        import os
+        if os.path.exists("force_mode.tmp"):
+            with open("force_mode.tmp", "r") as f:
+                mode = f.read().strip()
+                if mode == "1":
+                    self.use_real = True
+                    self.server_mode = "실전투자"
+                elif mode == "0":
+                    self.use_real = False
+                    self.server_mode = "모의투자"
+            try:
+                os.remove("force_mode.tmp")
+            except Exception:
+                pass
 
-        # 실전/모의 서버 선택은 키움 로그인 창에서 직접 수행해야 함 (Bad parameter count 방지)
+        # CommConnect() 호출 (파라미터 없음 - Bad parameter count 방지)
         self._kiwoom._ocx.dynamicCall("CommConnect()")
-        logger.info("CommConnect() 호출 - 키움 로그인 창 대기 중 (%s)", self.server_mode)
+        logger.info("CommConnect() 호출 완료 - 서버모드(참고용): %s", self.server_mode)
+        logger.info("💡 중요: 키움 로그인 창에서 '모의투자' 체크가 해제되어 있는지 꼭 확인해 주세요!")
 
         # QEventLoop으로 대기 - Qt 이벤트를 처리하면서 OnEventConnect 콜백을 받음
         self._loop = QEventLoop()

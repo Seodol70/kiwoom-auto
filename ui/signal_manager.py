@@ -1,0 +1,121 @@
+# -*- coding: utf-8 -*-
+"""
+SignalManager - 프로그램 전체의 시그널 연결을 중앙 관리하는 클래스
+"""
+
+from PyQt5.QtCore import QObject, pyqtSlot
+import logging
+
+logger = logging.getLogger(__name__)
+
+class SignalManager:
+    """
+    엔진(TradingController, OrderManager 등)과 UI(MainWindow, Panels) 간의
+    모든 시그널-슬롯 연결을 중앙에서 제어합니다.
+    """
+    
+    def __init__(self, win):
+        self.win = win
+        self.ctx = win.ctx
+        self.tc = win.trading_controller
+        self.om = win.order_mgr
+        self.lm = win.login_mgr
+
+    def bind_all(self):
+        """모든 카테고리의 시그널을 연결"""
+        self._bind_auth()
+        self._bind_trading_core()
+        self._bind_ui_interactions()
+        self._bind_background_workers()
+        self._bind_context_updates()
+        self._bind_external()
+        logger.info("[SignalManager] 모든 시그널 연결 완료")
+
+    def _bind_auth(self):
+        """로그인 및 인증 관련 시그널"""
+        self.lm.login_success.connect(self.win._on_login_success)
+        self.lm.login_failed.connect(lambda m: self.win.append_log(f"⚠ 로그인 실패: {m}"))
+        self.win._kiwoom.set_auto_login_callback(lambda: self.win.append_log("✅ 자동 재로그인 성공"))
+
+    def _bind_trading_core(self):
+        """주문, 체결, 필터링 등 핵심 거래 로직"""
+        # 주문 로그
+        self.om.order_sent.connect(lambda d: self.win.append_log(
+            f"{d['side']} 주문 전송 — {d['name']}({d['code']}) {d['qty']}주 {d['price']}원"
+        ))
+        self.om.order_filled.connect(self.win._on_order_filled)
+        self.om.order_failed.connect(lambda m: self.win.append_log(f"⚠ 주문 실패: {m}"))
+        
+        # 컨트롤러 피드백
+        self.tc.signal_rejected.connect(lambda msg: self.win.append_log(f"❌ [진입거절] {msg}"))
+        self.tc.log_message.connect(self.win.append_log)
+        self.tc.portfolio_updated.connect(self.win._on_portfolio_refresh)
+        self.tc.scan_status_updated.connect(
+            lambda msg, done: self.win.scan_status.done(msg) if done else self.win.scan_status.reset()
+        )
+
+    def _bind_ui_interactions(self):
+        """사용자 조작(버튼 클릭, 값 변경 등) 관련 시그널"""
+        # 헤더 바 컨트롤
+        self.win.header.auto_trade_toggled.connect(self.win._on_auto_trade_toggle)
+        self.win.header.auto_trade_toggled.connect(self.tc.set_auto_trading)
+        self.win.header.overnight_mode_toggled.connect(self.win._on_overnight_mode_toggle)
+        self.win.header.switch_real_requested.connect(self.win._on_switch_real_requested)
+        self.win.header.reload_requested.connect(self.win._on_reload_config)
+        self.win.header.unlock_requested.connect(self.win._on_manual_unlock_requested)
+        self.win.header.exit_requested.connect(self.win.close)
+
+        # 패널 조작
+        self.win.portfolio_panel.manual_sell.connect(self.win._on_manual_sell)
+        self.win.portfolio_panel.tp_changed.connect(self.ctx.set_risk_params)
+        self.win.portfolio_panel.sl_changed.connect(lambda v: self.ctx.set_risk_params(sl=v))
+        self.win.portfolio_panel.row_clicked.connect(self.win._on_code_selected)
+
+        self.win.scanner_panel.row_clicked.connect(self.win._on_code_selected)
+        self.win.scanner_panel.manual_buy_requested.connect(self.win._on_manual_buy)
+
+    def _bind_background_workers(self):
+        """워커 스레드 및 스케줄러 관련 시그널"""
+        self.win._port_worker.refresh_done.connect(self.win._on_portfolio_refresh)
+        self.win._port_worker.log_message.connect(self.win.append_log)
+        # 스캐너 워커
+        self.win._scan_worker.signal_detected.connect(self.win._on_scan_signal)
+        self.win._scan_worker.watch_list_updated.connect(self.win.scanner_panel.refresh)
+        self.win._scan_worker.watch_list_updated.connect(self.win.investor_panel.refresh)
+        self.win._scan_worker.log_message.connect(self.win.append_log)
+
+        # 스케줄러
+        ms = self.win.market_scheduler
+        ms.market_opened.connect(self.win._on_market_opened)
+        ms.market_closing.connect(self.win._on_market_closing)
+        ms.feedback_triggered.connect(self.win._on_feedback_triggered)
+        ms.day_reset.connect(self.win._on_day_reset)
+        ms.overnight_gap_check.connect(self.tc.check_overnight_gap)
+        ms.overnight_timecut.connect(self.tc.check_overnight_timecut)
+        ms.phase1_cutoff.connect(lambda: self.tc.liquidate_phase1_positions(forced=True))
+        ms.phase1_trail.connect(lambda: self.tc.liquidate_phase1_positions(forced=False))
+        ms.overnight_auto_enabled.connect(lambda: self.win.header._btn_overnight.setChecked(True))
+        ms.overnight_auto_enabled.connect(lambda: self.win._on_overnight_mode_toggle(True))
+
+        # 리스크 매니저
+        self.win.risk_manager.daily_profit_locked.connect(self.win._on_profit_locked)
+        self.win.risk_manager.daily_loss_cut.connect(self.win._on_loss_cut)
+
+    def _bind_context_updates(self):
+        """중앙 컨텍스트와 UI 동기화"""
+        self.ctx.auto_trading_changed.connect(self.win.header._btn_auto.setChecked)
+        self.ctx.overnight_mode_changed.connect(self.win.header._btn_overnight.setChecked)
+        self.ctx.market_data_updated.connect(self.win._on_market_data_updated)
+        self.ctx.account_changed.connect(self.win.header.set_connected)
+        self.ctx.log_requested.connect(self.win.append_log)
+        
+        # 컨트롤러-컨텍스트 직접 연결
+        self.tc.market_data_updated.connect(self.ctx.update_market_data)
+
+    def _bind_external(self):
+        """텔레그램 등 외부 연동"""
+        if self.win._tg:
+            self.win._tg.cmd_start.connect(lambda: self.win._on_auto_trade_toggle(True))
+            self.win._tg.cmd_stop.connect(lambda: self.win._on_auto_trade_toggle(False))
+            self.win._tg.cmd_status.connect(self.win._on_tg_status_requested)
+            self.win.append_log("[연결] 텔레그램 봇 시그널 바인딩 완료")

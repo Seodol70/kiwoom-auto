@@ -88,7 +88,7 @@ class TradingController(QObject):
 
         from app.strategy import EntryStrategy, ExitStrategy
         self._entry_strategy = EntryStrategy(self._order_mgr, self._risk_mgr)
-        self._exit_strategy = ExitStrategy(self._scan_cfg, self._snap_store)
+        self._exit_strategy = ExitStrategy(self._scan_cfg, self._snap_store, self._order_mgr)
 
 
     @pyqtSlot(bool)
@@ -173,6 +173,16 @@ class TradingController(QObject):
         self._order_mgr.sell(code, name, qty, price=0)
         return True, f"[수동매도] {name}({code}) {qty}주 시장가 요청"
 
+    def manual_buy(self, code: str, name: str, qty: int, price: int = 0, order_type: str = "03") -> tuple[bool, str]:
+        """수동 매수 — 반환: (성공여부, 로그메시지)"""
+        if qty <= 0:
+            return False, f"⚠ 수동매수 오류 — 수량 {qty}주 부족"
+        
+        # OrderManager의 buy 메서드 호출 (order_type: "03"=시장가, "00"=지정가)
+        self._order_mgr.buy(code, name, qty, price=price, order_type=order_type)
+        otype_str = "시장가" if order_type == "03" else f"지정가({price:,}원)"
+        return True, f"[수동매수] {name}({code}) {qty}주 {otype_str} 요청"
+
     def tick_investor_refresh(self) -> bool:
         """수급 갱신 타이머 콜백 — 시간·상태 조건 충족 시 TR 호출. 반환: 조회 여부"""
         if not getattr(self._scan_cfg, "investor_filter_enabled", False):
@@ -221,31 +231,19 @@ class TradingController(QObject):
             # peak_price 갱신
             self._exit_strategy.update_peak_price(pos)
 
-            # [REFACTORED] ExitStrategy 사용 (손절, 트레일링, 타임컷 통합)
             should_exit, reason = self._exit_strategy.should_exit(pos, exit_ctx)
-            
             if should_exit:
                 self.log_message.emit(f"🚀 [청산] {pos.name}({pos.code}) {reason}")
-                
-                # 손절 계열인 경우 블랙리스트 등록 (당일 재진입 방지)
-                if any(x in reason for x in ["Stop Loss", "Hard Stop", "Candle Stop"]):
+                if any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑"]):
                     self._order_mgr.mark_stop_loss(pos.code)
-                    
                 self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
                 count += 1
                 continue
 
-            # 나머지 특수 청산 로직 (분할익절 등 - 향후 ExitStrategy로 완전 통합 가능)
-            if self._check_partial_profit(pos, sell_qty, exit_ctx):
-                count += 1
-                continue
-            if self._check_breakeven_stop(pos, sell_qty):
-                count += 1
-                continue
-            if self._check_ema20_exit(pos, sell_qty):
-                count += 1
-                continue
-            if self._check_trend_decay(pos, sell_qty):
+            do_partial, ratio = self._exit_strategy.should_partial_exit(pos, exit_ctx)
+            if do_partial:
+                self.log_message.emit(f"🔀 [분할익절] {pos.name}({pos.code}) {ratio*100:.0f}% 매도")
+                self._order_mgr.partial_exit(pos.code, pos.name, sell_ratio=ratio, reason="분할익절")
                 count += 1
                 continue
 
@@ -317,372 +315,6 @@ class TradingController(QObject):
                 partial_profit_pct=partial_profit_pct,
                 atr_trail_enabled=atr_trail_enabled,
             )
-
-
-    # ─── 개별 청산 판정 함수들 ──────────────────────────────────────────
-
-
-    def _check_hard_stop(self, pos, sell_qty: int) -> bool:
-        """Hard Stop: 손실 기준 즉시 강제 매도"""
-        chg = float(pos.price_change_pct_vs_avg)
-        if chg <= self._scan_cfg.hard_stop_pct:
-            logger.warning(
-                "[Hard Stop] %s(%s) 손실률 %.2f%% — 강제 매도 %d주",
-                pos.name,
-                pos.code,
-                chg,
-                sell_qty,
-            )
-            self._order_mgr.mark_stop_loss(pos.code)
-            self._order_mgr.force_exit(
-                pos.code, pos.name, sell_qty, reason=f"Hard Stop {self._scan_cfg.hard_stop_pct:.1f}%"
-            )
-            return True
-        return False
-
-
-    def _check_candle_stop(self, pos, sell_qty: int) -> bool:
-        """캔들 저가 손절: 진입 캔들 저점 이탈"""
-        # EOD 포지션 (갭 체크 이전)은 스킵
-        _is_eod_pre_gap = getattr(pos, "eod_trade", False) and not getattr(
-            pos, "overnight_held", False
-        )
-        if _is_eod_pre_gap:
-            return False
-
-
-        if pos.candle_stop_price > 0 and pos.current_price <= pos.candle_stop_price:
-            logger.info(
-                "[캔들손절] %s(%s) 현재가 %d ≤ 손절가 %d — %d주 매도",
-                pos.name,
-                pos.code,
-                pos.current_price,
-                pos.candle_stop_price,
-                sell_qty,
-            )
-            self._order_mgr.mark_stop_loss(pos.code)
-            self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-            return True
-        return False
-
-
-    def _check_stop_loss(self, pos, sell_qty: int, ctx: ExitContext) -> bool:
-        """손절: 설정값 하한 도달"""
-        # EOD 포지션 (갭 체크 이전)은 스킵
-        _is_eod_pre_gap = getattr(pos, "eod_trade", False) and not getattr(
-            pos, "overnight_held", False
-        )
-        if _is_eod_pre_gap:
-            return False
-
-
-        chg = float(pos.price_change_pct_vs_avg)
-        if chg <= ctx.sl_pct:
-            # EMA20 지지 확인 (보호 기능)
-            if self._check_ema_protection(pos):
-                logger.debug("[눌림목 보류] %s(%s) EMA20 지지 중", pos.name, pos.code)
-                return False
-
-
-            logger.info(
-                "[손절] %s(%s) 손실률 %.2f%% — %d주 매도",
-                pos.name,
-                pos.code,
-                chg,
-                sell_qty,
-            )
-            self._order_mgr.mark_stop_loss(pos.code)
-            self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-            return True
-        return False
-
-
-    def _check_trail_stop(self, pos, sell_qty: int, ctx: ExitContext) -> bool:
-        """트레일 스탑: 고점 대비 하락"""
-        # EOD 포지션 (갭 체크 이전)은 스킵
-        _is_eod_pre_gap_trail = getattr(pos, "eod_trade", False) and not getattr(
-            pos, "overnight_held", False
-        )
-        if _is_eod_pre_gap_trail:
-            return False
-
-
-        if pos.peak_price <= 0:
-            return False
-
-
-        chg = float(pos.price_change_pct_vs_avg)
-        peak_chg = (pos.peak_price - pos.avg_price) / pos.avg_price * 100
-
-
-        # 트레일 활성화 확인
-        if peak_chg < ctx.trail_activation:
-            return False
-
-
-        # 트레일 폭 결정 (Strong Trend 포지션 특별 처리)
-        strong_lv = int(getattr(self._scan_cfg, "strong_trend_hold_level", 3))
-        is_strong_trend = int(getattr(pos, "trend_level", 0)) >= strong_lv
-
-
-        if is_strong_trend:
-            # Strong Trend: tier1 건너뛰고 tier2부터
-            if peak_chg < self._scan_cfg.trail_tier2_max:
-                trail_pct = ctx.trail_tier2
-            else:
-                trail_pct = ctx.trail_tier3
-        else:
-            if peak_chg < self._scan_cfg.trail_tier1_max:
-                trail_pct = ctx.trail_tier1
-            elif peak_chg < self._scan_cfg.trail_tier2_max:
-                trail_pct = ctx.trail_tier2
-            else:
-                trail_pct = ctx.trail_tier3
-
-
-        trail_price = int(pos.peak_price * (1 - trail_pct / 100))
-
-
-        # ATR 기반 트레일 (더 촘촘한 쪽 선택)
-        if ctx.atr_trail_enabled and self._snap_store:
-            snap = self._snap_store.get_snapshot(pos.code)
-            if snap:
-                highs = list(getattr(snap, "highs_1min", []) or [])
-                lows = list(getattr(snap, "lows_1min", []) or [])
-                closes = list(getattr(snap, "closes_1min", []) or [])
-                if len(highs) >= 14 and len(lows) >= 14 and len(closes) >= 14:
-                    from scanner.indicator_service import IndicatorService
-                    atr = IndicatorService.calc_atr(highs, lows, closes, 14)
-                    if atr:
-                        atr_multiplier = float(
-                            getattr(self._scan_cfg, "atr_trail_multiplier", 1.5)
-                        )
-                        atr_trail_price = int(pos.peak_price - atr * atr_multiplier)
-                        trail_price = max(trail_price, atr_trail_price)
-
-
-        # EMA 트레일링 로직
-        if pos.current_price <= trail_price:
-            # EMA20 지지 확인
-            if self._check_ema_protection(pos):
-                logger.debug("[눌림목 보류] %s(%s) EMA20 지지 중 (트레일)", pos.name, pos.code)
-                return False
-
-
-            trend_tag = "[Strong홀딩]" if is_strong_trend else ""
-            logger.info(
-                "[트레일스탑%s] %s(%s) 현재가 %d ≤ 트레일가 %d — %d주 청산",
-                trend_tag,
-                pos.name,
-                pos.code,
-                pos.current_price,
-                trail_price,
-                sell_qty,
-            )
-            self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-            return True
-
-
-        return False
-
-
-    def _check_time_cut(self, pos, sell_qty: int, ctx: ExitContext) -> bool:
-        """타임컷: 경과 시간 기준 강제 청산"""
-        # EOD 포지션은 타임컷 제외
-        if getattr(pos, "eod_trade", False):
-            return False
-
-
-        # Strong Trend 포지션 타임컷 면제
-        strong_lv = int(getattr(self._scan_cfg, "strong_trend_hold_level", 3))
-        timecut_exempt = (
-            getattr(self._scan_cfg, "strong_trend_timecut_exempt", True)
-            and int(getattr(pos, "trend_level", 0)) >= strong_lv
-        )
-        if timecut_exempt:
-            return False
-
-
-        entry_time = getattr(pos, "entry_time", None)
-        if not entry_time:
-            return False
-
-
-        elapsed_min = (datetime.now() - entry_time).total_seconds() / 60
-        if elapsed_min >= ctx.time_cut_min:
-            chg = float(pos.price_change_pct_vs_avg)
-            logger.info(
-                "[타임컷] %s(%s) 경과 %d분, 수익 %.2f%% — %d주 강제 청산",
-                pos.name,
-                pos.code,
-                int(elapsed_min),
-                chg,
-                sell_qty,
-            )
-            self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-            return True
-
-
-        return False
-
-
-    def _check_partial_profit(self, pos, sell_qty: int, ctx: ExitContext) -> bool:
-        """분할익절: 목표 수익률 도달 시 일부 수량 매도"""
-        if not getattr(self._scan_cfg, "partial_profit_enabled", False):
-            return False
-
-
-        if getattr(pos, "partial_sold", False):
-            return False
-
-
-        if ctx.partial_profit_pct <= 0:
-            return False
-
-
-        chg = float(pos.price_change_pct_vs_avg)
-        if chg >= ctx.partial_profit_pct:
-            sell_ratio = float(getattr(self._scan_cfg, "partial_sell_ratio", 0.30))
-            logger.info(
-                "[분할익절] %s(%s) 수익 %.2f%% ≥ %.2f%% — %.0f%% 매도",
-                pos.name,
-                pos.code,
-                chg,
-                ctx.partial_profit_pct,
-                sell_ratio * 100,
-            )
-            self._order_mgr.partial_exit(pos.code, pos.name, sell_ratio=sell_ratio, reason="분할익절")
-            return True
-        return False
-
-
-    def _check_breakeven_stop(self, pos, sell_qty: int) -> bool:
-        """본절가 스탑: 분할익절 후 평단 이탈 시 전량 매도"""
-        if not getattr(self._scan_cfg, "breakeven_stop_enabled", False):
-            return False
-
-
-        if not getattr(pos, "partial_sold", False):
-            return False
-
-
-        buffer_pct = float(getattr(self._scan_cfg, "breakeven_stop_buffer_pct", 0.0))
-        chg = float(pos.price_change_pct_vs_avg)
-        if chg <= buffer_pct:
-            logger.info(
-                "[본절가스탑] %s(%s) 수익 %.2f%% ≤ %.2f%% — 전량 청산",
-                pos.name,
-                pos.code,
-                chg,
-                buffer_pct,
-            )
-            self._order_mgr.mark_stop_loss(pos.code)
-            self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-            return True
-        return False
-
-
-    def _check_ema20_exit(self, pos, sell_qty: int) -> bool:
-        """EMA20 이탈 청산: 현재가가 EMA20 아래로 내려가면 매도"""
-        if not getattr(self._scan_cfg, "ema20_exit_enabled", False):
-            return False
-
-
-        if not self._snap_store:
-            return False
-
-
-        snap = self._snap_store.get_snapshot(pos.code)
-        if snap is None:
-            return False
-
-
-        closes = list(getattr(snap, "closes_1min", []) or [])
-        if len(closes) < 20:
-            return False
-
-
-        from scanner.indicator_service import IndicatorService
-        ema20 = IndicatorService.calc_ema(closes, 20)
-        if not ema20:
-            return False
-
-
-        buffer_pct = float(getattr(self._scan_cfg, "ema20_exit_buffer_pct", 0.0))
-        ema20_threshold = ema20 * (1 - buffer_pct / 100)
-
-
-        if pos.current_price < ema20_threshold:
-            logger.info(
-                "[EMA20이탈] %s(%s) 현재가 %d < EMA20 %.0f — %d주 청산",
-                pos.name,
-                pos.code,
-                pos.current_price,
-                ema20_threshold,
-                sell_qty,
-            )
-            self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-            return True
-        return False
-
-
-    def _check_trend_decay(self, pos, sell_qty: int) -> bool:
-        """추세소멸 익절: 요셉 추세 지표 소멸 감지"""
-        # EOD 포지션 스킵
-        if getattr(pos, "eod_trade", False):
-            return False
-
-
-        # 손실 구간 스킵 (이익만 익절)
-        chg = float(pos.price_change_pct_vs_avg)
-        if chg <= 0:
-            return False
-
-
-        # OrderManager의 should_exit_on_trend_decay 호출
-        if self._order_mgr.should_exit_on_trend_decay(pos.code):
-            logger.info(
-                "[추세소멸] %s(%s) 추세 소멸 감지, 수익 %.2f%% — %d주 익절",
-                pos.name,
-                pos.code,
-                chg,
-                sell_qty,
-            )
-            self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-            return True
-        return False
-
-
-    # ─── 보호 기능 ──────────────────────────────────────────────────
-
-
-    def _check_ema_protection(self, pos) -> bool:
-        """EMA20 지지 확인 — 추세 지지 중이면 청산 보류"""
-        if not getattr(self._scan_cfg, "trend_protect_enabled", True):
-            return False
-
-
-        if not self._snap_store:
-            return False
-
-
-        snap = self._snap_store.get_snapshot(pos.code)
-        if snap is None:
-            return False
-
-
-        closes = list(getattr(snap, "closes_1min", []) or [])
-        if len(closes) < 20:
-            return False
-
-
-        from scanner.indicator_service import IndicatorService
-        ema20 = IndicatorService.calc_ema(closes, 20)
-        if ema20 and pos.current_price > ema20:
-            return True
-
-
-        return False
 
 
     # ─── 상태 제어 ──────────────────────────────────────────────────
@@ -789,6 +421,7 @@ class TradingController(QObject):
             kd['current'], kd['change_pct'],
             is_crash
         )
+        logger.info("[check_market_crash] market_data_updated 시그널 발행 완료 (is_crash=%s)", is_crash)
 
     def check_overnight_gap(self) -> None:
         """EOD 포지션 익일 갭 확인"""

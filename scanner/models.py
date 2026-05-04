@@ -56,10 +56,19 @@ class StockSnapshot:
     # 수급 정보
     foreign_net_buy: int = 0
     inst_net_buy: int = 0
+    investor_score: int = 0
 
     # 추세 상태 (Yosep 신호)
     trend_level: int = 0  # 추세 단계 0~3
     trend_prev_level: int = 0  # 직전 추세 단계
+
+    # 기타 지표
+    chejan_strength: float = 100.0  # 체결강도
+
+    @property
+    def foreign_net(self) -> int: return self.foreign_net_buy
+    @property
+    def inst_net(self) -> int: return self.inst_net_buy
 
 
 @dataclass

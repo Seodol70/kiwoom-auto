@@ -1,4 +1,9 @@
-"""Phase 3-3: TradingController 청산 로직 통합 테스트"""
+"""Phase 3-3: TradingController 청산 로직 통합 테스트
+
+Phase 5에서 _check_hard_stop / _check_stop_loss / _check_trail_stop 이
+TradingController에서 제거되고 ExitStrategy.should_exit()로 통합됨.
+해당 테스트들은 ExitStrategy를 직접 호출하도록 업데이트됨.
+"""
 
 import sys
 from pathlib import Path
@@ -8,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PyQt5.QtWidgets import QApplication
 from app.trading_controller import TradingController, ExitContext
+from app.strategy import ExitStrategy
 
 
 class MockPosition:
@@ -106,100 +112,64 @@ class MockSignal:
 
 
 def test_hard_stop():
-    """Hard Stop 청산 테스트"""
+    """Hard Stop 청산 테스트 — ExitStrategy.should_exit() 경유"""
     app = QApplication.instance() or QApplication([])
 
-    order_mgr = MockOrderManager()
     scan_cfg = MockConfig()
-    risk_mgr = MockRiskManager()
-
-    controller = TradingController(
-        order_mgr=order_mgr,
-        scan_cfg=scan_cfg,
-        risk_mgr=risk_mgr,
-        parent=None,
+    es = ExitStrategy(scan_cfg=scan_cfg)
+    ctx = ExitContext(
+        sl_pct=-1.2, trail_activation=1.0,
+        trail_tier1=1.5, trail_tier2=2.5, trail_tier3=3.5,
+        time_cut_min=25, partial_profit_pct=3.0, atr_trail_enabled=False,
     )
 
-    # Hard Stop 테스트: -2.5% 손실
+    # -2.5% 손실 → hard_stop_pct(-2.0%) 이하
     pos = MockPosition(code="005930", name="삼성전자", qty=10, avg_price=100000, current_price=97500)
-    order_mgr.positions["005930"] = pos
-
-    result = controller._check_hard_stop(pos, sell_qty=10)
-    assert result, "Hard Stop이 발동되지 않음"
+    should_exit, reason = es.should_exit(pos, ctx)
+    assert should_exit, "Hard Stop이 발동되지 않음"
+    assert "Hard Stop" in reason
     print("[OK] Hard Stop 테스트 통과")
 
 
 def test_stop_loss():
-    """손절 청산 테스트"""
+    """손절 청산 테스트 — ExitStrategy.should_exit() 경유"""
     app = QApplication.instance() or QApplication([])
 
-    order_mgr = MockOrderManager()
     scan_cfg = MockConfig()
-    risk_mgr = MockRiskManager()
-
-    controller = TradingController(
-        order_mgr=order_mgr,
-        scan_cfg=scan_cfg,
-        risk_mgr=risk_mgr,
-        parent=None,
-    )
-
+    es = ExitStrategy(scan_cfg=scan_cfg)
     ctx = ExitContext(
-        sl_pct=-1.2,
-        trail_activation=1.0,
-        trail_tier1=1.5,
-        trail_tier2=2.5,
-        trail_tier3=3.5,
-        time_cut_min=25,
-        partial_profit_pct=3.0,
-        atr_trail_enabled=False,
+        sl_pct=-1.2, trail_activation=1.0,
+        trail_tier1=1.5, trail_tier2=2.5, trail_tier3=3.5,
+        time_cut_min=25, partial_profit_pct=3.0, atr_trail_enabled=False,
     )
 
-    # 손절 테스트: -1.5% 손실
+    # -1.5% 손실 → sl_pct(-1.2%) 이하
     pos = MockPosition(code="005930", name="삼성전자", qty=10, avg_price=100000, current_price=98500)
-    order_mgr.positions["005930"] = pos
-
-    result = controller._check_stop_loss(pos, sell_qty=10, ctx=ctx)
-    assert result, "손절이 발동되지 않음"
+    should_exit, reason = es.should_exit(pos, ctx)
+    assert should_exit, "손절이 발동되지 않음"
+    assert "Stop Loss" in reason
     print("[OK] 손절 테스트 통과")
 
 
 def test_trail_stop():
-    """트레일 스탑 청산 테스트"""
+    """트레일 스탑 청산 테스트 — ExitStrategy.should_exit() 경유"""
     app = QApplication.instance() or QApplication([])
 
-    order_mgr = MockOrderManager()
     scan_cfg = MockConfig()
-    risk_mgr = MockRiskManager()
-
-    controller = TradingController(
-        order_mgr=order_mgr,
-        scan_cfg=scan_cfg,
-        risk_mgr=risk_mgr,
-        parent=None,
-    )
-
+    es = ExitStrategy(scan_cfg=scan_cfg)
     ctx = ExitContext(
-        sl_pct=-1.2,
-        trail_activation=1.0,
-        trail_tier1=1.5,
-        trail_tier2=2.5,
-        trail_tier3=3.5,
-        time_cut_min=25,
-        partial_profit_pct=3.0,
-        atr_trail_enabled=False,
+        sl_pct=-1.2, trail_activation=1.0,
+        trail_tier1=1.5, trail_tier2=2.5, trail_tier3=3.5,
+        time_cut_min=25, partial_profit_pct=3.0, atr_trail_enabled=False,
     )
 
-    # 트레일 스탑 테스트:
-    # - 진입가: 100,000
-    # - peak: 103,000 (수익 3.0%, trail_activation 1.0% 이상)
-    # - 현재가: 99,200 (고점 대비 3.78% 하락 > trail_pct_tier3 3.5%)
+    # 진입가 100,000 / peak 103,000 (+3.0%) / 현재가 99,200
+    # 고점 대비 하락 = (103000-99200)/103000 = 3.69% > trail_pct_tier3(3.5%)
     pos = MockPosition(code="005930", name="삼성전자", qty=10, avg_price=100000, current_price=99200)
     pos.peak_price = 103000
-    order_mgr.positions["005930"] = pos
-
-    result = controller._check_trail_stop(pos, sell_qty=10, ctx=ctx)
-    assert result, "트레일 스탑이 발동되지 않음"
+    should_exit, reason = es.should_exit(pos, ctx)
+    assert should_exit, "트레일 스탑이 발동되지 않음"
+    assert "Trail Stop" in reason
     print("[OK] 트레일 스탑 테스트 통과")
 
 

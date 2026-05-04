@@ -73,10 +73,11 @@ class ExitContext:
     atr_trail_enabled: bool = False
 
 class ExitStrategy:
-    """청산 판정 전략 클래스 (손절, 익절, 트레일링, 타임컷)"""
-    def __init__(self, scan_cfg: SmartScannerConfig, snap_store: Any = None):
+    """청산 판정 전략 클래스 — 모든 청산 조건의 단일 진입점"""
+    def __init__(self, scan_cfg: Any, snap_store: Any = None, order_mgr: Any = None):
         self._scan_cfg = scan_cfg
         self._snap_store = snap_store
+        self._order_mgr = order_mgr
 
     def get_trail_price(self, pos: Any) -> int:
         """현재 포지션의 트레일 스탑 가격 계산 (MainWindow 차트 표시용 공유)"""
@@ -120,46 +121,115 @@ class ExitStrategy:
             pos.peak_price = pos.current_price
 
     def should_exit(self, pos: Any, ctx: ExitContext) -> tuple[bool, str]:
-        """청산 여부 및 사유 판단"""
-        # 1. 하드 스탑 (절대 손절선)
+        """전체 청산 조건 판단 — 분할익절 제외 모든 청산 포함"""
+        _is_eod_pre_gap = getattr(pos, "eod_trade", False) and not getattr(pos, "overnight_held", False)
         chg = float(pos.price_change_pct_vs_avg)
+
+        # 1. 하드 스탑 (절대 손절선 — EOD/Strong Trend 무관하게 항상 적용)
         if chg <= self._scan_cfg.hard_stop_pct:
             return True, f"Hard Stop ({self._scan_cfg.hard_stop_pct:.1f}%)"
-            
-        # 2. 트레일 스탑
-        trail_price = self.get_trail_price(pos)
-        if trail_price > 0 and pos.current_price <= trail_price:
-            return True, f"Trail Stop (Peak {pos.peak_price:,} -> {trail_price:,})"
-            
-        # 3. 일반 손절 (EMA 보호 로직 포함)
-        if chg <= ctx.sl_pct:
+
+        # 2. 트레일 스탑 (EOD 갭 체크 전 포지션 제외)
+        if not _is_eod_pre_gap:
+            trail_price = self.get_trail_price(pos)
+            if trail_price > 0 and pos.current_price <= trail_price:
+                return True, f"Trail Stop (Peak {pos.peak_price:,} -> {trail_price:,})"
+
+        # 3. 일반 손절 (EOD 갭 체크 전 제외, EMA 보호 포함)
+        if not _is_eod_pre_gap and chg <= ctx.sl_pct:
             if self._check_ema_protection(pos):
                 return False, "EMA20 Support (Hold)"
             return True, f"Stop Loss ({ctx.sl_pct:.1f}%)"
-            
-        # 4. 타임컷 (보유 시간 초과)
-        if ctx.time_cut_min > 0:
-            from datetime import datetime
-            elapsed = (datetime.now() - pos.entry_time).total_seconds() / 60
-            if elapsed >= ctx.time_cut_min:
-                return True, f"Time Cut ({elapsed:.1f}min)"
-                
+
+        # 4. 타임컷 (EOD 면제, Strong Trend 면제)
+        if ctx.time_cut_min > 0 and not getattr(pos, "eod_trade", False):
+            strong_lv = int(getattr(self._scan_cfg, "strong_trend_hold_level", 3))
+            exempt = (
+                getattr(self._scan_cfg, "strong_trend_timecut_exempt", True)
+                and int(getattr(pos, "trend_level", 0)) >= strong_lv
+            )
+            if not exempt:
+                from datetime import datetime
+                entry_time = getattr(pos, "entry_time", None)
+                if entry_time:
+                    elapsed = (datetime.now() - entry_time).total_seconds() / 60
+                    if elapsed >= ctx.time_cut_min:
+                        return True, f"Time Cut ({elapsed:.1f}min)"
+
+        # 5. 본절가 스탑 (분할익절 후 평단 이탈)
+        if self._should_breakeven_stop(pos):
+            return True, "본절가스탑"
+
+        # 6. EMA20 이탈 청산
+        if self._should_ema20_exit(pos):
+            return True, "EMA20이탈"
+
+        # 7. 추세소멸 익절
+        if self._should_trend_decay(pos):
+            return True, "추세소멸"
+
         return False, "HOLD"
 
+    def should_partial_exit(self, pos: Any, ctx: ExitContext) -> tuple[bool, float]:
+        """분할익절 여부 판단. 반환: (익절여부, 매도비율)"""
+        if not getattr(self._scan_cfg, "partial_profit_enabled", False):
+            return False, 0.0
+        if getattr(pos, "partial_sold", False):
+            return False, 0.0
+        if ctx.partial_profit_pct <= 0:
+            return False, 0.0
+        if float(pos.price_change_pct_vs_avg) >= ctx.partial_profit_pct:
+            ratio = float(getattr(self._scan_cfg, "partial_sell_ratio", 0.30))
+            return True, ratio
+        return False, 0.0
+
+    def _should_breakeven_stop(self, pos: Any) -> bool:
+        """본절가 스탑: 분할익절 후 평단 복귀 시 전량 청산"""
+        if not getattr(self._scan_cfg, "breakeven_stop_enabled", False):
+            return False
+        if not getattr(pos, "partial_sold", False):
+            return False
+        buffer_pct = float(getattr(self._scan_cfg, "breakeven_stop_buffer_pct", 0.0))
+        return float(pos.price_change_pct_vs_avg) <= buffer_pct
+
+    def _should_ema20_exit(self, pos: Any) -> bool:
+        """EMA20 이탈 청산: 현재가가 EMA20 아래로 내려가면 청산"""
+        if not getattr(self._scan_cfg, "ema20_exit_enabled", False):
+            return False
+        if not self._snap_store:
+            return False
+        snap = self._snap_store.get_snapshot(pos.code)
+        if snap is None:
+            return False
+        closes = list(getattr(snap, "closes_1min", []) or [])
+        if len(closes) < 20:
+            return False
+        from scanner.indicator_service import IndicatorService
+        ema20 = IndicatorService.calc_ema(closes, 20)
+        if not ema20:
+            return False
+        buffer_pct = float(getattr(self._scan_cfg, "ema20_exit_buffer_pct", 0.0))
+        return pos.current_price < ema20 * (1 - buffer_pct / 100)
+
+    def _should_trend_decay(self, pos: Any) -> bool:
+        """추세소멸 익절: 이익 구간에서 추세 소멸 감지 시 청산"""
+        if getattr(pos, "eod_trade", False):
+            return False
+        if float(pos.price_change_pct_vs_avg) <= 0:
+            return False
+        if self._order_mgr is None:
+            return False
+        return self._order_mgr.should_exit_on_trend_decay(pos.code)
+
     def _check_ema_protection(self, pos: Any) -> bool:
-        """EMA20 지지 여부 확인 (추세 상승장용 보류 로직)"""
+        """EMA20 지지 여부 확인 (손절 보류 로직)"""
         if not getattr(self._scan_cfg, "trend_protect_enabled", True):
             return False
         if not self._snap_store:
             return False
-            
         snap = self._snap_store.get_snapshot(pos.code)
         if not snap or not snap.closes_1min or len(snap.closes_1min) < 20:
             return False
-            
         from scanner.indicator_service import IndicatorService
         ema20 = IndicatorService.calc_ema(snap.closes_1min, 20)
-        if ema20 and pos.current_price > ema20:
-            # 현재가가 EMA20 위에 있으면 지지 중으로 판단하여 손절 보류
-            return True
-        return False
+        return bool(ema20 and pos.current_price > ema20)

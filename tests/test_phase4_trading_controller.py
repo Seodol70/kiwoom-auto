@@ -1,283 +1,208 @@
 """
-test_phase4_trading_controller.py — Phase 4 TradingController 신규 메서드 테스트
+test_phase4_trading_controller.py — Phase 5 이후: ExitStrategy 청산 전략 단위 테스트
 
-4가지 신규 청산 전략:
-1. _check_partial_profit - 분할익절
-2. _check_breakeven_stop - 본절가 스탑
-3. _check_ema20_exit - EMA20 이탈
-4. _check_trend_decay - 추세소멸
+Phase 5에서 _check_* 메서드들이 TradingController → ExitStrategy로 통합됨.
+테스트 대상:
+1. should_partial_exit    — 분할익절
+2. _should_breakeven_stop — 본절가 스탑
+3. _should_ema20_exit     — EMA20 이탈
+4. _should_trend_decay    — 추세소멸
 """
 
 import pytest
-from unittest.mock import MagicMock, patch
-from datetime import datetime
+from unittest.mock import MagicMock
 
-from app.trading_controller import TradingController, ExitContext
+from app.strategy import ExitStrategy, ExitContext
 from order.order_manager import Position
 from scanner.smart_scanner import SmartScannerConfig
 
 
-class TestPhase4PartialProfit:
-    """분할익절 (_check_partial_profit) 테스트"""
+# ── 공통 헬퍼 ─────────────────────────────────────────────────────────────
 
-    def test_partial_profit_disabled(self):
-        """분할익절 비활성화 시 skip"""
+def _make_strategy(scan_cfg=None, order_mgr=None, snap_store=None):
+    if scan_cfg is None:
+        scan_cfg = SmartScannerConfig()
+    return ExitStrategy(scan_cfg=scan_cfg, snap_store=snap_store, order_mgr=order_mgr)
+
+
+def _make_ctx(**kwargs):
+    defaults = dict(
+        sl_pct=1.5,
+        trail_activation=0.57,
+        trail_tier1=1.1,
+        trail_tier2=2.0,
+        trail_tier3=3.0,
+        time_cut_min=25,
+        partial_profit_pct=3.0,
+        atr_trail_enabled=False,
+    )
+    defaults.update(kwargs)
+    return ExitContext(**defaults)
+
+
+def _make_pos(avg_price=80_000, current_price=82_400, **attrs):
+    pos = Position(
+        code="005930",
+        name="삼성전자",
+        qty=10,
+        avg_price=avg_price,
+        current_price=current_price,
+    )
+    for k, v in attrs.items():
+        setattr(pos, k, v)
+    return pos
+
+
+# ── 분할익절 (should_partial_exit) ────────────────────────────────────────
+
+class TestPartialExit:
+
+    def test_disabled(self):
+        """partial_profit_enabled=False → (False, 0.0)"""
+        cfg = SmartScannerConfig()
+        cfg.partial_profit_enabled = False
+        es = _make_strategy(scan_cfg=cfg)
+        pos = _make_pos(current_price=82_400)  # +3%
+        ok, ratio = es.should_partial_exit(pos, _make_ctx(partial_profit_pct=3.0))
+        assert ok is False
+
+    def test_already_sold(self):
+        """partial_sold=True → skip"""
+        cfg = SmartScannerConfig()
+        cfg.partial_profit_enabled = True
+        es = _make_strategy(scan_cfg=cfg)
+        pos = _make_pos(current_price=82_400, partial_sold=True)
+        ok, _ = es.should_partial_exit(pos, _make_ctx(partial_profit_pct=3.0))
+        assert ok is False
+
+    def test_target_not_reached(self):
+        """+1.875% < 3% 목표 → skip"""
+        cfg = SmartScannerConfig()
+        cfg.partial_profit_enabled = True
+        es = _make_strategy(scan_cfg=cfg)
+        pos = _make_pos(current_price=81_500)  # +1.875%
+        ok, _ = es.should_partial_exit(pos, _make_ctx(partial_profit_pct=3.0))
+        assert ok is False
+
+    def test_target_reached(self):
+        """+3% 도달 → (True, sell_ratio)"""
+        cfg = SmartScannerConfig()
+        cfg.partial_profit_enabled = True
+        cfg.partial_sell_ratio = 0.30
+        es = _make_strategy(scan_cfg=cfg)
+        pos = _make_pos(current_price=82_400)  # +3%
+        ok, ratio = es.should_partial_exit(pos, _make_ctx(partial_profit_pct=3.0))
+        assert ok is True
+        assert abs(ratio - 0.30) < 1e-9
+
+
+# ── 본절가 스탑 (_should_breakeven_stop) ────────────────────────────────
+
+class TestBreakevenStop:
+
+    def test_disabled(self):
+        cfg = SmartScannerConfig()
+        cfg.breakeven_stop_enabled = False
+        es = _make_strategy(scan_cfg=cfg)
+        pos = _make_pos(current_price=79_000, partial_sold=True)
+        assert es._should_breakeven_stop(pos) is False
+
+    def test_before_partial_sell(self):
+        """partial_sold=False → 적용 안 함"""
+        cfg = SmartScannerConfig()
+        cfg.breakeven_stop_enabled = True
+        es = _make_strategy(scan_cfg=cfg)
+        pos = _make_pos(current_price=79_000, partial_sold=False)
+        assert es._should_breakeven_stop(pos) is False
+
+    def test_triggers_after_partial_sell(self):
+        """partial_sold=True + 손실 → True"""
+        cfg = SmartScannerConfig()
+        cfg.breakeven_stop_enabled = True
+        cfg.breakeven_stop_buffer_pct = 0.0
+        es = _make_strategy(scan_cfg=cfg)
+        pos = _make_pos(current_price=79_000, partial_sold=True)  # -1.25%
+        assert es._should_breakeven_stop(pos) is True
+
+
+# ── EMA20 이탈 (_should_ema20_exit) ──────────────────────────────────────
+
+class TestEma20Exit:
+
+    def test_disabled(self):
+        cfg = SmartScannerConfig()
+        cfg.ema20_exit_enabled = False
+        es = _make_strategy(scan_cfg=cfg)
+        pos = _make_pos(current_price=78_000)
+        assert es._should_ema20_exit(pos) is False
+
+    def test_no_snap_store(self):
+        """snap_store 없으면 skip"""
+        cfg = SmartScannerConfig()
+        cfg.ema20_exit_enabled = True
+        es = _make_strategy(scan_cfg=cfg, snap_store=None)
+        pos = _make_pos(current_price=78_000)
+        assert es._should_ema20_exit(pos) is False
+
+    def test_above_ema20(self):
+        """현재가 > EMA20 → False"""
+        cfg = SmartScannerConfig()
+        cfg.ema20_exit_enabled = True
+        cfg.ema20_exit_buffer_pct = 0.0
+        snap_store = MagicMock()
+        snap = MagicMock()
+        snap.closes_1min = [80_000] * 25
+        snap_store.get_snapshot.return_value = snap
+        es = _make_strategy(scan_cfg=cfg, snap_store=snap_store)
+        pos = _make_pos(current_price=85_000)  # EMA ≈ 80000, 현재가 > EMA
+        assert es._should_ema20_exit(pos) is False
+
+
+# ── 추세소멸 (_should_trend_decay) ───────────────────────────────────────
+
+class TestTrendDecay:
+
+    def test_eod_skip(self):
+        """EOD 포지션 → skip"""
+        es = _make_strategy()
+        pos = _make_pos(current_price=82_400, eod_trade=True)
+        assert es._should_trend_decay(pos) is False
+
+    def test_loss_skip(self):
+        """손실 구간 → skip"""
+        es = _make_strategy()
+        pos = _make_pos(current_price=78_000)  # -2.5%
+        assert es._should_trend_decay(pos) is False
+
+    def test_no_signal(self):
+        """should_exit_on_trend_decay=False → False"""
         mock_order_mgr = MagicMock()
-        mock_order_mgr.should_exit_on_trend_decay = MagicMock(return_value=False)
-        mock_scan_cfg = SmartScannerConfig()
-        mock_scan_cfg.partial_profit_enabled = False  # 비활성
-        mock_risk_mgr = MagicMock()
+        mock_order_mgr.should_exit_on_trend_decay.return_value = False
+        es = _make_strategy(order_mgr=mock_order_mgr)
+        pos = _make_pos(current_price=82_400)  # +3%
+        assert es._should_trend_decay(pos) is False
 
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=mock_risk_mgr)
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=82_400,  # +3% (목표값 도달)
-        )
-
-        ctx = ExitContext(
-            sl_pct=1.5,
-            trail_activation=0.57,
-            trail_tier1=1.1,
-            trail_tier2=2.0,
-            trail_tier3=3.0,
-            time_cut_min=25,
-            partial_profit_pct=3.0,
-            atr_trail_enabled=False,
-        )
-
-        # 비활성화 상태이므로 False 반환
-        result = controller._check_partial_profit(pos, 10, ctx)
-        assert result is False
-
-    def test_partial_profit_already_sold(self):
-        """이미 분할매도 완료 시 skip"""
+    def test_triggers(self):
+        """should_exit_on_trend_decay=True + 이익 구간 → True"""
         mock_order_mgr = MagicMock()
-        mock_scan_cfg = SmartScannerConfig()
-        mock_scan_cfg.partial_profit_enabled = True
-
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=MagicMock())
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=82_400,
-        )
-        pos.partial_sold = True  # 이미 분할매도 완료
-
-        ctx = ExitContext(
-            sl_pct=1.5,
-            trail_activation=0.57,
-            trail_tier1=1.1,
-            trail_tier2=2.0,
-            trail_tier3=3.0,
-            time_cut_min=25,
-            partial_profit_pct=3.0,
-            atr_trail_enabled=False,
-        )
-
-        result = controller._check_partial_profit(pos, 10, ctx)
-        assert result is False
-
-    def test_partial_profit_target_not_reached(self):
-        """목표 수익률 미도달 시 skip"""
-        mock_order_mgr = MagicMock()
-        mock_scan_cfg = SmartScannerConfig()
-        mock_scan_cfg.partial_profit_enabled = True
-
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=MagicMock())
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=81_500,  # +1.875% (목표 3% 미만)
-        )
-
-        ctx = ExitContext(
-            sl_pct=1.5,
-            trail_activation=0.57,
-            trail_tier1=1.1,
-            trail_tier2=2.0,
-            trail_tier3=3.0,
-            time_cut_min=25,
-            partial_profit_pct=3.0,
-            atr_trail_enabled=False,
-        )
-
-        result = controller._check_partial_profit(pos, 10, ctx)
-        assert result is False  # 목표 미도달
+        mock_order_mgr.should_exit_on_trend_decay.return_value = True
+        es = _make_strategy(order_mgr=mock_order_mgr)
+        pos = _make_pos(current_price=82_400)  # +3%
+        assert es._should_trend_decay(pos) is True
 
 
-class TestPhase4BreakevenStop:
-    """본절가 스탑 (_check_breakeven_stop) 테스트"""
-
-    def test_breakeven_stop_disabled(self):
-        """본절가 스탑 비활성화"""
-        mock_order_mgr = MagicMock()
-        mock_scan_cfg = SmartScannerConfig()
-        mock_scan_cfg.breakeven_stop_enabled = False
-
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=MagicMock())
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=79_000,
-        )
-
-        result = controller._check_breakeven_stop(pos, 10)
-        assert result is False
-
-    def test_breakeven_stop_before_partial_sell(self):
-        """분할매도 전에는 적용 안 함"""
-        mock_order_mgr = MagicMock()
-        mock_scan_cfg = SmartScannerConfig()
-        mock_scan_cfg.breakeven_stop_enabled = True
-
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=MagicMock())
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=79_000,
-        )
-        pos.partial_sold = False  # 분할매도 전
-
-        result = controller._check_breakeven_stop(pos, 10)
-        assert result is False
-
-
-class TestPhase4EMA20Exit:
-    """EMA20 이탈 청산 (_check_ema20_exit) 테스트"""
-
-    def test_ema20_exit_disabled(self):
-        """EMA20 이탈 비활성화"""
-        mock_order_mgr = MagicMock()
-        mock_scan_cfg = SmartScannerConfig()
-        mock_scan_cfg.ema20_exit_enabled = False
-
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=MagicMock())
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=78_000,  # EMA20 아래
-        )
-
-        result = controller._check_ema20_exit(pos, 10)
-        assert result is False
-
-
-class TestPhase4TrendDecay:
-    """추세소멸 청산 (_check_trend_decay) 테스트"""
-
-    def test_trend_decay_eod_skip(self):
-        """EOD 포지션은 skip"""
-        mock_order_mgr = MagicMock()
-        mock_scan_cfg = SmartScannerConfig()
-
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=MagicMock())
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=82_400,
-        )
-        pos.eod_trade = True  # EOD 포지션
-
-        result = controller._check_trend_decay(pos, 10)
-        assert result is False
-
-    def test_trend_decay_loss_skip(self):
-        """손실 구간은 skip"""
-        mock_order_mgr = MagicMock()
-        mock_scan_cfg = SmartScannerConfig()
-
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=MagicMock())
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=78_000,  # -2.5% (손실)
-        )
-
-        result = controller._check_trend_decay(pos, 10)
-        assert result is False
-
-    def test_trend_decay_disabled_when_no_signal(self):
-        """should_exit_on_trend_decay가 False일 때"""
-        mock_order_mgr = MagicMock()
-        mock_order_mgr.should_exit_on_trend_decay = MagicMock(return_value=False)
-        mock_scan_cfg = SmartScannerConfig()
-
-        controller = TradingController(order_mgr=mock_order_mgr, scan_cfg=mock_scan_cfg, risk_mgr=MagicMock())
-
-        pos = Position(
-            code="005930",
-            name="삼성전자",
-            qty=10,
-            avg_price=80_000,
-            current_price=82_400,  # +3% (이익 구간)
-        )
-
-        result = controller._check_trend_decay(pos, 10)
-        assert result is False  # 추세소멸 신호 없음
-
+# ── ExitContext 기본 테스트 ───────────────────────────────────────────────
 
 class TestExitContext:
-    """ExitContext 데이터클래스 테스트"""
 
-    def test_exit_context_creation(self):
-        """ExitContext 생성 및 필드 확인"""
-        ctx = ExitContext(
-            sl_pct=1.5,
-            trail_activation=0.57,
-            trail_tier1=1.1,
-            trail_tier2=2.0,
-            trail_tier3=3.0,
-            time_cut_min=25,
-            partial_profit_pct=3.0,
-            atr_trail_enabled=False,
-        )
-
+    def test_creation(self):
+        ctx = _make_ctx()
         assert ctx.sl_pct == 1.5
         assert ctx.trail_activation == 0.57
-        assert ctx.trail_tier1 == 1.1
-        assert ctx.trail_tier2 == 2.0
-        assert ctx.trail_tier3 == 3.0
-        assert ctx.time_cut_min == 25
         assert ctx.partial_profit_pct == 3.0
         assert ctx.atr_trail_enabled is False
 
-    def test_exit_context_midday_values(self):
-        """점심시간대 ExitContext 필드 검증"""
-        ctx = ExitContext(
-            sl_pct=2.0,
-            trail_activation=1.0,
-            trail_tier1=1.5,
-            trail_tier2=2.5,
-            trail_tier3=4.0,
-            time_cut_min=15,
-            partial_profit_pct=2.5,
-            atr_trail_enabled=True,
-        )
-
-        assert ctx.sl_pct == 2.0  # 점심 손절 더 큼
-        assert ctx.time_cut_min == 15  # 점심 타임컷 더 짧음
+    def test_midday_values(self):
+        ctx = _make_ctx(sl_pct=2.0, trail_activation=1.0, time_cut_min=15)
+        assert ctx.sl_pct == 2.0
+        assert ctx.time_cut_min == 15

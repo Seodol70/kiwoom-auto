@@ -633,13 +633,21 @@ class KiwoomManager(KiwoomProtocol):
 
         # ── 단일 필드로 값이 온 경우 (표준 응답) ─────────────────────────
         if raw_current:
-            raw_c = safe_int(raw_current)
-            raw_b = safe_int(raw_base)
-            # opt20001은 지수를 소수점 2자리 정수화하여 전송할 수 있음
-            # 코스피/코스닥 통상 1000~3000 범위. 10000 초과면 x100 보정
-            current = raw_c / 100.0 if raw_c > 10_000 else float(raw_c)
-            base    = raw_b / 100.0 if raw_b > 10_000 else float(raw_b)
-            change_pct = round((current - base) / base * 100, 2) if base else 0.0
+            current = abs(safe_float(raw_current))
+            base    = abs(safe_float(raw_base))
+            
+            # opt20001은 지수를 소수점 2자리 정수화하여 전송하는 경우가 많음 (예: 2650.12 -> 265012)
+            # 현재가가 10000보다 크면 100으로 나누어 보정 (코스피/코스닥 지수는 보통 100~5000 사이)
+            if current > 10000:
+                current /= 100.0
+            if base > 10000:
+                base /= 100.0
+
+            # 등락률 필드 활용 (직접 계산 시 기준가 0 오류 방지)
+            change_pct = safe_float(d.get("등락률", "0"))
+            if change_pct == 0.0 and base > 0:
+                change_pct = round((current - base) / base * 100, 2)
+            
             logger.info("[opt20001] 지수 - code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",
                         index_code, current, base, change_pct)
             _TR_FAIL.ok("opt20001")
@@ -666,8 +674,14 @@ class KiwoomManager(KiwoomProtocol):
         current_raw = today_rows[0].get("close", 0)
         base_raw    = prev_rows[0].get("close", 0) if prev_rows else 0
 
-        current = float(current_raw) / 100.0 if current_raw > 10_000 else float(current_raw)
-        base    = float(base_raw)    / 100.0 if base_raw    > 10_000 else float(base_raw)
+        current = abs(safe_float(current_raw))
+        base    = abs(safe_float(base_raw))
+
+        if current > 10000:
+            current /= 100.0
+        if base > 10000:
+            base /= 100.0
+            
         change_pct = round((current - base) / base * 100, 2) if base else 0.0
 
         logger.info("[opt20001] 지수(rows) - code=%s 현재=%.2f 기준=%.2f 등락=%.2f%%",

@@ -45,37 +45,43 @@ class HeaderBar(QWidget):
         logging.info("[HeaderBar] 초기화 완료 (Version: 2026-05-03-v2, Path: %s)", __file__)
         
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(16, 0, 16, 0)
-        lay.setSpacing(16)
+        lay.setContentsMargins(8, 0, 8, 0)
+        lay.setSpacing(8)
         # 시각적 변화 (배경색 아주 약간 변경)
         self.setStyleSheet("background-color: #11111b; border-bottom: 2px solid #313244;")
 
 
-        self._lbl_title = QLabel("📈 키움 자동매매")
-        self._lbl_title.setFont(QFont("Malgun Gothic", 12, QFont.Bold))
+        self._lbl_title = QLabel("📈 키움")
+        self._lbl_title.setFont(QFont("Malgun Gothic", 10, QFont.Bold))
         self._lbl_title.setObjectName("lbl_title")
-        self._lbl_title.setMinimumWidth(180)  # 잘림 방지
+        self._lbl_title.setMinimumWidth(80)  # 너비 축소
 
-        self._lbl_account = self._make("계좌: —")
-        self._lbl_mode    = self._make("—")
-        self._lbl_conn    = self._make("● 미연결")
+        self._lbl_account = self._make("🏠 계좌: —")
+        self._lbl_conn    = self._make("🔌 미연결")
         self._lbl_conn.setObjectName("conn_off")
-        self._lbl_pnl     = self._make("당일 실현손익: —")
+        self._lbl_pnl     = self._make("💰 실현손익: —")
         
         # 지수 라벨 초기 스타일 (명시적 색상 부여)
         self._lbl_kospi   = self._make("KOSPI: —")
         self._lbl_kosdaq  = self._make("KOSDAQ: —")
         self._lbl_kospi.setStyleSheet("color: #cdd6f4;")
         self._lbl_kosdaq.setStyleSheet("color: #cdd6f4;")
+        
+        # 지수 라벨 너비 확보 (텍스트 길이에 따라 잘림 방지)
+        self._lbl_kospi.setMinimumWidth(180)
+        self._lbl_kosdaq.setMinimumWidth(180)
+        
+        # ── 초기 지수 테스트 데이터 (표시 여부 확인용) ──────────────────
+        self.set_index(0.0, 0.0, 0.0, 0.0, False)
 
 
         # ── Safety Switch ───────────────────────────────────────────────
-        self._btn_auto = QPushButton("▶ 자동매매 시작")
+        self._btn_auto = QPushButton("▶ 자동 시작")
         self._btn_auto.setObjectName("btn_auto_off")
         self._btn_auto.setCheckable(True)
         self._btn_auto.setChecked(False)
         self._btn_auto.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
-        self._btn_auto.setFixedSize(140, 30)
+        self._btn_auto.setFixedSize(110, 30)
         self._btn_auto.clicked.connect(self._on_auto_clicked)
 
 
@@ -112,12 +118,12 @@ class HeaderBar(QWidget):
 
 
         # ── 야간보유 모드 토글 버튼 ────────────────────────────────────
-        self._btn_overnight = QPushButton("🌙 야간보유 OFF")
+        self._btn_overnight = QPushButton("🌙 야간 OFF")
         self._btn_overnight.setObjectName("btn_overnight_off")
         self._btn_overnight.setCheckable(True)
         self._btn_overnight.setChecked(False)
         self._btn_overnight.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
-        self._btn_overnight.setFixedSize(120, 30)
+        self._btn_overnight.setFixedSize(100, 30)
         self._btn_overnight.setToolTip(
             "야간보유 모드: ON 시 14:40~14:55에 EOD 신호 발생, 당일 15:19 강제청산 제외\n"
             "익일 09:00 갭 체크 후 자동 관리 (갭상승 +2% 익절 / 갭하락 -1.5% 손절 / 09:30 타임컷)"
@@ -126,11 +132,11 @@ class HeaderBar(QWidget):
 
 
         # ── 실전투자 전환 버튼 ────────────────────────────────────────────────
-        self._btn_switch_real = QPushButton("💎 실전투자 전환")
+        self._btn_switch_real = QPushButton("💎 실전/모의")
         self._btn_switch_real.setObjectName("btn_switch_real")
         self._btn_switch_real.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
-        self._btn_switch_real.setFixedSize(120, 30)
-        self._btn_switch_real.setVisible(False)
+        self._btn_switch_real.setFixedSize(100, 30)
+        self._btn_switch_real.setVisible(True)
         self._btn_switch_real.clicked.connect(self._on_switch_real_clicked)
 
 
@@ -142,8 +148,6 @@ class HeaderBar(QWidget):
         lay.addStretch()
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_account)
-        lay.addWidget(self._divider())
-        lay.addWidget(self._lbl_mode)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_conn)
         lay.addWidget(self._divider())
@@ -173,10 +177,10 @@ class HeaderBar(QWidget):
 
     def _on_auto_clicked(self, checked: bool) -> None:
         if checked:
-            self._btn_auto.setText("⏹ 자동매매 정지")
+            self._btn_auto.setText("⏹ 자동 중지")
             self._btn_auto.setObjectName("btn_auto_on")
         else:
-            self._btn_auto.setText("▶ 자동매매 시작")
+            self._btn_auto.setText("▶ 자동 시작")
             self._btn_auto.setObjectName("btn_auto_off")
         # QSS objectName 변경 즉시 반영
         self._btn_auto.style().unpolish(self._btn_auto)
@@ -190,10 +194,10 @@ class HeaderBar(QWidget):
 
     def _on_overnight_clicked(self, checked: bool) -> None:
         if checked:
-            self._btn_overnight.setText("🌙 야간보유 ON")
+            self._btn_overnight.setText("🌙 야간 ON")
             self._btn_overnight.setObjectName("btn_overnight_on")
         else:
-            self._btn_overnight.setText("🌙 야간보유 OFF")
+            self._btn_overnight.setText("🌙 야간 OFF")
             self._btn_overnight.setObjectName("btn_overnight_off")
         self._btn_overnight.style().unpolish(self._btn_overnight)
         self._btn_overnight.style().polish(self._btn_overnight)
@@ -230,18 +234,28 @@ class HeaderBar(QWidget):
 
 
     def set_connected(self, account: str, mode: str) -> None:
-        self._lbl_account.setText(f"계좌: {account}")
-        self._lbl_mode.setText(f"{'🟠 실전' if mode == '실전투자' else '🟢 모의'}")
-        self._lbl_conn.setText("● 연결됨")
+        self._lbl_account.setText(f"🏠 계좌: {account}")
+        self._lbl_conn.setText("🔌 연결됨")
         self._lbl_conn.setObjectName("conn_on")
         self._lbl_conn.style().unpolish(self._lbl_conn)
         self._lbl_conn.style().polish(self._lbl_conn)
-        self._btn_switch_real.setVisible(mode != "실전투자")
+        
+        # 실전/모의 상태에 따라 버튼 UI 변경
+        if mode == "실전투자":
+            self._btn_switch_real.setText("💎 실전 (모의전환)")
+            self._btn_switch_real.setObjectName("btn_switch_real")
+        else:
+            self._btn_switch_real.setText("🧪 모의 (실전전환)")
+            self._btn_switch_real.setObjectName("btn_switch_mock")
+            
+        self._btn_switch_real.style().unpolish(self._btn_switch_real)
+        self._btn_switch_real.style().polish(self._btn_switch_real)
+        self._btn_switch_real.setVisible(True)
 
 
     def set_pnl(self, pnl: int) -> None:
         sign = "+" if pnl >= 0 else ""
-        self._lbl_pnl.setText(f"당일 실현손익: {sign}{pnl:,}원")
+        self._lbl_pnl.setText(f"💰 실현손익: {sign}{pnl:,}원")
         color = "#f38ba8" if pnl < 0 else "#a6e3a1"
         self._lbl_pnl.setStyleSheet(f"color: {color};")
         self._lbl_pnl.setToolTip(
@@ -249,12 +263,16 @@ class HeaderBar(QWidget):
         )
 
 
+    @pyqtSlot(float, float, float, float, bool)
     def set_index(self, kospi_current: float, kospi_chg: float,
-                  kosdaq_current: float, kosdaq_chg: float, is_crash: bool = False) -> None:
+                  kosdaq_current: float, kosdaq_chg: float, is_crash: bool) -> None:
         """코스피·코스닥 현재가 및 등락률 표시 (한국식: 상승 빨강 / 하락 파랑)."""
+        logging.warning("[HeaderBar] set_index 호출됨: KP=%.2f(%.2f%%), KD=%.2f(%.2f%%)", 
+                      kospi_current, kospi_chg, kosdaq_current, kosdaq_chg)
+        
         def _fmt(name: str, cur: float, chg: float) -> str:
             arrow = "▲" if chg > 0 else "▼" if chg < 0 else "—"
-            return f"{name} {cur:,.2f} ({arrow}{abs(chg):.2f}%)"
+            return f"📊 {name} {cur:,.2f} ({arrow}{abs(chg):.2f}%)"
 
         self._lbl_kospi.setText(_fmt("KOSPI", kospi_current, kospi_chg))
         self._lbl_kosdaq.setText(_fmt("KOSDAQ", kosdaq_current, kosdaq_chg))

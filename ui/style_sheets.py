@@ -60,11 +60,20 @@ QPushButton#btn_auto_on {
 }
 
 /* ─── 실전/모의 전환 버튼 ────────────────────────────── */
+QPushButton#btn_switch_mock {
+    background: #313244;
+    color: #89b4fa; /* Blue (Mock) */
+    border: 1px solid #89b4fa;
+}
+QPushButton#btn_switch_mock:hover { background: #1e1e2e; }
+
 QPushButton#btn_switch_real {
     background: #313244;
-    color: #fab387;
+    color: #fab387; /* Orange (Real) */
     border: 1px solid #fab387;
+    font-weight: bold;
 }
+QPushButton#btn_switch_real:hover { background: #45475a; }
 
 /* ─── 야간보유 모드 버튼 ──────────────────────────────── */
 QPushButton#btn_overnight_off {
@@ -84,25 +93,25 @@ QPushButton#btn_overnight_on:hover { background: #3d3665; }
 
 /* ─── 재시작 버튼 ──────────────────────────────────────── */
 QPushButton#btn_restart {
-    background: #94e2d5;
-    color: #1e1e2e;
+    background: #008080; /* Teal */
+    color: #ffffff;
     border: none;
     border-radius: 6px;
     padding: 4px 8px;
     font-weight: bold;
 }
-QPushButton#btn_restart:hover { background: #a8eee5; }
+QPushButton#btn_restart:hover { background: #00a0a0; }
 
 /* ─── 종료 버튼 ───────────────────────────────────────── */
 QPushButton#btn_exit {
-    background: #f38ba8;
-    color: #1e1e2e;
+    background: #ff4d4d; /* Bright Red */
+    color: #ffffff;
     border: none;
     border-radius: 6px;
     padding: 4px 8px;
     font-weight: bold;
 }
-QPushButton#btn_exit:hover { background: #f5a3b8; }
+QPushButton#btn_exit:hover { background: #ff6666; }
 
 /* ─── 차트 정보 패널 ──────────────────────────────────── */
 QWidget#chart_info_panel {
@@ -196,4 +205,23 @@ QScrollBar::handle:vertical {
     background: #313244; border-radius: 4px; min-height: 20px;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+/* ─── 메시지 박스 (팝업) ────────────────────────────────── */
+QMessageBox {
+    background-color: #1e1e2e;
+}
+QMessageBox QLabel {
+    color: #ffffff;      /* 순백색으로 변경 */
+    font-weight: bold;   /* 글자 두껍게 */
+    font-size: 10pt;
+}
+QMessageBox QPushButton {
+    background-color: #313244;
+    color: #cdd6f4;
+    min-width: 80px;
+    padding: 6px;
+}
+QMessageBox QPushButton:hover {
+    background-color: #45475a;
+}
 """
