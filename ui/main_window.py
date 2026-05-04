@@ -177,3 +177,10 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self.append_log("👋 프로그램 종료 중...")
         if self._tg: self._tg.stop()
         super().closeEvent(event)
+
+
+def launch(kiwoom):
+    """Qt 대시보드 실행 엔트리포인트"""
+    win = MainWindow(kiwoom)
+    win.show()
+    return win

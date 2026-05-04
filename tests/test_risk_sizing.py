@@ -132,16 +132,26 @@ def test_portfolio_loss_cut():
     om.positions = {}
     cfg = SmartScannerConfig()
     cfg.max_portfolio_unrealized_loss_pct = 5.0
-    
+
     # Positions with 6% total loss
     p1 = MagicMock(avg_price=10000, qty=100, pnl=-60000) # -6%
     om.positions = {"000001": p1}
-    
-    rm = RiskManager(om, cfg)
+
+    # Mock session manager to return fresh state (not persisted)
+    session_mgr = MagicMock()
+    session_mgr.load.return_value = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "daily_realized_pnl": 0.0,
+        "is_loss_cut_locked": False,
+        "is_profit_locked": False,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    rm = RiskManager(om, cfg, session_mgr=session_mgr)
     rm.daily_loss_cut = MagicMock()
-    
+
     rm.check()
-    
+
     rm.daily_loss_cut.emit.assert_called_once()
     print("[OK] Portfolio loss cut trigger passed")
 
@@ -152,13 +162,23 @@ def test_cooling_off():
     cfg = SmartScannerConfig()
     cfg.consecutive_loss_limit = 2
     cfg.cooling_off_minutes = 10
-    
-    rm = RiskManager(om, cfg)
-    
+
+    # Mock session manager to return fresh state (not persisted)
+    session_mgr = MagicMock()
+    session_mgr.load.return_value = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "daily_realized_pnl": 0.0,
+        "is_loss_cut_locked": False,
+        "is_profit_locked": False,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    rm = RiskManager(om, cfg, session_mgr=session_mgr)
+
     # Simulate 1st loss
     rm._on_order_filled({"side": "매도체결", "realized_pnl": -1000})
     assert rm.is_new_entry_locked == False
-    
+
     # Simulate 2nd loss
     rm._on_order_filled({"side": "매도체결", "realized_pnl": -500})
     assert rm.is_new_entry_locked == True

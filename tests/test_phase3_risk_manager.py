@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -35,13 +36,26 @@ class MockConfig:
     daily_loss_cut_won = -100000    # -10만원 손실 도달 시 청산
 
 
+def _make_fresh_session_mgr():
+    """Fresh session state를 반환하는 mock session manager 생성"""
+    session_mgr = MagicMock()
+    session_mgr.load.return_value = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "daily_realized_pnl": 0.0,
+        "is_loss_cut_locked": False,
+        "is_profit_locked": False,
+        "timestamp": datetime.now().isoformat(),
+    }
+    return session_mgr
+
+
 def test_profit_locked_signal():
     """수익 목표 달성 시 신호 발행 테스트"""
     app = QApplication.instance() or QApplication([])
 
     order_mgr = MockOrderManager()
     scan_cfg = MockConfig()
-    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None)
+    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None, session_mgr=_make_fresh_session_mgr())
 
     signal_fired = {"profit_locked": False}
 
@@ -75,7 +89,7 @@ def test_loss_cut_signal():
 
     order_mgr = MockOrderManager()
     scan_cfg = MockConfig()
-    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None)
+    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None, session_mgr=_make_fresh_session_mgr())
 
     signal_fired = {"loss_cut": False}
 
@@ -109,7 +123,7 @@ def test_manual_unlock():
 
     order_mgr = MockOrderManager()
     scan_cfg = MockConfig()
-    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None)
+    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None, session_mgr=_make_fresh_session_mgr())
 
     # 수익 락 상태
     order_mgr.set_pnl(100000)
@@ -130,7 +144,7 @@ def test_reset():
 
     order_mgr = MockOrderManager()
     scan_cfg = MockConfig()
-    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None)
+    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None, session_mgr=_make_fresh_session_mgr())
 
     # 여러 상태 설정
     order_mgr.set_pnl(100000)

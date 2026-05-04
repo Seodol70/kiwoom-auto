@@ -12,6 +12,7 @@ test_risk_manager_boundary.py — RiskManager 경계값 단위 테스트
 
 import pytest
 from unittest.mock import MagicMock
+from datetime import datetime
 from PyQt5.QtWidgets import QApplication
 
 from app.risk_manager import RiskManager
@@ -37,7 +38,17 @@ def _make_rm(daily_pnl: float = 0.0, profit_lock: int = 100_000, loss_cut: int =
     scan_cfg.daily_profit_lock_won = profit_lock
     scan_cfg.daily_loss_cut_won    = loss_cut
 
-    rm = RiskManager(order_mgr=order_mgr, scan_cfg=scan_cfg)
+    # Mock session manager to return fresh state (not persisted)
+    session_mgr = MagicMock()
+    session_mgr.load.return_value = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "daily_realized_pnl": 0.0,
+        "is_loss_cut_locked": False,
+        "is_profit_locked": False,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    rm = RiskManager(order_mgr=order_mgr, scan_cfg=scan_cfg, session_mgr=session_mgr)
     return rm, order_mgr, scan_cfg
 
 

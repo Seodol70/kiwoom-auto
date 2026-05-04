@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import MagicMock
+from datetime import datetime
 from PyQt5.QtWidgets import QApplication
 from app.state import AppState
 from app.risk_manager import RiskManager
@@ -9,6 +10,19 @@ from ui.signal_manager import SignalManager
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
+
+
+def _make_fresh_session_mgr():
+    """Fresh session state를 반환하는 mock session manager 생성"""
+    session_mgr = MagicMock()
+    session_mgr.load.return_value = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "daily_realized_pnl": 0.0,
+        "is_loss_cut_locked": False,
+        "is_profit_locked": False,
+        "timestamp": datetime.now().isoformat(),
+    }
+    return session_mgr
 
 def test_risk_lock_integration(qapp):
     # 1. Setup Mock Objects
@@ -29,7 +43,7 @@ def test_risk_lock_integration(qapp):
     win._scan_cfg = scan_cfg
     
     # 2. Setup RiskManager
-    rm = RiskManager(order_mgr=order_mgr, scan_cfg=scan_cfg)
+    rm = RiskManager(order_mgr=order_mgr, scan_cfg=scan_cfg, session_mgr=_make_fresh_session_mgr())
     win.risk_manager = rm
     
     # Mock TradingController

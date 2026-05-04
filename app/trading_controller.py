@@ -460,18 +460,33 @@ class TradingController(QObject):
     @pyqtSlot()
     def check_market_crash(self) -> None:
         """지수 급락 감지 및 신규 진입 차단 (60초마다)"""
+        # 장 시작 전(08:30 이전)에는 지수 데이터 미제공 — 스킵
+        from datetime import datetime, time as _time
+        now_t = datetime.now().time()
+        if now_t < _time(8, 30):
+            logger.debug("[check_market_crash] 장 전 (%s) — 지수 조회 스킵", now_t.strftime("%H:%M"))
+            return
+
         if getattr(self._kiwoom, '_tr_busy', False):
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(5_000, self.check_market_crash)
             return
 
-        # 1. 지수 조회 (코스피, 코스닥)
+        # 1. 지수 조회 (코스피, 코스닥) — 하나라도 실패하면 캐시 재사용
         kp = self._kiwoom.get_index_info("001")
         kd = self._kiwoom.get_index_info("101")
 
-        if not kp or not kd:
-            logger.warning("[check_market_crash] 지수 정보를 가져오지 못했습니다. (KP=%s, KD=%s)", kp is not None, kd is not None)
+        # 둘 다 실패 시만 스킵, 하나는 성공하면 진행
+        if not kp and not kd:
+            logger.warning("[check_market_crash] 지수 정보 전부 조회 실패 (KP=%s, KD=%s)", kp is not None, kd is not None)
             return
+
+        if not kp:
+            logger.warning("[check_market_crash] KOSPI 조회 실패 — 캐시값 사용 (KOSDAQ만 갱신)")
+            kp = {"index_code": "001", "current": 0, "base": 0, "change_pct": self._kospi_chg_pct}
+        if not kd:
+            logger.warning("[check_market_crash] KOSDAQ 조회 실패 — 캐시값 사용 (KOSPI만 갱신)")
+            kd = {"index_code": "101", "current": 0, "base": 0, "change_pct": self._kosdaq_chg_pct}
 
         self._kospi_chg_pct = kp['change_pct']
         self._kosdaq_chg_pct = kd['change_pct']

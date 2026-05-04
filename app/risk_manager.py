@@ -32,6 +32,7 @@ class RiskManager(QObject):
         order_mgr: OrderManager,
         scan_cfg: SmartScannerConfig,
         parent=None,
+        session_mgr=None,
     ):
         super().__init__(parent)
         self._order_mgr = order_mgr
@@ -46,8 +47,16 @@ class RiskManager(QObject):
         self._consecutive_losses = 0
         self._cooling_off_until = None
 
+        # [NEW] 세션 상태 관리자 (프로그램 재시작 후에도 당일 손익 유지)
+        if session_mgr is None:
+            from app.session_state import SessionStateManager
+            session_mgr = SessionStateManager()
+        self._session_mgr = session_mgr
+        self._restore_session_state()
+
         # 체결 신호 연결 (연속 손실 추적용)
-        self._order_mgr.order_filled.connect(self._on_order_filled)
+        if hasattr(self._order_mgr, 'order_filled'):
+            self._order_mgr.order_filled.connect(self._on_order_filled)
 
     def update_config(self, scan_cfg: SmartScannerConfig) -> None:
         """설정 객체 참조를 갱신한다."""
@@ -73,12 +82,14 @@ class RiskManager(QObject):
                 and not self._new_entry_locked
                 and not self._manual_unlock_active):
             self._new_entry_locked = True
+            self._save_session_state()  # 즉시 저장
             self.daily_profit_locked.emit()
 
         # 손절 체크
         if (daily_pnl <= -self._scan_cfg.daily_loss_cut_won
                 and not self._daily_loss_cut_done):
             self._daily_loss_cut_done = True
+            self._save_session_state()  # 즉시 저장
             self.daily_loss_cut.emit()
 
         # [NEW] 전체 포트폴리오 미실현 손익 체크
@@ -102,11 +113,32 @@ class RiskManager(QObject):
             from logging_config import order_log
             order_log.info("[리스크] 냉각기 종료 — 신규 매수 차단 해제")
 
+    def _restore_session_state(self) -> None:
+        """저장된 세션 상태 복원 (프로그램 재시작 후)"""
+        import logging
+        state = self._session_mgr.load()
+        self._new_entry_locked = state.get("is_profit_locked", False)
+        self._daily_loss_cut_done = state.get("is_loss_cut_locked", False)
+        logging.getLogger(__name__).info(
+            "[RiskManager] 세션 상태 복원 (ProfitLock=%s, LossCut=%s)",
+            self._new_entry_locked, self._daily_loss_cut_done
+        )
+
+    def _save_session_state(self) -> None:
+        """현재 상태를 세션 파일에 저장 (즉시)"""
+        daily_pnl = self._order_mgr.daily_realized_pnl
+        self._session_mgr.save(
+            daily_pnl=daily_pnl,
+            loss_cut_locked=self._daily_loss_cut_done,
+            profit_locked=self._new_entry_locked
+        )
+
     def reset(self) -> None:
         """자정 리셋"""
         self._new_entry_locked = False
         self._daily_loss_cut_done = False
         self._manual_unlock_active = False
+        self._save_session_state()  # 리셋 후 저장
 
     def unlock_entry_manual(self) -> None:
         """수동으로 신규 매수 락 해제 (사용자 버튼)"""

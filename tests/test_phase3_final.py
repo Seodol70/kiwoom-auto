@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
+from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -48,6 +49,19 @@ class MockConfig:
     trend_protect_enabled = True
 
 
+def _make_fresh_session_mgr():
+    """Fresh session state를 반환하는 mock session manager 생성"""
+    session_mgr = MagicMock()
+    session_mgr.load.return_value = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "daily_realized_pnl": 0.0,
+        "is_loss_cut_locked": False,
+        "is_profit_locked": False,
+        "timestamp": datetime.now().isoformat(),
+    }
+    return session_mgr
+
+
 def test_phase3_modules():
     """Phase 3 모든 모듈이 정상 생성되는지 테스트"""
     app = QApplication.instance() or QApplication([])
@@ -64,7 +78,7 @@ def test_phase3_modules():
     print("[OK] MarketScheduler 작동 확인")
 
     # 2. RiskManager
-    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None)
+    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None, session_mgr=_make_fresh_session_mgr())
     assert not risk_mgr.is_new_entry_locked, "RiskManager 초기 상태 오류"
     risk_mgr.check()  # 정상 작동 확인
     print("[OK] RiskManager 작동 확인")
