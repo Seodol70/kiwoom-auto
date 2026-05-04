@@ -6,7 +6,7 @@ from typing import Optional
 
 import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QObject, QThread, QTimer, QEvent, pyqtSignal, pyqtSlot
-from PyQt5.QtGui import QColor, QFont, QTextCursor
+from PyQt5.QtGui import QColor, QFont, QTextCursor, QBrush
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, QSplitter,
@@ -61,7 +61,7 @@ class InvestorPanel(QWidget):
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self._table.setAlternatingRowColors(True)
+        self._table.setAlternatingRowColors(False)  # 히트맵 스타일이므로 비활성화
         self._table.setFont(QFont("Consolas", 8))
 
 
@@ -73,7 +73,7 @@ class InvestorPanel(QWidget):
         hdr_h.setSectionResizeMode(3, QHeaderView.Fixed)
 
 
-        self._table.verticalHeader().setDefaultSectionSize(18)
+        self._table.verticalHeader().setDefaultSectionSize(20)
         root.addWidget(self._table)
 
 
@@ -111,32 +111,51 @@ class InvestorPanel(QWidget):
 
             if iscore > 0:
                 score_txt   = "▲"
-                score_color = QColor("#a6e3a1")
+                score_fg = QColor("#fff")
+                score_bg = QColor("#40c057")  # 진한 녹색
             elif iscore < 0:
                 score_txt   = "▼"
-                score_color = QColor("#f38ba8")
+                score_fg = QColor("#fff")
+                score_bg = QColor("#d63447")  # 진한 빨강
             else:
                 score_txt   = "-"
-                score_color = QColor("#6c7086")
+                score_fg = QColor("#6c7086")
+                score_bg = QColor("#45475a")  # 중립 회색
 
 
-            f_color = QColor("#a6e3a1") if f_net > 0 else (
-                      QColor("#f38ba8") if f_net < 0 else QColor("#6c7086"))
-            i_color = QColor("#a6e3a1") if i_net > 0 else (
-                      QColor("#f38ba8") if i_net < 0 else QColor("#6c7086"))
+            # 외국인/기관 — 배경 색상 기반 히트맵 스타일
+            f_fg = QColor("#fff")
+            i_fg = QColor("#fff")
+
+            if f_net > 0:
+                f_bg = QColor("#52b788")  # 연한 녹색
+            elif f_net < 0:
+                f_bg = QColor("#e63946")  # 연한 빨강
+            else:
+                f_bg = QColor("#45475a")
+                f_fg = QColor("#6c7086")
+
+            if i_net > 0:
+                i_bg = QColor("#52b788")
+            elif i_net < 0:
+                i_bg = QColor("#e63946")
+            else:
+                i_bg = QColor("#45475a")
+                i_fg = QColor("#6c7086")
 
 
             cells = [
-                (r.get("name", r.get("code", "")), QColor("#cdd6f4"), Qt.AlignLeft),
-                (f"{f_net:+,}",                    f_color,           Qt.AlignRight),
-                (f"{i_net:+,}",                    i_color,           Qt.AlignRight),
-                (score_txt,                         score_color,       Qt.AlignCenter),
+                (r.get("name", r.get("code", "")), QColor("#1e1e2e"), QColor("#cdd6f4"), Qt.AlignLeft),   # 이름: 배경 dark, 텍스트 밝음
+                (f"{f_net:+,}",                     f_bg,               f_fg,               Qt.AlignRight),  # 외국인: 배경 색상
+                (f"{i_net:+,}",                     i_bg,               i_fg,               Qt.AlignRight),  # 기관: 배경 색상
+                (score_txt,                         score_bg,           score_fg,           Qt.AlignCenter), # 수급: 배경 색상
             ]
-            for col_idx, (text, fg, align) in enumerate(cells):
+            for col_idx, (text, bg, fg, align) in enumerate(cells):
                 existing = self._table.item(row_idx, col_idx)
                 if existing and existing.text() == text:
                     continue
                 item = QTableWidgetItem(text)
+                item.setBackground(QBrush(bg))
                 item.setForeground(fg)
                 item.setTextAlignment(Qt.AlignVCenter | align)
                 self._table.setItem(row_idx, col_idx, item)
@@ -151,12 +170,15 @@ class InvestorPanel(QWidget):
         if not inv_rows:
             self._table.setRowCount(1)
             item = QTableWidgetItem("수급 데이터 조회 대기 중 (10분 주기 갱신)")
+            item.setBackground(QBrush(QColor("#45475a")))
             item.setForeground(QColor("#6c7086"))
             item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
             self._table.setItem(0, 0, item)
             # 나머지 셀 비움
             for c in range(1, len(self._HEADERS)):
-                self._table.setItem(0, c, QTableWidgetItem(""))
+                empty = QTableWidgetItem("")
+                empty.setBackground(QBrush(QColor("#45475a")))
+                self._table.setItem(0, c, empty)
 
 
 
