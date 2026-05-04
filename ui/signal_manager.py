@@ -39,10 +39,8 @@ class SignalManager:
 
     def _bind_trading_core(self):
         """주문, 체결, 필터링 등 핵심 거래 로직"""
-        # 주문 로그
-        self.om.order_sent.connect(lambda d: self.win.append_log(
-            f"{d['side']} 주문 전송 — {d['name']}({d['code']}) {d['qty']}주 {d['price']}원"
-        ))
+        # 주문 로그 — lambda 제거, 전용 슬롯 연결
+        self.om.order_sent.connect(self.win._on_order_sent)
         self.om.order_filled.connect(self.win._on_order_filled)
         self.om.order_failed.connect(lambda m: self.win.append_log(f"⚠ 주문 실패: {m}"))
         
@@ -50,9 +48,10 @@ class SignalManager:
         self.tc.signal_rejected.connect(lambda msg: self.win.append_log(f"❌ [진입거절] {msg}"))
         self.tc.log_message.connect(self.win.append_log)
         self.tc.portfolio_updated.connect(self.win._on_portfolio_refresh)
-        self.tc.scan_status_updated.connect(
-            lambda msg, done: self.win.scan_status.done(msg) if done else self.win.scan_status.reset()
-        )
+        self.tc.scan_status_updated.connect(self.win._on_scan_status_updated)
+
+        # 첫 신호 자동매매 시작 — TC에서 판단, UI만 반응
+        self.tc.auto_trade_started.connect(self.win._on_auto_trade_started)
 
     def _bind_ui_interactions(self):
         """사용자 조작(버튼 클릭, 값 변경 등) 관련 시그널"""
@@ -78,10 +77,11 @@ class SignalManager:
         """워커 스레드 및 스케줄러 관련 시그널"""
         self.win._port_worker.refresh_done.connect(self.win._on_portfolio_refresh)
         self.win._port_worker.log_message.connect(self.win.append_log)
-        # 스캐너 워커
-        self.win._scan_worker.signal_detected.connect(self.win._on_scan_signal)
+
+        # 스캐너 워커 — signal_detected를 TC(엔진)와 UI에 각각 연결
+        self.win._scan_worker.signal_detected.connect(self.tc.handle_signal)          # 엔진 직접
+        self.win._scan_worker.signal_detected.connect(self.win._on_scan_signal)       # UI 로그만
         self.win._scan_worker.watch_list_updated.connect(self.win.scanner_panel.refresh)
-        self.win._scan_worker.watch_list_updated.connect(self.win.investor_panel.refresh)
         self.win._scan_worker.log_message.connect(self.win.append_log)
 
         # 스케줄러

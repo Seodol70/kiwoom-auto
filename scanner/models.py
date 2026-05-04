@@ -4,11 +4,58 @@ Scanner 도메인 데이터 모델
 SnapshotStore, IndicatorService, SignalEvaluator 등 여러 모듈이 사용하는
 dataclass를 중앙 정의. 순환 import 방지.
 """
-from __future__ import annotations
-
+from collections import deque as _Deque
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
+
+
+@dataclass
+class InternalStockState:
+    """SnapshotStore 내부에서 관리하는 종목별 상세 상태 (Mutable)"""
+    code: str
+    name: str = ""
+    
+    # 실시간 시세 (고속 캐시)
+    current_price: int = 0
+    open_price: int = 0
+    high_price: int = 0
+    low_price: int = 0
+    prev_close: int = 0
+    volume: int = 0
+    trade_amount: int = 0
+    change_pct: float = 0.0
+    
+    # 분봉 (1분봉 OHLCV)
+    mins: List[float] = field(default_factory=list)
+    min_opens: List[float] = field(default_factory=list)
+    min_highs: List[float] = field(default_factory=list)
+    min_lows: List[float] = field(default_factory=list)
+    min_vols: List[int] = field(default_factory=list)
+    
+    # 수급/기타
+    chejan_str: float = 100.0
+    inv_foreign: int = 0
+    inv_inst: int = 0
+    inv_score: int = 0
+    inv_updated_at: Optional[datetime] = None
+    
+    # 추세/메타
+    trend_level: int = 0
+    trend_prev_level: int = 0
+    sector: str = ""
+    updated_at: datetime = field(default_factory=datetime.now)
+    
+    # 틱 데이터 (초당 거래 속도 계산용)
+    tick_ts_vol: _Deque = field(default_factory=_Deque)
+    
+    # 일봉 데이터
+    daily_data: List[Dict] = field(default_factory=list)
+    daily_updated_at: Optional[datetime] = None
+
+    def update_trend(self, new_level: int):
+        self.trend_prev_level = self.trend_level
+        self.trend_level = new_level
 
 
 @dataclass

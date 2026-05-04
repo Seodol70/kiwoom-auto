@@ -29,7 +29,7 @@ class ScannerPanel(QWidget):
 
 
     # 스캐너: 전일 대비 당일 등락률(%) — 보유현황의 '수익률'(평단 대비)과 구분
-    _HEADERS = ["종목코드", "종목명", "현재가", "당일등락률", "거래대금", "신호", "추세", "수급", "매수"]
+    _HEADERS = ["종목코드", "종목명", "현재가", "당일등락률", "거래대금", "신호", "추세", "매수"]
 
 
     def __init__(self, parent=None) -> None:
@@ -49,8 +49,8 @@ class ScannerPanel(QWidget):
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.Interactive)  # 모든 컬럼 마우스 드래그 가능
         hdr.setStretchLastSection(False)
-        # 컬럼별 초기 너비 — 마우스로 자유롭게 조절 가능
-        col_widths = [65, 100, 78, 60, 90, 65, 72, 72, 42]  # 코드/명/가/등락/거래대금/신호/추세/수급/매수
+        # 컬럼별 초기 너비 — 마우스로 자유롭게 조절 가능 (수급 제거 후 재조정)
+        col_widths = [65, 120, 78, 60, 95, 65, 80, 42]  # 코드/명/가/등락/거래대금/신호/추세/매수
         for i, w in enumerate(col_widths):
             hdr.resizeSection(i, w)
         hdr.setSectionResizeMode(1, QHeaderView.Stretch)  # 종목명만 자동 늘어남 (나머지는 Interactive 유지)
@@ -78,36 +78,6 @@ class ScannerPanel(QWidget):
 
             # [진단] 거래대금 단위 확인
             trade_amt = int(row.get("trade_amount") or 0)
-            if r < 3:  # 상위 3개만 진단 로그
-                import logging as _log
-                _log.getLogger(__name__).debug(
-                    "[ScannerPanel] %s 거래대금: raw=%d 포맷=%s",
-                    row["code"], trade_amt, format_trade_amount_korean(trade_amt)
-                )
-
-
-            iscore   = row.get("investor_score", 0)
-            f_net    = row.get("foreign_net", 0)
-            i_net    = row.get("inst_net", 0)
-            # 외국인/기관 각각 방향 표시
-            if f_net or i_net:
-                f_arrow = "▲" if f_net >= 0 else "▼"
-                i_arrow = "▲" if i_net >= 0 else "▼"
-                inv_text = f"외{f_arrow}기{i_arrow}"
-                # 색상: 둘 다 순매수=초록, 둘 다 순매도=빨강, 혼합=노랑
-                if f_net >= 0 and i_net >= 0:
-                    inv_color = QColor("#a6e3a1")   # 초록
-                elif f_net < 0 and i_net < 0:
-                    inv_color = QColor("#f38ba8")   # 빨강
-                else:
-                    inv_color = QColor("#f9e2af")   # 노랑 (혼합)
-            else:
-                inv_text  = "-"
-                inv_color = QColor("#6c7086")   # 회색
-            inv_tip = (
-                f"외국인: {f_net:+,}주\n기관: {i_net:+,}주\n수급점수: {iscore:+d}"
-                if (f_net or i_net) else "수급 미조회"
-            )
 
 
             # 추세 표시
@@ -137,7 +107,6 @@ class ScannerPanel(QWidget):
                 format_trade_amount_korean(trade_amt),
                 row.get("signal", ""),
                 trend_text,
-                inv_text,
             ]
             for c, text in enumerate(texts):
                 existing = self._table.item(r, c)
@@ -155,10 +124,6 @@ class ScannerPanel(QWidget):
                     item.setForeground(trend_color)
                     item.setTextAlignment(Qt.AlignVCenter | Qt.AlignCenter)
                     item.setToolTip(trend_tip)
-                if c == 7:   # 수급
-                    item.setForeground(inv_color)
-                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignCenter)
-                    item.setToolTip(inv_tip)
                 if bg_color:
                     item.setBackground(bg_color)
                 self._table.setItem(r, c, item)
@@ -168,7 +133,7 @@ class ScannerPanel(QWidget):
             _code  = row["code"]
             _name  = row["name"]
             _price = row["price"]
-            existing_btn = self._table.cellWidget(r, 8)
+            existing_btn = self._table.cellWidget(r, 7)
             # 같은 종목이면 버튼 재사용, 다른 종목이면 새로 생성
             if existing_btn is None or existing_btn.property("code") != _code:
                 btn = QPushButton("매수")
@@ -183,7 +148,7 @@ class ScannerPanel(QWidget):
                     lambda _chk, c=_code, n=_name, p=_price:
                         self.manual_buy_requested.emit(c, n, p)
                 )
-                self._table.setCellWidget(r, 8, btn)
+                self._table.setCellWidget(r, 7, btn)
 
 
     def _on_click(self, row: int, _col: int) -> None:

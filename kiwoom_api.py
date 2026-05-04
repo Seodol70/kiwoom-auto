@@ -1123,10 +1123,23 @@ class KiwoomManager(KiwoomProtocol):
                 amt_korean = format_trade_amount_korean(amt_val) if amt_val > 0 else "0원"
                 logger.debug("[opt10030 진단] 행[%d] %s(%s) 거래대금: raw='%s' -> %d원 ~ %s",
                              i, code, g("종목명").strip(), raw_amt, amt_val, amt_korean)
+            # 현재가 필드 추출 (부호 제거는 safe_int가 처리)
+            price_v = safe_int(g("현재가"))
+            if price_v == 0:
+                # 필드명 후보군 재시도
+                for _p_cand in ("현재가", "현재가(원)", "종가"):
+                    price_v = safe_int(g(_p_cand))
+                    if price_v != 0: break
+            
+            if i < 5:
+                # 시세 데이터 진단 - DEBUG 레벨
+                logger.debug("[opt10030 진단] 행[%d] %s(%s) 현재가: raw='%s' -> %d원",
+                             i, code, g("종목명").strip(), g("현재가"), price_v)
+
             rows.append({
                 "code":          code,
                 "name":          g("종목명").strip(),
-                "current_price": safe_int(g("현재가")),
+                "current_price": price_v,
                 "open_price":    safe_int(g("시가")),
                 "high_price":    safe_int(g("고가")),
                 "low_price":     safe_int(g("저가")),
@@ -1134,7 +1147,7 @@ class KiwoomManager(KiwoomProtocol):
                 "trade_amount":  amt_val,
                 "prev_close":    _resolve_prev_close(
                                      safe_int(g("전일종가")),
-                                     safe_int(g("현재가")),
+                                     price_v,
                                      safe_float(g("등락률")),
                                  ),
                 "change_pct":    safe_float(g("등락률")),

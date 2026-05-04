@@ -27,6 +27,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 from app.config_manager import config_manager as cfg
 from logging_config import order_log, position_log
 from order.position_repository import PositionRepository
+from order.order_types import OrderType, PriceType
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,13 @@ class OrderManager(QObject):
         self._audit = None
 
         self._connect_chejan()
+
+    def set_account(self, account: str):
+        """계좌번호 업데이트 (로그인 성공 시 ApplicationContext에서 호출)"""
+        self._account = account
+        if self._executor:
+            self._executor.set_account(account)
+        logger.info("[OrderManager] 계좌번호 설정 완료: %s", account)
 
     # -----------------------------------------------------------------------
     # 속성

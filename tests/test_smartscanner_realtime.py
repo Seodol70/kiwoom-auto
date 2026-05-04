@@ -103,7 +103,9 @@ def make_scanner(fid_returns=None):
     """SmartScanner 인스턴스 생성 (mock kiwoom 포함)"""
     kiwoom = MockKiwoom(fid_returns)
     cfg = SmartScannerConfig()
-    with patch.object(SmartScanner, "_load_prev_volumes", return_value=None):
+    # PriorityWatchQueue.refresh는 SetRealReg를 호출하므로 테스트에서 mock
+    with patch("scanner.smart_scanner.PriorityWatchQueue") as mock_wq:
+        mock_wq.return_value = MagicMock()
         scanner = SmartScanner(kiwoom, cfg)
     return scanner
 
@@ -316,15 +318,15 @@ class TestSmartScannerRealtimeCallback:
         assert snap.current_price == 14000
 
     def test_chejan_strength_stored(self):
-        """FID 20 (체결강도) → store._chejan_str 저장"""
+        """FID 20 (체결강도) → SnapshotStore에 저장됨"""
         scanner = make_scanner(make_fid_map(strength=150.0))
         seed_store(scanner.store, code="005930")
 
         scanner._on_receive_real_data("005930", "주식체결", "")
 
-        # _chejan_str dict에 저장됨
-        assert "005930" in scanner.store._chejan_str
-        assert scanner.store._chejan_str["005930"] == 150.0
+        snap = scanner.store.get_snapshot("005930")
+        assert snap is not None
+        assert snap.chejan_strength == 150.0
 
     def test_chejan_strength_normalized(self):
         """FID 20 ≥ 10000 시 ÷100 정규화"""
@@ -333,8 +335,10 @@ class TestSmartScannerRealtimeCallback:
 
         scanner._on_receive_real_data("005930", "주식체결", "")
 
+        snap = scanner.store.get_snapshot("005930")
+        assert snap is not None
         # 정규화되어야 함
-        assert scanner.store._chejan_str["005930"] == 150.0
+        assert snap.chejan_strength == 150.0
 
     def test_position_repo_primary_path(self):
         """position_repo 경로로 포지션 current_price 업데이트"""

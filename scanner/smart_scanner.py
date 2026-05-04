@@ -62,82 +62,7 @@ from rich.text import Text
 logger = logging.getLogger(__name__)     # 일반 로거 (콘솔)
 
 
-class _WinSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
-    """
-    Windows 호환 RotatingFileHandler.
-
-
-    표준 RotatingFileHandler는 파일 회전 시 os.rename을 사용하는데,
-    Windows에서는 다른 프로세스(log_monitor, VS Code 등)가 scanner.log를
-    열고 있으면 PermissionError(WinError 32)가 발생한다.
-
-
-    이 핸들러는 rename 대신 shutil.copy2 + truncate 방식으로 회전해
-    파일이 읽기 모드로 열려 있는 상태에서도 안전하게 동작한다.
-    """
-
-
-    def doRollover(self) -> None:
-        import shutil
-
-
-        # 현재 스트림 닫기
-        if self.stream:
-            self.stream.close()
-            self.stream = None  # type: ignore[assignment]
-
-
-        # 백업 파일 순환: .N → .N+1 (backupCount-1 → backupCount, …, 1 → 2)
-        # 백업→백업 이동은 해당 파일을 아무도 열지 않으므로 rename OK
-        for i in range(self.backupCount - 1, 0, -1):
-            sfn = self.rotation_filename(f"{self.baseFilename}.{i}")
-            dfn = self.rotation_filename(f"{self.baseFilename}.{i + 1}")
-            if os.path.exists(sfn):
-                if os.path.exists(dfn):
-                    os.remove(dfn)
-                os.rename(sfn, dfn)
-
-
-        # 현재 로그 → .1 : rename 대신 copy + truncate
-        dfn = self.rotation_filename(f"{self.baseFilename}.1")
-        if os.path.exists(dfn):
-            os.remove(dfn)
-        if os.path.exists(self.baseFilename):
-            shutil.copy2(self.baseFilename, dfn)          # 복사
-            with open(self.baseFilename, "w",             # 원본 비우기
-                      encoding=self.encoding or "utf-8"):
-                pass
-
-
-        if not self.delay:
-            self.stream = self._open()
-
-
-
-
-def _build_scan_logger(log_dir: str = "logs") -> logging.Logger:
-    """scanner.log 전용 로거를 생성한다."""
-    os.makedirs(log_dir, exist_ok=True)
-    scan_log = logging.getLogger("scanner.audit")
-    scan_log.setLevel(logging.DEBUG)
-    scan_log.propagate = False   # 루트 로거로 전파 금지
-
-
-    handler = _WinSafeRotatingFileHandler(
-        filename=os.path.join(log_dir, "scanner.log"),
-        maxBytes=20 * 1024 * 1024,   # 20 MB
-        backupCount=10,
-        encoding="utf-8",
-    )
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s\t%(levelname)s\t%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    scan_log.addHandler(handler)
-    return scan_log
-
-
-scan_log: logging.Logger = _build_scan_logger()
+from scanner.scanner_logger import scan_log, ScannerLogger
 
 
 
@@ -155,17 +80,11 @@ _EOK_WON = 100_000_000
 
 
 
-def format_trade_amount_growth(current: int, baseline: Optional[int]) -> str:
-    """거래대금 증가율(%) — baseline 이 없거나 0이면 '—'."""
-    if baseline is None or baseline <= 0:
-        return "증가율(9시대비) —"
-    from scanner.universe import UniverseManager
-    dummy_mgr = UniverseManager(None) # 임시 인스턴스
-    pct = (current - baseline) / baseline * 100.0
-    return (
-        f"증가율(9시대비) {pct:+.1f}% "
-        f"(기준 {dummy_mgr.format_trade_amount(baseline)})"
-    )
+from scanner.universe import (
+    UniverseManager, is_ordinary_stock, is_pure_equity_name, filter_equity_rows,
+    format_trade_amount_korean, apply_watch_pool_cap, apply_universe_score_cap,
+    format_trade_amount_growth
+)
 
 
 
@@ -179,31 +98,6 @@ def format_trade_amount_growth(current: int, baseline: Optional[int]) -> str:
 from scanner.config import SmartScannerConfig
 
 
-
-
-
-
-# ---------------------------------------------------------------------------
-# TRRequestQueue — 키움 API 요청 간격 보장 (최대 4회/초)
-# ---------------------------------------------------------------------------
-
-
-# (Filtering logic moved to scanner.universe)
-
-
-
-
-
-
-# (Universe scoring logic moved to scanner.universe.UniverseManager)
-
-
-
-
-
-
-# [Extracted] TRRequestQueue moved to scanner.queue
-from scanner.queue import TRRequestQueue
 
 
 
@@ -228,66 +122,16 @@ from scanner.models import ScanSignal
 
 
 # ---------------------------------------------------------------------------
-# ① SnapshotStore — pandas DataFrame 캐시
+# 시세/로그/디스플레이 컴포넌트 (외부 모듈)
 # ---------------------------------------------------------------------------
-
-
-from scanner.snapshot_store import SnapshotStore  # re-export (호환성)
-
-
-
-
-# ┌────────────────────────────────────────────────────────────┐
-# │ [Phase 2] SnapshotStore class moved to scanner/snapshot_store.py  │
-# └────────────────────────────────────────────────────────────┘
-
-
-# [Phase 2] SnapshotStore class extracted to scanner/snapshot_store.py
-
-
-from scanner.scanner_logger import ScannerLogger  # re-export (호환성)
-
-
-
-
-# ---------------------------------------------------------------------------
-# ③ ScannerDisplay — rich 터미널 뷰
-# ---------------------------------------------------------------------------
-
-
-_CONSOLE = Console()
-
-
-
-
-# [Extracted] ScannerDisplay moved to scanner.display
+from scanner.snapshot_store import SnapshotStore
+from scanner.scanner_logger import ScannerLogger
 from scanner.display import ScannerDisplay
-
-
-
-
-# ---------------------------------------------------------------------------
-# TopVolumeManager — 거래대금 상위 N 종목 관리
-# ---------------------------------------------------------------------------
-
-
-
-
-# [Extracted] TopVolumeManager moved to scanner.top_volume
 from scanner.top_volume import TopVolumeManager
+from scanner.queue import TRRequestQueue, PriorityWatchQueue
 
 
-
-
-# ---------------------------------------------------------------------------
-# PriorityWatchQueue — SetRealReg 구독 관리
-# ---------------------------------------------------------------------------
-
-
-
-
-# [Extracted] PriorityWatchQueue moved to scanner.queue
-from scanner.queue import PriorityWatchQueue
+# (Logger import moved to top)
 
 
 
@@ -1020,312 +864,205 @@ class SmartScanner:
             self._opt10030_fetching = False
 
 
-        # opt10030 결과 없을 때 — 직전 성공 결과 재사용 (캐시 없을 때만 하드코딩 대체)
-        if self._last_volume_rows:
-            logger.warning("[opt10030] 실패 — 직전 스캔 결과 %d종목 재사용 (나이 %.1fs)",
-                           len(self._last_volume_rows), cache_age)
             return self._last_volume_rows[:target]
 
-
-        logger.warning("[opt10030] 실제 조회 실패 — 시총 상위 종목으로 대체 (캐시 없음, 최초 실패)")
-        fallback = [
-            {"code": "005930", "name": "삼성전자",        "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "000660", "name": "SK하이닉스",       "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "207940", "name": "삼성바이오로직스",  "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "005380", "name": "현대차",           "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "373220", "name": "LG에너지솔루션",   "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "000270", "name": "기아",             "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "035420", "name": "NAVER",            "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "051910", "name": "LG화학",           "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "006400", "name": "삼성SDI",          "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-            {"code": "035720", "name": "카카오",           "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
+        logger.warning("[opt10030] 실제 조회 실패 — fallback 5대장 대체")
+        return [
+            {"code": "005930", "name": "삼성전자", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
+            {"code": "000660", "name": "SK하이닉스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
+            {"code": "207940", "name": "삼성바이오로직스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
+            {"code": "005380", "name": "현대차", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
+            {"code": "373220", "name": "LG에너지솔루션", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
         ]
-        logger.info("[opt10030] 대체 종목 %d개 사용", len(fallback))
-        return fallback[:target]
-
-
-    def _do_fetch_opt10030(self) -> list[dict]:
-        """opt10030 CommRqData 호출 → rows 반환"""
-        logger.debug("[opt10030] CommRqData 호출")
-        self._kiwoom._set_input("시장구분",     "0")  # 0=전체
-        self._kiwoom._set_input("정렬구분",     "1")  # 1=거래대금 내림차순
-        self._kiwoom._set_input("관리종목포함", "0")  # 0=제외
-        self._kiwoom._set_input("신용구분",     "0")  # 0=전체
-        self._kiwoom._comm_rq("opt10030", "거래대금상위", "9000")
-        rows = self._kiwoom._tr_data.get("rows", [])
-        logger.debug("[opt10030] 응답 %d행", len(rows))
-        return rows
-
 
     def _log_store_health(self) -> None:
-        """SnapshotStore 상태를 5분마다 한 번 로깅 (Zone 6)."""
+        """SnapshotStore 상태를 주기적으로 로깅한다."""
         _now = time.monotonic()
         if _now - getattr(self, "_store_health_last", 0.0) < 300.0:
             return
         self._store_health_last = _now
-
-
         try:
             with self.store._lock:
-                _codes_idx   = list(self.store._df.index)   # DataFrame index = 등록 종목
-                _n_codes     = len(_codes_idx)
-                _n_mins      = len(self.store._mins)        # 1분봉 데이터 보유 종목 수
-                _n_tick_vols = len(getattr(self.store, "_tick_ts_vol", {}))
-                _n_sectors   = len(getattr(self.store, "_sector_cache", {}))
-                _codes_no_1m = [
-                    c for c in _codes_idx
-                    if len(self.store._mins.get(c, [])) < 5
-                ]
-            logger.info(
-                "[스토어헬스] 종목=%d 1분봉보유=%d 틱Vel=%d 섹터캐시=%d "
-                "1분봉5개미만=%d개%s",
-                _n_codes, _n_mins, _n_tick_vols, _n_sectors,
-                len(_codes_no_1m),
-                f" {_codes_no_1m[:5]}" if _codes_no_1m else "",
-            )
-        except Exception as _e:
-            logger.debug("[스토어헬스] 수집 실패: %s", _e)
-
+                _n_codes = len(self.store._df)
+                _n_mins = len([s for s in self.store._states.values() if s.mins])
+            logger.info("[스토어헬스] 종목=%d 1분봉보유=%d", _n_codes, _n_mins)
+        except Exception as e:
+            logger.debug("[스토어헬스] 수집 실패: %s", e)
 
     def run_periodic_scan(self, on_progress=None) -> list:
         """
-        1분마다 호출하는 전체 스캔 사이클.
-
-
-        1. opt10030 으로 거래대금 상위 collect_raw_top_n 종목 조회(필요 시 연속조회)
-        2. 우선주·ETF 제거 후 거래대금 상위 watch_pool_max 만 스냅샷·감시에 유지
-        3. 테스타 정배열 + 장동민 시가돌파 필터링
-        4. 통과 종목을 final_targets(ScanSignal 리스트)로 반환
-
-
-        Args:
-            on_progress: 진행 콜백 — on_progress(phase, current, total, detail)
+        1분마다 호출하는 전체 스캔 사이클 (오케스트레이터).
         """
         def _prog(phase, current, total, detail=""):
-            if on_progress:
-                on_progress(phase, current, total, detail)
+            if on_progress: on_progress(phase, current, total, detail)
 
-
-        # ① WATCH 모드(포지션 풀)이면 opt10030 호출 자체를 스킵
-        if self._universe_paused:
-            logger.info("[주기 스캔] WATCH 모드 — opt10030 스캔 스킵 (SetRealReg 감시 중)")
-            self._log_store_health()
+        # 1. 전제 조건 확인
+        if not self._check_scan_prerequisites():
             return []
-
 
         logger.info("=" * 60)
         logger.info("[주기 스캔] 시작 — %s", datetime.now().strftime("%H:%M:%S"))
         self._log_store_health()
 
+        # 2. 거래대금 상위 데이터 확보
+        _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "데이터 수집 중...")
+        rows = self._get_top_volume_data(_prog)
+        if not rows: return []
 
-        # 연결 확인
+        # 3. 유니버스 필터링 및 스코어링
+        rows = self._filter_and_score_universe(rows)
+        if not rows: return []
+        _prog("거래대금 상위 조회", len(rows), self.cfg.watch_pool_max, f"{len(rows)}종목 감시 후보")
+
+        # 4. 상태 컨테이너(Store, TopMgr) 갱신
+        self._update_state_containers(rows)
+
+        # 5. 실시간 구독 갱신 (상위 N종목)
+        _watch_df = self.store.top_by_trade_amount(self.cfg.watch_pool_max)
+        top_codes = _watch_df.index.tolist() if not _watch_df.empty else []
+        self._refresh_realtime_watch(top_codes)
+
+        # 6. 부족한 분봉 데이터 비동기 로딩
+        self._ensure_candle_data(top_codes)
+
+        # 7. 진단 로그 출력
+        self._print_diagnostic_logs()
+
+        # 8. 일봉 갱신 스케줄링
+        self._schedule_daily_refresh(top_codes)
+
+        # 9. 캐시 저장 (5분 주기)
+        self._handle_periodic_cache_save()
+
+        logger.info("[주기 스캔] 완료 — 신호 판단은 실시간 워커(_evaluate)에 위임")
+        logger.info("=" * 60)
+        _prog("감시종목 갱신", len(top_codes), len(top_codes), "데이터 갱신 완료")
+        return []
+
+    def _check_scan_prerequisites(self) -> bool:
+        """스캔을 시작할 수 있는 상태인지 확인한다."""
+        if self._universe_paused:
+            logger.info("[주기 스캔] WATCH 모드 — opt10030 스캔 스킵 (SetRealReg 감시 중)")
+            self._log_store_health()
+            return False
+        
         if hasattr(self._kiwoom, 'is_connected') and not self._kiwoom.is_connected():
             logger.warning("[주기 스캔] 연결 끊김 — 스킵")
-            return []
+            return False
+        return True
 
-
-        # 1. opt10030 조회 — 메인 스레드 블로킹 방지를 위해 캐시 우선 사용 + 백그라운드 갱신
-        # [2026-04-23] 최적화: 캐시가 있으면 즉시 반환 후 백그라운드에서 갱신
-        #              캐시 없으면 fallback 대체 + 백그라운드 갱신 시작
-        _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "opt10030 조회 중...")
-
-
-        # 캐시된 결과 또는 즉시 조회 (run_periodic_scan은 백그라운드 스레드이므로 동기 OK)
+    def _get_top_volume_data(self, prog_cb: Callable) -> list[dict]:
+        """거래대금 상위 데이터를 확보한다 (캐시 우선, 실패 시 fallback)."""
         cache_age = time.monotonic() - self._last_volume_updated
-        if self._last_volume_rows and cache_age < 300.0:  # 5분 이내 캐시
-            rows = self._last_volume_rows[:]
-            logger.info("[주기 스캔] 캐시된 opt10030 결과 사용 (나이 %.1fs, %d종목)", cache_age, len(rows))
-        else:
-            # 캐시 없음 또는 만료: 즉시 opt10030 조회 (백그라운드 스레드이므로 블로킹 무해)
-            logger.info("[주기 스캔] opt10030 즉시 조회 (캐시나이 %.1fs)", cache_age)
-            rows = self._fetch_top_volume_rows(
-                target=self.cfg.collect_raw_top_n,
-                on_progress=_prog
-            )
-            if not rows:
-                # 조회 실패 시에만 fallback (최후의 수단)
-                logger.warning("[주기 스캔] opt10030 조회 실패 — fallback 5대장 대체")
-                rows = [
-                    {"code": "005930", "name": "삼성전자",        "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                    {"code": "000660", "name": "SK하이닉스",       "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                    {"code": "207940", "name": "삼성바이오로직스",  "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                    {"code": "005380", "name": "현대차",           "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                    {"code": "373220", "name": "LG에너지솔루션",   "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "prev_close": 0, "open_price": 0, "high_price": 0, "low_price": 0, "volume": 0},
-                ]
+        if self._last_volume_rows and cache_age < 300.0:
+            logger.info("[주기 스캔] 캐시된 opt10030 결과 사용 (나이 %.1fs, %d종목)", cache_age, len(self._last_volume_rows))
+            return self._last_volume_rows[:]
+        
+        logger.info("[주기 스캔] opt10030 즉시 조회 (캐시나이 %.1fs)", cache_age)
+        rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, on_progress=prog_cb)
+        
+        if not rows:
+            logger.warning("[주기 스캔] opt10030 조회 실패 — fallback 5대장 대체")
+            return [
+                {"code": "005930", "name": "삼성전자", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "000660", "name": "SK하이닉스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "207940", "name": "삼성바이오로직스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "005380", "name": "현대차", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "373220", "name": "LG에너지솔루션", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+            ]
+        return rows
+
+    def _filter_and_score_universe(self, rows: list[dict]) -> list[dict]:
+        """유니버스 필터링(우선주 제외 등) 및 하이브리드 스코어링을 적용한다."""
         rows, _ = filter_equity_rows(rows)
         mc = self.cfg.max_change_pct
         _n0 = len(rows)
         rows = [r for r in rows if float(r.get("change_pct", 0) or 0) < mc]
+        
         if _n0 != len(rows):
-            logger.info(
-                "[주기 스캔] 등락률 상한 %.1f%% 미만만 유지 — %d → %d종목",
-                mc, _n0, len(rows),
-            )
+            logger.info("[주기 스캔] 등락률 상한 %.1f%% 미만만 유지 — %d → %d종목", mc, _n0, len(rows))
+            
         rows = apply_universe_score_cap(rows, self.cfg.watch_pool_max, self.cfg, self._prev_volumes)
         if not rows:
             logger.warning("[주기 스캔] 필터 후 종목 없음 — 중단")
-            return []
+        return rows
 
-
-        _prog("거래대금 상위 조회", len(rows), self.cfg.watch_pool_max,
-              f"{len(rows)}종목 감시 후보")
-
-
-        logger.info(
-            "[주기 스캔] 감시 후보 %d종목 (수집 %d → 등락 <%.1f%%·hybrid스코어 상위 %d)",
-            len(rows), self.cfg.collect_raw_top_n, mc, self.cfg.watch_pool_max,
-        )
-
-
-        # 2. SnapshotStore / TopVolumeManager 갱신
+    def _update_state_containers(self, rows: list[dict]) -> None:
+        """SnapshotStore와 TopVolumeManager에 최신 데이터를 반영한다."""
         self.top_mgr.clear()
-        logger.debug("[주기 스캔] STEP-A: bulk_update 시작 (%d행)", len(rows))
         self.store.bulk_update(rows)
-        logger.debug("[주기 스캔] STEP-B: bulk_update 완료")
-
-
         for row in rows:
-            _c = row["code"]
-            _a = int(row.get("trade_amount") or 0)
-            self._touch_trade_amt_baseline(_c, _a)
-            self.top_mgr.update(_c, _a)
-        logger.debug("[주기 스캔] STEP-C: top_mgr 갱신 완료")
+            code = row["code"]
+            amt = int(row.get("trade_amount") or 0)
+            self._touch_trade_amt_baseline(code, amt)
+            self.top_mgr.update(code, amt)
 
+    def _refresh_realtime_watch(self, top_codes: list[str]) -> None:
+        """실시간 틱 구독 목록을 갱신한다."""
+        if self._universe_paused: return
+        reg_codes = top_codes[:self.cfg.realtime_sub_max]
+        QTimer.singleShot(0, lambda: self.watch_q.refresh(reg_codes))
 
-        # 감시·선정용 코드 목록은 SnapshotStore(이번 스캔·유니버스필터 반영)만 사용한다.
-        # TopVolumeManager 는 실시간 틱으로 과거 종목이 누적되어 스냅샷과 불일치할 수 있음(예: 99 vs 36).
-        _watch_df = self.store.top_by_trade_amount(self.cfg.watch_pool_max)
-        top_codes = _watch_df.index.tolist() if not _watch_df.empty else []
-        logger.debug(
-            "[주기 스캔] STEP-D: top_codes %d개 (스냅샷 기준, 순수 주식만)",
-            len(top_codes),
-        )
-
-
-        # STEP-E: SetRealReg 를 이벤트루프 다음 사이클로 위임
-        # — dynamicCall 내부에서 Windows 메시지 처리 → OCX 재진입 데드락 방지
-        # — 유니버스 감시 중단 중은 스킵
-        _reg_codes = top_codes[:self.cfg.realtime_sub_max]
-        logger.debug("[주기 스캔] STEP-E: watch_q.refresh 예약 (구독대상=%d)", len(_reg_codes))
-        if not self._universe_paused:
-            QTimer.singleShot(0, lambda c=_reg_codes: self.watch_q.refresh(c))
-        logger.debug("[주기 스캔] STEP-F: watch_q.refresh %s", "스킵(감시중단)" if self._universe_paused else "예약 완료")
-
-
-        self._prefiltered = True
-        logger.debug("[주기 스캔] STEP-G: prefiltered=True")
-
-
-        # STEP-H: 분봉 초기 로딩 — 데이터 부족 종목을 비동기(QTimer 체인)로 처리
-        # ⚠️  메인 스레드에서 TR 을 동기 루프로 호출하면 UI 가 수십 초 얼어붙음.
-        #     QTimer.singleShot 체인으로 한 종목씩 분산 처리한다.
-        _CANDLE_MIN_BARS = 55   # MA50 에 필요한 최소 분봉 수
-        _CANDLE_LOAD_MAX = 6    # 이후 사이클당 최대 예약 종목 수 (12→6, TR 경합 감소)
-        codes_need_all = [
-            code for code in top_codes
-            if len(self.store._mins.get(code, [])) < _CANDLE_MIN_BARS
-        ]
-
-
+    def _ensure_candle_data(self, top_codes: list[str]) -> None:
+        """부족한 분봉 데이터를 비동기적으로 로딩하도록 예약한다."""
+        min_bars = 55
+        load_max = 6
+        codes_need_all = [c for c in top_codes if self.store.get_candle_count(c) < min_bars]
+        
         if not self._initial_candle_load_done:
-            # 첫 스캔: 제한 없이 전체 종목 일괄 로딩 (장 시작부터 누적된 데이터 확보)
             codes_need = codes_need_all
-            if codes_need:
-                logger.info(
-                    "[주기 스캔] STEP-H: 첫 스캔 — 전체 %d종목 1분봉 일괄 로딩 시작 "
-                    "(350ms 간격 체인, 이후 사이클은 %d종목/회로 복귀)",
-                    len(codes_need), _CANDLE_LOAD_MAX,
-                )
+            logger.info("[주기 스캔] 첫 일괄 로딩 시작 (%d종목)", len(codes_need))
         else:
-            # 이후 사이클: 12종목/사이클 제한 유지 (신규 편입 종목만 처리)
-            codes_need = codes_need_all[:_CANDLE_LOAD_MAX]
-
+            codes_need = codes_need_all[:load_max]
 
         if codes_need:
-            if self._initial_candle_load_done:
-                logger.debug(
-                    "[주기 스캔] STEP-H: 1분봉 비동기 로딩 예약 (%d종목) — "
-                    "350ms 간격으로 순차 처리, UI 블로킹 없음",
-                    len(codes_need),
-                )
             QTimer.singleShot(500, lambda c=list(codes_need): self._load_candles_async(c, 0))
-        else:
-            logger.debug("[주기 스캔] STEP-H: 분봉 데이터 충분 — 초기 로딩 스킵")
 
+    def _print_diagnostic_logs(self) -> None:
+        """진단용 로그를 출력한다."""
+        dn = max(1, int(self.cfg.diagnostic_sample_n))
+        sample = self.store.top_by_trade_amount(dn)
+        if sample.empty: return
 
-        # 진단 로그: bulk_update 이후 거래대금 상위 N종 샘플 (N=diagnostic_sample_n)
-        _dn = max(1, int(self.cfg.diagnostic_sample_n))
-        sample = self.store.top_by_trade_amount(_dn)
-        if not sample.empty:
-            for code_s, row_s in sample.iterrows():
-                _amt = int(row_s.get("trade_amount", 0))
-                _ta = format_trade_amount_korean(_amt)
-                _gr = format_trade_amount_growth(_amt, self._amt_baseline.get(str(code_s)))
-                logger.debug(
-                    "[진단] %s(%s) 현재가=%s 거래대금=%s · %s 거래량=%s",
-                    row_s.get("name", "?"), code_s,
-                    f"{int(row_s.get('current_price', 0)):,}",
-                    _ta, _gr,
-                    f"{float(row_s.get('volume', 0)):,.0f}",
-                )
+        for code, row in sample.iterrows():
+            amt = int(row.get("trade_amount", 0))
             logger.debug(
-                "[진단] 안내 — 위 %d종은 거래대금 상위 샘플이다. 실제 감시·스냅샷 후보는 최대 %d종, "
-                "ScannerWorker 신호 판단은 상위 %d종에서 수행된다.",
-                _dn,
-                self.cfg.watch_pool_max,
-                self.cfg.display_top_n,
+                "[진단] %s(%s) 현재가=%s 거래대금=%s · %s",
+                row.get("name", "?"), code, f"{int(row.get('current_price', 0)):,}",
+                format_trade_amount_korean(amt),
+                format_trade_amount_growth(amt, self._amt_baseline.get(str(code)))
             )
-        else:
-            logger.warning("[진단] top_by_trade_amount 결과 없음 — 파싱 필드명 불일치 가능성")
-            # rank 기반 샘플 확인
-            with self.store._lock:
-                df_sample = self.store._df.head(_dn)
-            if not df_sample.empty:
-                logger.warning("[진단] DataFrame 직접 샘플: %s", df_sample[["trade_amount","volume","rank"]].to_dict())
 
-
-        logger.info("[주기 스캔] SnapshotStore 갱신 완료 (%d종목)", len(rows))
-
-
-        # [일봉 갱신] 5분 주기 — 후보 코드만 계산해 _daily_refresh_pending에 저장.
-        # 실제 TR 호출(opt10081)은 MainWindow가 QTimer 체인으로 처리해 메인 스레드 블로킹 방지.
+    def _schedule_daily_refresh(self, top_codes: list[str]) -> None:
+        """일봉 데이터 갱신 스케줄을 관리한다."""
         now = time.time()
-        if now - self._last_daily_update >= self._daily_update_interval_sec:
-            self._last_daily_update = now
-            _eod_chg_min = float(getattr(self.cfg, "eod_change_pct_min", 2.0))
-            _eod_chg_max = float(getattr(self.cfg, "eod_change_pct_max", 10.0))
-            _daily_refresh_max = 10
-            with self.store._lock:
-                _df_snap = self.store._df.copy()
-            _eod_candidates = [
-                c for c in top_codes
-                if _eod_chg_min <= float(_df_snap.at[c, "change_pct"]
-                                         if c in _df_snap.index else 0.0) <= _eod_chg_max
-            ]
-            _rest = [c for c in top_codes if c not in set(_eod_candidates)]
-            self._daily_refresh_pending = (_eod_candidates + _rest)[:_daily_refresh_max]
-            logger.info("[일봉갱신] %d종목 예약 (EOD후보%d+보완%d) — QTimer 체인으로 처리",
-                        len(self._daily_refresh_pending),
-                        min(len(_eod_candidates), _daily_refresh_max),
-                        max(0, len(self._daily_refresh_pending) - len(_eod_candidates)))
+        if now - self._last_daily_update < self._daily_update_interval_sec:
+            return
+            
+        self._last_daily_update = now
+        _chg_min = float(getattr(self.cfg, "eod_change_pct_min", 2.0))
+        _chg_max = float(getattr(self.cfg, "eod_change_pct_max", 10.0))
+        
+        with self.store._lock:
+            df_snap = self.store._df.copy()
+            
+        candidates = [
+            c for c in top_codes
+            if _chg_min <= float(df_snap.at[c, "change_pct"] if c in df_snap.index else 0.0) <= _chg_max
+        ]
+        rest = [c for c in top_codes if c not in set(candidates)]
+        self._daily_refresh_pending = (candidates + rest)[:10]
+        logger.info("[일봉갱신] %d종목 예약 완료", len(self._daily_refresh_pending))
 
-
-        # 3. 신호 판단은 _realtime_loop()의 _evaluate()에서 백그라운드 스레드가 담당.
-        #    주기 스캔은 데이터 갱신(opt10030 + SnapshotStore)만 수행하고 종료.
-        #    (과거 TESTA+JDM 필터 루프 제거 — 110종목 동기 루프가 메인 스레드를 차단하던 원인)
-        logger.info("[주기 스캔] 완료 — 신호 판단은 실시간 워커(_evaluate)에 위임")
-        logger.info("=" * 60)
-
-
-        # 1분봉 캐시 저장 — 5분 주기, 백그라운드 스레드에서 실행 (메인 스레드 I/O 블로킹 방지)
+    def _handle_periodic_cache_save(self) -> None:
+        """5분 주기로 분봉 캐시를 저장한다."""
+        now = time.time()
         if now - getattr(self, "_last_1min_cache_save", 0) >= 300:
             self._last_1min_cache_save = now
-            import threading as _threading
-            _threading.Thread(target=self.store.save_1min_cache, daemon=True).start()
+            threading.Thread(target=self.store.save_1min_cache, daemon=True).start()
 
+    # -----------------------------------------------------------------------
 
-        _prog("감시종목 갱신", len(top_codes), len(top_codes), "데이터 갱신 완료")
-        return []
 
 
     # -----------------------------------------------------------------------
@@ -1608,11 +1345,4 @@ class SmartScanner:
         QTimer.singleShot(350, lambda: self._refresh_investor_data_async(codes, idx + 1, 0))
 
 
-    @staticmethod
-    def _seconds_until(t: dtime) -> float:
-        now    = datetime.now()
-        target = now.replace(hour=t.hour, minute=t.minute,
-                             second=t.second, microsecond=0)
-        if target <= now:
-            target += timedelta(days=1)
-        return max(0.0, (target - now).total_seconds())
+

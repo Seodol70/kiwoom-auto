@@ -60,6 +60,9 @@ class TradingController(QObject):
     portfolio_updated = pyqtSignal(dict)
     """포트폴리오 데이터 갱신 (cash, positions)"""
 
+    auto_trade_started = pyqtSignal()
+    """첫 감시 신호 발생으로 자동매매가 자동 시작될 때 발행"""
+
 
     def __init__(
         self,
@@ -70,6 +73,7 @@ class TradingController(QObject):
         smart_scanner=None,
         snap_store=None,
         health_monitor=None,
+        ctx=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -80,7 +84,9 @@ class TradingController(QObject):
         self._smart_scanner = smart_scanner
         self._snap_store = snap_store
         self._health_monitor = health_monitor
+        self._ctx = ctx  # AppContext 참조 (선택적)
         self._auto_trading = False
+        self._first_signal_received = False  # 첫 신호 여부 추적
         
         self._scan_in_progress = False
         self._market_crash_off = False
@@ -140,6 +146,12 @@ class TradingController(QObject):
                 return False
         else:
             sig.entry_phase = 2
+
+        # 자동매매 자동 시작: 첫 신호 발생 시, 아직 활성화 안 됐고 급락 OFF 상태면
+        if not self._auto_trading and not self._market_crash_off and not self._first_signal_received:
+            self._first_signal_received = True
+            self.auto_trade_started.emit()
+            logger.info("[TradingController] 첫 신호 발생 — 자동매매 자동 시작 요청")
 
         passed, reason = self._strategy.should_entry(sig, self._auto_trading)
 

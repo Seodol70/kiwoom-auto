@@ -57,8 +57,8 @@ class TestSQLiteIntegration(unittest.TestCase):
         from contextlib import closing
         with closing(self.db._get_connection()) as conn:
             row = conn.execute("SELECT * FROM trades WHERE code='005930'").fetchone()
-            self.assertEqual(row[36], 10000) # realized_pnl (Index 36)
-            self.assertEqual(row[38], "COMPLETED") # final_status (Index 38)
+            self.assertEqual(row[37], 10000) # realized_pnl (Index 37)
+            self.assertEqual(row[39], "COMPLETED") # final_status (Index 39)
 
     def tearDown(self):
         if os.path.exists(self.test_db):

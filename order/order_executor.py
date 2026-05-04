@@ -31,6 +31,11 @@ class OrderExecutor:
         self._account = account
         self._max_order_amount = max_order_amount
 
+    def set_account(self, account: str):
+        """계좌번호 동적 업데이트 (로그인 후 호출)"""
+        self._account = account
+        logger.info("[OrderExecutor] 계좌번호 업데이트: %s", account)
+
     def send(
         self,
         order_type: int,

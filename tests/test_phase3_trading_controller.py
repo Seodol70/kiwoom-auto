@@ -8,6 +8,7 @@ TradingController에서 제거되고 ExitStrategy.should_exit()로 통합됨.
 import sys
 from pathlib import Path
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -87,7 +88,13 @@ class MockConfig:
 
 
 class MockRiskManager:
-    """테스트용 RiskManager Mock"""
+    """실제 TradingController 생성을 허용하는 RiskManager Mock.
+    daily_loss_cut / daily_profit_locked 시그널은 MagicMock으로 대체한다.
+    """
+
+    def __init__(self):
+        self.daily_loss_cut     = MagicMock()
+        self.daily_profit_locked = MagicMock()
 
     @property
     def is_new_entry_locked(self):

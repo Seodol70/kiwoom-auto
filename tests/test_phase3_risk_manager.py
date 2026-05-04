@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -10,10 +11,14 @@ from app.risk_manager import RiskManager
 
 
 class MockOrderManager:
-    """테스트용 OrderManager Mock"""
+    """실제 RiskManager 생성을 허용하는 OrderManager Mock.
+    order_filled 시그널은 MagicMock으로 대체하여 connect() 호출을 허용한다.
+    """
 
     def __init__(self):
         self._daily_realized_pnl = 0
+        self.positions  = {}               # RiskManager.check()에서 사용
+        self.order_filled = MagicMock()    # RiskManager.__init__에서 connect
 
     @property
     def daily_realized_pnl(self):

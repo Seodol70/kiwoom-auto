@@ -5,12 +5,66 @@ smart_scanner.py 에서 분리.
 로거 이름 'scanner.audit' 유지 (LogPanel.append_scanner 슬롯 호환).
 """
 import logging
+import logging.handlers
+import os
 import csv
+import shutil
 from pathlib import Path
 from datetime import datetime
 
 
-_scan_log = logging.getLogger("scanner.audit")
+class _WinSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """
+    Windows 호환 RotatingFileHandler (copy+truncate 방식).
+    파일이 VS Code나 다른 툴에 의해 열려 있어도 안전하게 회전(Rollover) 가능하다.
+    """
+    def doRollover(self) -> None:
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+
+        for i in range(self.backupCount - 1, 0, -1):
+            sfn = self.rotation_filename(f"{self.baseFilename}.{i}")
+            dfn = self.rotation_filename(f"{self.baseFilename}.{i + 1}")
+            if os.path.exists(sfn):
+                if os.path.exists(dfn):
+                    os.remove(dfn)
+                os.rename(sfn, dfn)
+
+        dfn = self.rotation_filename(f"{self.baseFilename}.1")
+        if os.path.exists(dfn):
+            os.remove(dfn)
+        if os.path.exists(self.baseFilename):
+            shutil.copy2(self.baseFilename, dfn)
+            with open(self.baseFilename, "w", encoding=self.encoding or "utf-8"):
+                pass
+
+        if not self.delay:
+            self.stream = self._open()
+
+
+def _build_scan_logger(log_dir: str = "logs") -> logging.Logger:
+    """scanner.log 전용 로거 ('scanner.audit') 빌드."""
+    os.makedirs(log_dir, exist_ok=True)
+    logger = logging.getLogger("scanner.audit")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    handler = _WinSafeRotatingFileHandler(
+        filename=os.path.join(log_dir, "scanner.log"),
+        maxBytes=20 * 1024 * 1024,
+        backupCount=10,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s\t%(levelname)s\t%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logger.addHandler(handler)
+    return logger
+
+
+scan_log = _build_scan_logger()
 
 
 class ScannerLogger:
@@ -27,7 +81,7 @@ class ScannerLogger:
             values: 추가 메타 데이터 (RSI, EMA 등)
         """
         msg = f"✅ [통과] {code}({name}) {reason}"
-        _scan_log.info(msg)
+        scan_log.info(msg)
         if values:
             ScannerLogger._write_csv("scanner_passed.csv", code, name, reason, values)
 
@@ -41,7 +95,7 @@ class ScannerLogger:
             reason: 탈락 사유
         """
         msg = f"❌ [탈락] {code}({name}) {reason}"
-        _scan_log.debug(msg)
+        scan_log.debug(msg)
         ScannerLogger._write_csv("scanner_rejected.csv", code, name, reason, {})
 
     @staticmethod
@@ -52,7 +106,7 @@ class ScannerLogger:
             sig: ScanSignal 객체
         """
         msg = f"🚨 [신호] {sig.code}({sig.name}) [{sig.signal_type}] {sig.reason}"
-        _scan_log.warning(msg)
+        scan_log.warning(msg)
         ScannerLogger._write_csv("scanner_signal.csv", sig.code, sig.name, sig.reason, sig.values or {})
 
     @staticmethod
@@ -77,4 +131,4 @@ class ScannerLogger:
                 row.extend(values.values())
                 writer.writerow(row)
         except Exception as e:
-            _scan_log.error(f"CSV 기록 실패: {filename}, {e}")
+            scan_log.error(f"CSV 기록 실패: {filename}, {e}")

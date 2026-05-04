@@ -100,6 +100,15 @@ class ApplicationContext(QObject):
                 self.tg_bot = TelegramBot(cfg.TELEGRAM["token"], cfg.TELEGRAM["chat_id"], parent=self)
             except Exception as e:
                 logger.warning("[텔레그램] 봇 초기화 실패: %s", e)
+        
+        # ── 시그널 연결 (모듈 간 연동) ──
+        # 로그인 성공 시 계좌번호를 OrderManager에 전달
+        self.login_mgr.login_success.connect(lambda acc, mode: self.order_mgr.set_account(acc))
+        
+        # [초기화] 설정 파일에 계좌번호가 명시되어 있으면 미리 세팅 (다이얼로그 스킵용)
+        _conf_acc = cfg.ACCOUNT.get("number", "")
+        if _conf_acc:
+            self.order_mgr.set_account(_conf_acc)
                 
     def start_services(self):
         """백그라운드 서비스 시작"""

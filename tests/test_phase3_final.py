@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -17,6 +18,7 @@ class MockOrderManager:
         self.available_cash = 1000000
         self.max_positions = 5
         self._pending = {}
+        self.order_filled = MagicMock()  # RiskManager.__init__에서 connect
 
     @property
     def daily_realized_pnl(self):

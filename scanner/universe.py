@@ -222,3 +222,27 @@ def apply_universe_score_cap(rows: list[dict], limit: int, cfg: Optional[SmartSc
     if prev_volumes:
         mgr._prev_volumes = prev_volumes
     return mgr.apply_scoring_cap(rows, limit)
+
+
+_JO_WON = 1_000_000_000_000
+_EOK_WON = 100_000_000
+
+
+def format_trade_amount_growth(current: int, baseline: Optional[int]) -> str:
+    """거래대금 증가율(%) — baseline 이 없거나 0이면 '—'."""
+    if baseline is None or baseline <= 0:
+        return "증가율(9시대비) —"
+    pct = (current - baseline) / baseline * 100.0
+    return (
+        f"증가율(9시대비) {pct:+.1f}% "
+        f"(기준 {format_trade_amount_korean(baseline)})"
+    )
+
+
+def seconds_until(t: dtime) -> float:
+    """특정 시간(hour, minute, second)까지 남은 초를 계산한다."""
+    now = datetime.now()
+    target = now.replace(hour=t.hour, minute=t.minute, second=t.second, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return max(0.0, (target - now).total_seconds())

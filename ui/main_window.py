@@ -246,17 +246,6 @@ class MainWindow(QMainWindow):
         root.addWidget(self.scan_status)
 
 
-        # 수급 현황 패널 (스캔 상태바 아래, 로그 위)
-        sep3 = QFrame()
-        sep3.setFrameShape(QFrame.HLine)
-        sep3.setObjectName("h_sep")
-        root.addWidget(sep3)
-
-
-        self.investor_panel = InvestorPanel()
-        root.addWidget(self.investor_panel)
-
-
         # 하단 로그
         self.log_panel = LogPanel()
         root.addWidget(self.log_panel)
@@ -293,7 +282,20 @@ class MainWindow(QMainWindow):
         # [NEW] SignalManager 중앙 관리
         self.signal_manager = SignalManager(self)
         self.signal_manager.bind_all()
-        
+
+        # [NEW] 연결 감시 (Self-Healing Watchdog)
+        from app.connection_watchdog import ConnectionWatchdog
+        self._watchdog = ConnectionWatchdog(
+            kiwoom=self._kiwoom,
+            login_mgr=self.login_mgr,
+            smart_scanner=self._smart_scanner,
+            parent=self,
+        )
+        self._watchdog.connection_lost.connect(self._on_connection_lost)
+        self._watchdog.connection_recovered.connect(self._on_connection_recovered)
+        self._watchdog.reconnect_failed.connect(self._on_reconnect_failed)
+        self._watchdog.start()
+
         self.append_log("[시스템] 모든 모듈 및 서비스 초기화 완료")
 
     def _setup_logging_handlers(self) -> None:
@@ -599,6 +601,29 @@ class MainWindow(QMainWindow):
     # -----------------------------------------------------------------------
     # 슬롯 — 이벤트 처리
     # -----------------------------------------------------------------------
+    # 연결 감시 (Watchdog) 슬롯
+    # -----------------------------------------------------------------------
+
+    @pyqtSlot()
+    def _on_connection_lost(self) -> None:
+        """Watchdog: 연결 끊김 감지 — 헤더 상태 변경 + 로그"""
+        self.header.set_connected("—", "연결끊김")
+        self.append_log("🔴 [연결끊김] 키움 API 연결이 끊어졌습니다. 자동 재연결 시도 중...")
+
+    @pyqtSlot()
+    def _on_connection_recovered(self) -> None:
+        """Watchdog: 재연결 성공 — 헤더 복원 + 로그"""
+        acct = self.login_mgr.account
+        mode = self.login_mgr.server_mode
+        self.header.set_connected(acct, mode)
+        self.append_log(f"🟢 [재연결] 키움 API 재연결 성공 — {acct} ({mode})")
+
+    @pyqtSlot(str)
+    def _on_reconnect_failed(self, reason: str) -> None:
+        """Watchdog: 최대 재시도 초과 — 경고 + 사용자 안내"""
+        self.append_log(f"⛔ [재연결 실패] {reason} — 수동 재시작이 필요합니다.")
+
+    # -----------------------------------------------------------------------
 
 
     @pyqtSlot(str, str)
@@ -898,6 +923,7 @@ class MainWindow(QMainWindow):
 
 
 
+    @pyqtSlot(object)
     def _on_scan_signal_direct(self, sig) -> None:
         """SmartScanner.on_signal 콜백 — 메인 스레드에서 직접 호출됨"""
         self._on_scan_signal(sig)
@@ -905,36 +931,50 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(object)
     def _on_scan_signal(self, sig) -> None:
-        """신호 수신 처리 (로그 + 필터링 + 진입)"""
+        """신호 수신 — 로그 출력 + 당일 감시 목록 누적 (UI만 담당).
+        비즈니스 로직(필터링/진입)은 TradingController.handle_signal에 위임됩니다.
+        """
         self.log_panel.append(
             f"🚨 [{sig.signal_type}] {sig.name}({sig.code}) "
             f"@{sig.price:,}원  {sig.reason}"
         )
-
-
-        # 당일 감시 목록에 누적 (포트폴리오 패널 "감시중" 표시용)
-        first_signal = len(self._today_watch) == 0
+        # 당일 감시 목록 누적 (포트폴리오 패널 "감시중" 표시용)
         self._today_watch[sig.code] = {
             "name":        sig.name,
             "price":       sig.price,
             "signal_type": sig.signal_type,
         }
+        # 뉴스 분석 요청 (백그라운드, 즉시 반환)
+        self._news_analyzer.analyze(sig.code, sig.name)
 
 
-        # 첫 감시 종목 발생 시 자동매매 자동 시작 (급락 감지로 OFF된 상태이면 차단)
+    @pyqtSlot()
+    def _on_auto_trade_started(self) -> None:
+        """첫 감시 신호 발생 — TradingController.auto_trade_started 연결.
+        자동매매 자동 활성화 (UI만 담당).
+        """
         if not self._auto_trading and not self._market_crash_off:
             self.header._btn_auto.setChecked(True)
             self.header._on_auto_clicked(True)
             self.log_panel.append("🟢 감시 종목 발생 — 자동매매 자동 시작")
 
 
-        # 뉴스 분석 요청 (백그라운드, 즉시 반환)
-        self._news_analyzer.analyze(sig.code, sig.name)
+    @pyqtSlot(str, bool)
+    def _on_scan_status_updated(self, msg: str, done: bool) -> None:
+        """스캔 상태바 갱신"""
+        if done:
+            self.scan_status.done(msg)
+        else:
+            self.scan_status.reset()
 
 
-        # TradingController: Phase1 태깅 + 필터 체인 + 진입
-        self.trading_controller.set_auto_trading(self._auto_trading)
-        self.trading_controller.handle_signal(sig)
+    @pyqtSlot(dict)
+    def _on_order_sent(self, d: dict) -> None:
+        """주문 전송 로그"""
+        self.append_log(
+            f"{d['side']} 주문 전송 — {d['name']}({d['code']}) {d['qty']}주 {d['price']}원"
+        )
+
 
 
     # ────────────────────────────────────────────────────────────────────────
