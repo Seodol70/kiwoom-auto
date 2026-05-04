@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 
-from app.strategy import EntryStrategy, ExitStrategy, ExitContext
+from strategy.base import ExitContext
 
 
 
@@ -86,9 +86,17 @@ class TradingController(QObject):
         self._kospi_chg_pct = 0.0
         self._kosdaq_chg_pct = 0.0
 
-        from app.strategy import EntryStrategy, ExitStrategy
-        self._entry_strategy = EntryStrategy(self._order_mgr, self._risk_mgr)
-        self._exit_strategy = ExitStrategy(self._scan_cfg, self._snap_store, self._order_mgr)
+        from strategy.jang_dong_min import JangDongMinStrategy
+        self._strategy = JangDongMinStrategy(
+            self._order_mgr, self._risk_mgr, self._scan_cfg, self._snap_store
+        )
+
+        # 리스크 매니저 신호 연결
+        if self._risk_mgr:
+            self._risk_mgr.daily_loss_cut.connect(self.liquidate_all_positions)
+            self._risk_mgr.daily_profit_locked.connect(
+                lambda: self.log_message.emit("💰 [리스크] 당일 수익 목표 달성 — 신규 매수 차단")
+            )
 
 
     @pyqtSlot(bool)
@@ -119,7 +127,7 @@ class TradingController(QObject):
         else:
             sig.entry_phase = 2
 
-        passed, reason = self._entry_strategy.should_entry(sig, self._auto_trading)
+        passed, reason = self._strategy.should_entry(sig, self._auto_trading)
 
         if not passed:
             self.signal_rejected.emit(f"{sig.code}: {reason}")
@@ -228,10 +236,10 @@ class TradingController(QObject):
 
 
             # 청산 판정 순서 (hard stop부터 시작)
-            # peak_price 갱신
-            self._exit_strategy.update_peak_price(pos)
+            # 상태 갱신 (peak_price 등)
+            self._strategy.update_state(pos)
 
-            should_exit, reason = self._exit_strategy.should_exit(pos, exit_ctx)
+            should_exit, reason = self._strategy.should_exit(pos, exit_ctx)
             if should_exit:
                 self.log_message.emit(f"🚀 [청산] {pos.name}({pos.code}) {reason}")
                 if any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑"]):
@@ -240,7 +248,7 @@ class TradingController(QObject):
                 count += 1
                 continue
 
-            do_partial, ratio = self._exit_strategy.should_partial_exit(pos, exit_ctx)
+            do_partial, ratio = self._strategy.should_partial_exit(pos, exit_ctx)
             if do_partial:
                 self.log_message.emit(f"🔀 [분할익절] {pos.name}({pos.code}) {ratio*100:.0f}% 매도")
                 self._order_mgr.partial_exit(pos.code, pos.name, sell_ratio=ratio, reason="분할익절")

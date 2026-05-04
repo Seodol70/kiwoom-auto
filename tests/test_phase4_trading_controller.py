@@ -12,7 +12,8 @@ Phase 5에서 _check_* 메서드들이 TradingController → ExitStrategy로 통
 import pytest
 from unittest.mock import MagicMock
 
-from app.strategy import ExitStrategy, ExitContext
+from strategy.jang_dong_min import JangDongMinStrategy
+from strategy.base import ExitContext
 from order.order_manager import Position
 from scanner.smart_scanner import SmartScannerConfig
 
@@ -22,7 +23,12 @@ from scanner.smart_scanner import SmartScannerConfig
 def _make_strategy(scan_cfg=None, order_mgr=None, snap_store=None):
     if scan_cfg is None:
         scan_cfg = SmartScannerConfig()
-    return ExitStrategy(scan_cfg=scan_cfg, snap_store=snap_store, order_mgr=order_mgr)
+    return JangDongMinStrategy(
+        order_mgr=order_mgr,
+        risk_mgr=MagicMock(),
+        scan_cfg=scan_cfg,
+        snap_store=snap_store
+    )
 
 
 def _make_ctx(**kwargs):

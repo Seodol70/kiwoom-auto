@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from PyQt5.QtWidgets import QApplication
 from app.trading_controller import TradingController, ExitContext
-from app.strategy import ExitStrategy
+from strategy.jang_dong_min import JangDongMinStrategy
 
 
 class MockPosition:
@@ -116,7 +116,7 @@ def test_hard_stop():
     app = QApplication.instance() or QApplication([])
 
     scan_cfg = MockConfig()
-    es = ExitStrategy(scan_cfg=scan_cfg)
+    es = JangDongMinStrategy(order_mgr=MockOrderManager(), risk_mgr=MockRiskManager(), scan_cfg=scan_cfg)
     ctx = ExitContext(
         sl_pct=-1.2, trail_activation=1.0,
         trail_tier1=1.5, trail_tier2=2.5, trail_tier3=3.5,
@@ -136,7 +136,7 @@ def test_stop_loss():
     app = QApplication.instance() or QApplication([])
 
     scan_cfg = MockConfig()
-    es = ExitStrategy(scan_cfg=scan_cfg)
+    es = JangDongMinStrategy(order_mgr=MockOrderManager(), risk_mgr=MockRiskManager(), scan_cfg=scan_cfg)
     ctx = ExitContext(
         sl_pct=-1.2, trail_activation=1.0,
         trail_tier1=1.5, trail_tier2=2.5, trail_tier3=3.5,
@@ -156,7 +156,7 @@ def test_trail_stop():
     app = QApplication.instance() or QApplication([])
 
     scan_cfg = MockConfig()
-    es = ExitStrategy(scan_cfg=scan_cfg)
+    es = JangDongMinStrategy(order_mgr=MockOrderManager(), risk_mgr=MockRiskManager(), scan_cfg=scan_cfg)
     ctx = ExitContext(
         sl_pct=-1.2, trail_activation=1.0,
         trail_tier1=1.5, trail_tier2=2.5, trail_tier3=3.5,

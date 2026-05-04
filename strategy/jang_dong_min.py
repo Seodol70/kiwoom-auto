@@ -1,19 +1,24 @@
+# -*- coding: utf-8 -*-
 """
 장동민 전략 - 90분 단기 매매
-기술적 지표(이동평균선, RSI, 볼린저 밴드 등)를 활용한 단기 매매 전략
+BaseStrategy를 상속받아 구현된 구체적인 전략 클래스
 """
 
 from __future__ import annotations
-
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
-import logging
-
+from typing import Optional, Any, TYPE_CHECKING
 import numpy as np
 
-logger = logging.getLogger(__name__)
+from strategy.base import BaseStrategy, ExitContext
 
+if TYPE_CHECKING:
+    from scanner.models import ScanSignal
+    from app.risk_manager import RiskManager
+    from order.order_manager import OrderManager
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 설정
@@ -22,27 +27,17 @@ logger = logging.getLogger(__name__)
 @dataclass
 class StrategyConfig:
     """전략 파라미터 — 백테스트 최적화 결과 적용"""
-    # 이동평균선 — 최적값: MA5→7, MA20→15
-    ma_short: int = 7          # 단기 이동평균 기간 (최적화됨)
-    ma_long: int = 15          # 장기 이동평균 기간 (최적화됨)
-
-    # RSI — 유지
+    ma_short: int = 7
+    ma_long: int = 15
     rsi_period: int = 14
-    rsi_oversold: float = 35.0   # 최적화됨: 30→35 (더 높은 역추세 신호)
+    rsi_oversold: float = 35.0
     rsi_overbought: float = 70.0
-
-    # 볼린저 밴드
     bb_period: int = 20
     bb_std: float = 2.0
-
-    # 매매 조건 — 공격형으로 강화됨 (야간 포지션 보유 방지)
-    holding_minutes: int = 60    # 단축됨: 90분 → 60분 (빨리 나가기)
-    stop_loss_pct: float = -1.2   # 손절 타이트: -1.5% → -1.2% (공격적 진입 시 손실 방어)
-    take_profit_pct: float = 3.0  # 익절: 3.0% (절반 매도 구현은 별도)
-
-    # 주문
-    order_qty: int = 1         # 기본 주문 수량
-
+    holding_minutes: int = 60
+    stop_loss_pct: float = -1.2
+    take_profit_pct: float = 3.0
+    order_qty: int = 1
 
 # ---------------------------------------------------------------------------
 # 상태
@@ -68,60 +63,236 @@ class StrategyState:
     last_updated: Optional[datetime] = None
     candles: list = field(default_factory=list)  # OHLCV 캔들 데이터
 
+# ---------------------------------------------------------------------------
+# 전략 클래스 구현
+# ---------------------------------------------------------------------------
+
+class JangDongMinStrategy(BaseStrategy):
+    """
+    장동민 전략 구현체.
+    기술적 지표와 추세 분석을 결합한 단기 매매 전략입니다.
+    """
+
+    def __init__(self, order_mgr: OrderManager, risk_mgr: RiskManager, scan_cfg: Any, snap_store: Any = None):
+        super().__init__(order_mgr, risk_mgr, scan_cfg)
+        self._snap_store = snap_store
+
+    def should_entry(self, sig: ScanSignal, auto_trading: bool) -> tuple[bool, str]:
+        """진입 필터링 로직 (기존 app/strategy.py 로직 통합)"""
+        # 1. 시스템 상태 체크
+        if not auto_trading:
+            return False, "자동매매 OFF"
+
+        if self._risk_mgr.is_new_entry_locked:
+            return False, "신규 매수 락 (손익한도)"
+        
+        if self._risk_mgr.is_daily_loss_cut_done:
+            return False, "손절 한도 도달"
+
+        # 2. 포지션 한도 체크
+        max_pos = getattr(self._order_mgr, "max_positions", 5)
+        if len(self._order_mgr.positions) >= max_pos:
+            return False, f"포지션 {max_pos}개 풀"
+
+        # 3. 중복 진입 방지
+        if sig.code in self._order_mgr.positions:
+            return False, "이미 보유 중"
+
+        # 4. 섹터 쏠림 확인
+        sector = getattr(sig, "sector", "")
+        if sector and self._has_sector_overweight(sector):
+            return False, f"섹터 쏠림 ({sector})"
+
+        # 5. 예수금 부족 체크
+        required_cash = sig.price * sig.qty
+        available_cash = self._order_mgr.available_cash
+        if available_cash < required_cash:
+            return False, f"예수금 부족 ({available_cash:,} < {required_cash:,})"
+
+        return True, "OK"
+
+    def _has_sector_overweight(self, sector: str) -> bool:
+        sector_count = sum(
+            1 for pos in self._order_mgr.positions.values()
+            if getattr(pos, "sector", "") == sector
+        )
+        return sector_count >= 3
+
+    def update_state(self, pos: Any) -> None:
+        """현재가 기반 peak_price 갱신 (기존 ExitStrategy.update_peak_price 통합)"""
+        if not pos or pos.current_price <= 0 or pos.avg_price <= 0:
+            return
+            
+        activation = pos.avg_price * (1 + self._scan_cfg.trail_activation_pct / 100)
+        if pos.current_price >= activation and pos.current_price > pos.peak_price:
+            pos.peak_price = pos.current_price
+
+    def should_exit(self, pos: Any, ctx: ExitContext) -> tuple[bool, str]:
+        """청산 판정 로직 (기존 app/strategy.py 로직 통합)"""
+        _is_eod_pre_gap = getattr(pos, "eod_trade", False) and not getattr(pos, "overnight_held", False)
+        chg = float(pos.price_change_pct_vs_avg)
+
+        # 1. 하드 스탑 (절대 손절선)
+        if chg <= self._scan_cfg.hard_stop_pct:
+            return True, f"Hard Stop ({self._scan_cfg.hard_stop_pct:.1f}%)"
+
+        # 2. 트레일 스탑
+        if not _is_eod_pre_gap:
+            trail_price = self.get_trail_price(pos)
+            if trail_price > 0 and pos.current_price <= trail_price:
+                return True, f"Trail Stop (Peak {pos.peak_price:,} -> {trail_price:,})"
+
+        # 3. 일반 손절 (EMA 보호 포함)
+        if not _is_eod_pre_gap and chg <= ctx.sl_pct:
+            if self._check_ema_protection(pos):
+                return False, "EMA20 Support (Hold)"
+            return True, f"Stop Loss ({ctx.sl_pct:.1f}%)"
+
+        # 4. 타임컷
+        if ctx.time_cut_min > 0 and not getattr(pos, "eod_trade", False):
+            strong_lv = int(getattr(self._scan_cfg, "strong_trend_hold_level", 3))
+            exempt = (
+                getattr(self._scan_cfg, "strong_trend_timecut_exempt", True)
+                and int(getattr(pos, "trend_level", 0)) >= strong_lv
+            )
+            if not exempt:
+                entry_time = getattr(pos, "entry_time", None)
+                if entry_time:
+                    elapsed = (datetime.now() - entry_time).total_seconds() / 60
+                    if elapsed >= ctx.time_cut_min:
+                        return True, f"Time Cut ({elapsed:.1f}min)"
+
+        # 5. 본절가 스탑 (분할익절 후 평단 이탈)
+        if self._should_breakeven_stop(pos):
+            return True, "본절가스탑"
+
+        # 6. EMA20 이탈 청산
+        if self._should_ema20_exit(pos):
+            return True, "EMA20이탈"
+
+        # 7. 추세소멸 익절
+        if self._should_trend_decay(pos):
+            return True, "추세소멸"
+
+        return False, "HOLD"
+
+    def should_partial_exit(self, pos: Any, ctx: ExitContext) -> tuple[bool, float]:
+        """분할 익절 여부 판단"""
+        if not getattr(self._scan_cfg, "partial_profit_enabled", False):
+            return False, 0.0
+        if getattr(pos, "partial_sold", False):
+            return False, 0.0
+        if ctx.partial_profit_pct <= 0:
+            return False, 0.0
+        if float(pos.price_change_pct_vs_avg) >= ctx.partial_profit_pct:
+            ratio = float(getattr(self._scan_cfg, "partial_sell_ratio", 0.30))
+            return True, ratio
+        return False, 0.0
+
+    # ─── 내부 유틸리티 ──────────────────────────────────────────────────
+
+    def get_trail_price(self, pos: Any) -> int:
+        """트레일 스탑 가격 계산"""
+        if not pos or pos.peak_price <= 0 or pos.avg_price <= 0:
+            return 0
+            
+        peak_chg = (pos.peak_price - pos.avg_price) / pos.avg_price * 100
+        cfg = self._scan_cfg
+        
+        if peak_chg < cfg.trail_activation_pct:
+            return 0
+            
+        strong_lv = int(getattr(cfg, "strong_trend_hold_level", 3))
+        is_strong = int(getattr(pos, "trend_level", 0)) >= strong_lv
+        
+        if is_strong:
+            if peak_chg < cfg.trail_tier2_max:
+                _tp = cfg.trail_pct_tier2
+            else:
+                _tp = cfg.trail_pct_tier3
+        else:
+            if peak_chg < cfg.trail_tier1_max:
+                _tp = cfg.trail_pct_tier1
+            elif peak_chg < cfg.trail_tier2_max:
+                _tp = cfg.trail_pct_tier2
+            else:
+                _tp = cfg.trail_pct_tier3
+                
+        return int(pos.peak_price * (1 - _tp / 100))
+
+    def _should_breakeven_stop(self, pos: Any) -> bool:
+        if not getattr(self._scan_cfg, "breakeven_stop_enabled", False):
+            return False
+        if not getattr(pos, "partial_sold", False):
+            return False
+        buffer_pct = float(getattr(self._scan_cfg, "breakeven_stop_buffer_pct", 0.0))
+        return float(pos.price_change_pct_vs_avg) <= buffer_pct
+
+    def _should_ema20_exit(self, pos: Any) -> bool:
+        if not getattr(self._scan_cfg, "ema20_exit_enabled", False):
+            return False
+        if not self._snap_store:
+            return False
+        snap = self._snap_store.get_snapshot(pos.code)
+        if snap is None:
+            return False
+        closes = list(getattr(snap, "closes_1min", []) or [])
+        if len(closes) < 20:
+            return False
+        from scanner.indicator_service import IndicatorService
+        ema20 = IndicatorService.calc_ema(closes, 20)
+        if not ema20:
+            return False
+        buffer_pct = float(getattr(self._scan_cfg, "ema20_exit_buffer_pct", 0.0))
+        return pos.current_price < ema20 * (1 - buffer_pct / 100)
+
+    def _should_trend_decay(self, pos: Any) -> bool:
+        if getattr(pos, "eod_trade", False):
+            return False
+        if float(pos.price_change_pct_vs_avg) <= 0:
+            return False
+        if self._order_mgr is None:
+            return False
+        return self._order_mgr.should_exit_on_trend_decay(pos.code)
+
+    def _check_ema_protection(self, pos: Any) -> bool:
+        if not getattr(self._scan_cfg, "trend_protect_enabled", True):
+            return False
+        if not self._snap_store:
+            return False
+        snap = self._snap_store.get_snapshot(pos.code)
+        if not snap or not snap.closes_1min or len(snap.closes_1min) < 20:
+            return False
+        from scanner.indicator_service import IndicatorService
+        ema20 = IndicatorService.calc_ema(snap.closes_1min, 20)
+        return bool(ema20 and pos.current_price > ema20)
 
 # ---------------------------------------------------------------------------
-# 기술적 지표 계산
+# 기술적 지표 계산 (유틸리티)
 # ---------------------------------------------------------------------------
 
 def calc_ma(closes: list[float], period: int) -> Optional[float]:
-    """단순 이동평균(SMA) — IndicatorService 위임"""
     from scanner.indicator_service import IndicatorService
     return IndicatorService.calc_ma(closes, period)
 
-
 def calc_ema(closes: list[float], period: int) -> Optional[float]:
-    """지수이동평균(EMA) — IndicatorService 위임"""
     from scanner.indicator_service import IndicatorService
     return IndicatorService.calc_ema(closes, period)
 
-
-def calc_atr(
-    highs: list[float],
-    lows: list[float],
-    closes: list[float],
-    period: int = 14,
-) -> Optional[float]:
-    """ATR(Average True Range) — IndicatorService 위임"""
+def calc_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> Optional[float]:
     from scanner.indicator_service import IndicatorService
     return IndicatorService.calc_atr(highs, lows, closes, period)
 
-
-def get_trend_status(
-    closes: list[float],
-    highs: list[float],
-    lows: list[float],
-    volumes: list[int],
-    *,
-    ema_period: int = 20,
-    atr_period: int = 14,
-    volume_lookback: int = 20,
-) -> int:
-    """
-    고도화된 추세 강도(0~3) 판정 알고리즘 — IndicatorService 위임
-    """
+def get_trend_status(closes: list[float], highs: list[float], lows: list[float], volumes: list[int], **kwargs) -> int:
     from scanner.indicator_service import IndicatorService
-    return IndicatorService.get_trend_status(
-        closes, highs, lows, volumes, ema_period, atr_period, volume_lookback
-    )
-
+    return IndicatorService.get_trend_status(closes, highs, lows, volumes, **kwargs)
 
 def calc_rsi(closes: list[float], period: int = 14) -> Optional[float]:
-    """RSI(Relative Strength Index) — numpy 가속"""
     if len(closes) < period + 1:
         return None
-    arr    = np.array(closes[-(period + 1):], dtype=np.float64)
+    arr = np.array(closes[-(period + 1):], dtype=np.float64)
     deltas = np.diff(arr)
-    gains  = np.where(deltas > 0, deltas, 0.0)
+    gains = np.where(deltas > 0, deltas, 0.0)
     losses = np.where(deltas < 0, -deltas, 0.0)
     avg_gain = gains.mean()
     avg_loss = losses.mean()
@@ -130,130 +301,24 @@ def calc_rsi(closes: list[float], period: int = 14) -> Optional[float]:
     rs = avg_gain / avg_loss
     return float(100.0 - (100.0 / (1.0 + rs)))
 
-
-def calc_bollinger_bands(
-    closes: list[float], period: int = 20, std_mult: float = 2.0
-) -> Optional[tuple[float, float, float]]:
-    """볼린저 밴드 (upper, middle, lower) — numpy 가속"""
+def calc_bollinger_bands(closes: list[float], period: int = 20, std_mult: float = 2.0) -> Optional[tuple[float, float, float]]:
     if len(closes) < period:
         return None
-    arr    = np.array(closes[-period:], dtype=np.float64)
+    arr = np.array(closes[-period:], dtype=np.float64)
     middle = float(arr.mean())
-    std    = float(arr.std())
+    std = float(arr.std())
     return middle + std_mult * std, middle, middle - std_mult * std
 
-
-def calc_indicators(closes: list[float], cfg: StrategyConfig) -> dict:
-    """모든 지표를 한번에 계산해 반환"""
-    return {
-        "ma_short": calc_ma(closes, cfg.ma_short),
-        "ma_long": calc_ma(closes, cfg.ma_long),
-        "rsi": calc_rsi(closes, cfg.rsi_period),
-        "bb": calc_bollinger_bands(closes, cfg.bb_period, cfg.bb_std),
-    }
-
-
 def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:
-    """
-    피봇 2차 저항선(R2) 계산.
-    전일 고가, 저가, 종가를 기반으로 당일 목표가를 계산한다.
-
-    공식:
-        P = (고 + 저 + 종) / 3
-        R2 = P + (고 - 저)
-
-    Args:
-        prev_high: 전일 고가
-        prev_low: 전일 저가
-        prev_close: 전일 종가
-
-    Returns:
-        피봇 R2 값 (float). 입력값이 0 이하면 0.0 반환
-    """
     if prev_high <= 0 or prev_low <= 0 or prev_close <= 0:
         return 0.0
     pivot = (prev_high + prev_low + prev_close) / 3.0
     return pivot + (prev_high - prev_low)
 
-
 def check_daily_alignment(daily_closes: list[float]) -> bool:
-    """
-    일봉 정배열 확인 (5일 MA > 10일 MA > 20일 MA).
-    상승추세의 시작 또는 확립 단계를 판별한다.
-
-    Args:
-        daily_closes: 최신순 일봉 종가 리스트
-                      (예: [100, 99, 98, ...] 형태로 최신부터 과거순)
-
-    Returns:
-        True if 5일 MA > 10일 MA > 20일 MA (정배열 확립)
-        False otherwise (데이터 부족 포함)
-    """
     if len(daily_closes) < 20:
         return False
-
     ma5 = sum(daily_closes[-5:]) / 5
     ma10 = sum(daily_closes[-10:]) / 10
     ma20 = sum(daily_closes[-20:]) / 20
-
     return ma5 > ma10 > ma20
-
-
-def get_daily_context(
-    daily_closes: list[float],
-    current_price: float,
-    near_high_threshold_pct: float = 3.0,
-) -> dict:
-    """
-    일봉 데이터 기반 매매 맥락 정보를 반환한다.
-
-    Args:
-        daily_closes:            최신순 일봉 종가 리스트 (최대 120개)
-        current_price:           현재 분봉 현재가
-        near_high_threshold_pct: 신고가 근처 판정 기준 (%) — 25일 최고가 대비 이내
-
-    Returns:
-        dict:
-            above_ma20  (bool)  — 현재가 ≥ 일봉 20MA  → 단기 추세 기준
-            above_ma60  (bool)  — 현재가 ≥ 일봉 60MA  → 중기 추세 기준
-            near_high   (bool)  — 25일 신고가 근처(overhead 매물대 없음)
-            daily_ma20  (float) — 일봉 20MA 값 (0 = 데이터 부족)
-            daily_ma60  (float) — 일봉 60MA 값 (0 = 데이터 부족)
-            high_25d    (float) — 최근 25일 최고 종가 (0 = 데이터 부족)
-    """
-    result = {
-        "above_ma20": True, "above_ma60": True,
-        "near_high": False,
-        "daily_ma20": 0.0, "daily_ma60": 0.0,
-        "high_25d": 0.0,
-        "ma20_slope_up": True,   # 일봉 20MA 우상향 여부 (데이터 부족 시 fail-open)
-    }
-
-    if len(daily_closes) < 20 or current_price <= 0:
-        # 데이터 부족 → 필터 통과 (fail-open)
-        return result
-
-    daily_ma20 = sum(daily_closes[-20:]) / 20
-    result["daily_ma20"] = daily_ma20
-    result["above_ma20"] = current_price >= daily_ma20
-
-    # MA20 기울기: 3거래일 전 MA20 대비 현재 MA20이 우상향인지 확인
-    if len(daily_closes) >= 23:
-        ma20_3d_ago = sum(daily_closes[-23:-3]) / 20
-        result["ma20_slope_up"] = daily_ma20 > ma20_3d_ago
-    # 23개 미만이면 fail-open(True) 유지
-
-    # MA60 — 데이터가 60개 이상일 때만 계산, 부족하면 fail-open
-    if len(daily_closes) >= 60:
-        daily_ma60 = sum(daily_closes[-60:]) / 60
-        result["daily_ma60"] = daily_ma60
-        result["above_ma60"] = current_price >= daily_ma60
-
-    # 신고가 근처: 최근 25일 최고가 대비 near_high_threshold_pct 이내
-    n = min(25, len(daily_closes))
-    high_25d = max(daily_closes[-n:])
-    result["high_25d"] = high_25d
-    if high_25d > 0:
-        result["near_high"] = current_price >= high_25d * (1.0 - near_high_threshold_pct / 100.0)
-
-    return result

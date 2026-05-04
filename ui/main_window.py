@@ -119,8 +119,6 @@ class MainWindow(QMainWindow):
         self._kiwoom = kiwoom
 
 
-        # 당일 감시 종목 누적 {code: {name, price, signal_type}}
-        self._today_watch: dict = {}
         # time.monotonic() 기준 — 이 시각 이전에는 _auto_sell_by_pnl 미실행
         self._sl_tp_warmup_end: float = 0.0
         # 블로킹 방지 플래그
@@ -152,11 +150,6 @@ class MainWindow(QMainWindow):
         self._closed_today:       bool = False
         self._feedback_done_today: bool = False
         self._feedback_thread = None   # GC 방지용 참조
-
-        # Phase 3: 이제 risk_manager에서 관리되지만, 로그 중복 방지를 위해 로컬도 유지
-        self._manual_unlock_active: bool = False
-        self._new_entry_locked:    bool = False
-        self._daily_loss_cut_done: bool = False
         
         # [Risk] 파라미터는 이제 AppContext에서 관리함
 
@@ -843,26 +836,13 @@ class MainWindow(QMainWindow):
         """
         사용자 수동 개입으로 일일 손익 락을 해제한다 (RiskManager 연동).
         """
-        prev_locked = self.risk_manager.is_new_entry_locked
-        prev_cut_done = self.risk_manager.is_daily_loss_cut_done
-
-
         # RiskManager 상태 업데이트
         self.risk_manager.unlock_entry_manual()
-
-
-        # MainWindow 플래그도 동기화 (로그 중복 방지용)
-        self._new_entry_locked = False
-        self._daily_loss_cut_done = False
-        self._manual_unlock_active = True
-
-
+        
+        # UI 업데이트
+        self.header.set_risk_status("SAFE")
         self.log_panel.append(
             "🔓 [수동해제] 일일 손익 락 해제 완료 — 금일 자동 재락 일시 중단"
-        )
-        logger.warning(
-            "[PnlLock] 수동 해제: locked %s→False, loss_cut_done %s→False, manual_unlock_active=True",
-            prev_locked, prev_cut_done
         )
 
 
@@ -933,7 +913,7 @@ class MainWindow(QMainWindow):
 
 
         # 첫 감시 종목 발생 시 자동매매 자동 시작 (급락 감지로 OFF된 상태이면 차단)
-        if first_signal and not self._auto_trading and not self._market_crash_off:
+        if not self._auto_trading and not self._market_crash_off:
             self.header._btn_auto.setChecked(True)
             self.header._on_auto_clicked(True)
             self.log_panel.append("🟢 감시 종목 발생 — 자동매매 자동 시작")
@@ -985,8 +965,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_profit_locked(self) -> None:
         """수익 목표 달성 → 신규 매수 차단"""
-        self._new_entry_locked = True
         profit_target = self._scan_cfg.daily_profit_lock_won
+        self.header.set_risk_status("WARNING", "PROFIT LOCK")
         self.log_panel.append(
             f"🔒 [수익 락] 일일 수익 {profit_target:,}원 달성 — 신규 매수 차단"
         )
@@ -995,8 +975,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _on_loss_cut(self) -> None:
         """손절 한도 도달 → 전량 청산"""
-        self._daily_loss_cut_done = True
         loss_limit = self._scan_cfg.daily_loss_cut_won
+        self.header.set_risk_status("DANGER", "LOSS CUT")
         self.log_panel.append(
             f"🔴 [손절 한도] 일일 손실 -{loss_limit:,}원 도달 — 전량 강제청산 진행..."
         )

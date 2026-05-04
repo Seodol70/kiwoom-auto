@@ -103,12 +103,20 @@ class TradeAuditLogger:
     - threading.Lock 으로 _pending_rows·CSV 쓰기 보호
     """
 
-    def __init__(self, log_dir: str = "logs") -> None:
+    def __init__(self, log_dir: str = "logs", db_manager=None) -> None:
         self._log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
         self._lock        = threading.Lock()
         self._pending_rows: dict[str, dict] = {}
         self._today_str   = date.today().isoformat()
+        
+        # [SQLite] DB 매니저 연결
+        if db_manager is None:
+            from infra.db_manager import DatabaseManager
+            self.db = DatabaseManager()
+        else:
+            self.db = db_manager
+
         self._ensure_file()
 
     # ── 파일 관리 ─────────────────────────────────────────────────────────────
@@ -145,15 +153,24 @@ class TradeAuditLogger:
         return sorted(matched)[-1]   # signal_time suffix(HHmmss) 기준 최신
 
     def _flush_row(self, key: str) -> None:
-        """단일 행을 CSV에 append한다. Lock 내부에서만 호출."""
+        """단일 행을 CSV 및 SQLite에 저장한다. Lock 내부에서만 호출."""
         self._check_date_rollover()
         row = self._pending_rows.get(key)
         if row is None:
             return
+            
+        # 1. CSV 저장
         path = self._csv_path()
         with open(path, "a", newline="", encoding="utf-8-sig") as f:
             csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore").writerow(row)
-        logger.debug("[TradeAudit] flush — %s", key)
+        
+        # 2. SQLite 저장 (upsert)
+        if self.db:
+            # DB 컬럼과 일치하도록 가공 (빈 문자열 -> None 등 필요한 경우)
+            db_data = {k: (None if v == "" else v) for k, v in row.items()}
+            self.db.upsert_trade(key, db_data)
+            
+        logger.debug("[TradeAudit] flush (CSV+DB) — %s", key)
 
     # ── 공개 API ──────────────────────────────────────────────────────────────
 

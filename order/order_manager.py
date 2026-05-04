@@ -242,6 +242,12 @@ class OrderManager(QObject):
         """가용 예수금 (TradingController 호환 프로퍼티)."""
         return self.cash
 
+    @property
+    def total_equity(self) -> int:
+        """총 자산 (예수금 + 보유종목 평가금액)."""
+        mv = sum(p.qty * p.current_price for p in self.positions.values() if p.current_price > 0)
+        return self.cash + mv
+
     # -----------------------------------------------------------------------
     # 주문 메시지 콜백 (OnReceiveMsg → kiwoom_api → 여기)
     # -----------------------------------------------------------------------
@@ -598,17 +604,57 @@ class OrderManager(QObject):
             self._queued_signal = signal   # 매도 체결 완료 시 자동 실행
             return
 
-        # ── 수량 계산 — 100% 현금 운용 (예수금 전액 소진) ──────────────────
-        # 남은 슬롯 수 기준으로 예수금을 균등 분배
-        remaining_slots = self.max_positions - len(self.positions) - len(self._pending)
-        remaining_slots = max(remaining_slots, 1)  # 0 나누기 방지
-        budget = self.cash // remaining_slots
-        qty = budget // price if price > 0 else 0
+        # ── 수량 계산 (Dynamic Sizing) ───────────────────────────────────
+        mode = getattr(self._scan_cfg, "position_sizing_mode", "EQUAL").upper()
+        qty = 0
 
-        # ── 가용 예수금 부족 체크 ─────────────────────────────────────────
-        # 최소 1주 매수 불가능하면 자금 회전 시도
+        if mode == "FIXED":
+            # 1. FIXED: 설정된 고정 금액 분할 매수
+            budget = int(getattr(self._scan_cfg, "fixed_order_amount", 1_500_000))
+            qty = budget // price if price > 0 else 0
+            order_log.info("[사이징:FIXED] 목표금액=%s원 -> %d주", f"{budget:,}", qty)
+
+        elif mode == "RISK":
+            # 2. RISK: 회당 리스크 한도(예: 총자산 1%) 기반 수량 산출
+            # 공식: qty = (총자산 * 리스크%) / (진입가 - 손절가)
+            risk_pct = float(getattr(self._scan_cfg, "risk_per_trade_pct", 1.0))
+            total_equity = self.total_equity
+            risk_amount = int(total_equity * (risk_pct / 100.0))
+            
+            # 손절가 산출 (기본 손절 % 사용)
+            sl_pct = abs(float(getattr(self._scan_cfg, "stop_loss_pct", -1.2)))
+            stop_price = int(price * (1 - sl_pct / 100.0))
+            risk_per_share = max(1, price - stop_price)
+            
+            qty = risk_amount // risk_per_share
+            order_log.info(
+                "[사이징:RISK] 총자산=%s원 리스크=%s원(%s%%) 손절가=%s원 -> %d주",
+                f"{total_equity:,}", f"{risk_amount:,}", f"{risk_pct}", f"{stop_price:,}", qty
+            )
+
+        else:
+            # 3. EQUAL (기존 방식): 예수금 / 남은 슬롯
+            remaining_slots = self.max_positions - len(self.positions) - len(self._pending)
+            remaining_slots = max(remaining_slots, 1)
+            budget = self.cash // remaining_slots
+            qty = budget // price if price > 0 else 0
+            order_log.info("[사이징:EQUAL] 가용예수금=%s원 슬롯=%d -> %d주", f"{self.cash:,}", remaining_slots, qty)
+
+        # ── 가용 자금 및 주문 한도 체크 ─────────────────────────────────────────
+        # 1회 주문 한도(max_order_amount) 적용
+        max_qty = self.max_order_amount // price if price > 0 else 0
+        if qty > max_qty:
+            order_log.info("[사이징] 주문한도 초과 조정: %d -> %d주 (상한 %s원)", qty, max_qty, f"{self.max_order_amount:,}")
+            qty = max_qty
+
+        # 가용 예수금(cash) 초과 방지
+        can_buy_qty = self.cash // price if price > 0 else 0
+        if qty > can_buy_qty:
+            order_log.info("[사이징] 예수금 부족 조정: %d -> %d주 (가용 %s원)", qty, can_buy_qty, f"{self.cash:,}")
+            qty = can_buy_qty
+
         if qty <= 0:
-            msg = f"가용 예수금 부족 — 최소 1주 매수 불가 (예수금 {self.cash:,} / 주가 {price:,})"
+            msg = f"매수 거절 — 수량 0 (예수금 부족 또는 가격 오류)"
             logger.warning(msg)
             self.order_failed.emit(msg)
             return
@@ -1272,6 +1318,7 @@ class OrderManager(QObject):
             # [NEW] 포지션 실시간 등록
             if self.on_position_opened:
                 self.on_position_opened(code)
+            realized_for_signal = 0
 
         elif order_type == OrderType.SELL:
             if code in self.positions:
@@ -1292,6 +1339,7 @@ class OrderManager(QObject):
                     "amount": filled_qty * filled_price,
                     "realized": realized,
                 })
+                realized_for_signal = realized
                 # [NEW] 매도 체결을 파일에 append → 재시작 후에도 복구 가능
                 _is_partial = code in self._partial_pending_codes
                 self._partial_pending_codes.discard(code)
@@ -1342,6 +1390,7 @@ class OrderManager(QObject):
             "name":         name,
             "filled_qty":   filled_qty,
             "filled_price": filled_price,
+            "realized_pnl": realized_for_signal,
         }
         if avg_buy_for_log is not None:
             payload["avg_buy_price"] = avg_buy_for_log

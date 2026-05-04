@@ -61,6 +61,11 @@ class PortfolioPanel(QWidget):
         self._lbl_cash = QLabel("예수금: —")
         self._lbl_cash.setObjectName("cash_label")
         info_lay.addWidget(self._lbl_cash)
+        
+        self._lbl_total_pnl = QLabel("합산: — (—%)")
+        self._lbl_total_pnl.setStyleSheet("color: #94e2d5; font-weight: bold; margin-left: 10px;")
+        info_lay.addWidget(self._lbl_total_pnl)
+        
         info_lay.addStretch()
 
 
@@ -141,6 +146,15 @@ class PortfolioPanel(QWidget):
 
 
         self._lbl_cash.setText(f"  예수금: {cash:,} 원")
+
+        # ── 합산 손익 계산 ──
+        total_buy = sum(p.avg_price * p.qty for p in positions.values())
+        total_pnl = sum(p.pnl for p in positions.values())
+        total_pct = (total_pnl / total_buy * 100) if total_buy > 0 else 0.0
+        
+        color_hex = "#f38ba8" if total_pnl < 0 else "#a6e3a1" if total_pnl > 0 else "#cdd6f4"
+        self._lbl_total_pnl.setText(f"합산: {total_pnl:+,}원 ({total_pct:+.2f}%)")
+        self._lbl_total_pnl.setStyleSheet(f"color: {color_hex}; font-weight: bold; margin-left: 10px;")
 
 
         # ── refresh 전 수동매도 스핀박스 값 보존 (사용자 입력 유지) ──────

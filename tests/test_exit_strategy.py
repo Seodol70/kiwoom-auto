@@ -14,7 +14,8 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 
-from app.strategy import ExitStrategy, ExitContext
+from strategy.jang_dong_min import JangDongMinStrategy
+from strategy.base import ExitContext
 from scanner.smart_scanner import SmartScannerConfig
 
 
@@ -72,11 +73,12 @@ def _ctx(time_cut_min: int = 0, sl_pct: float = -1.5, **kwargs) -> ExitContext:
     )
 
 
-def _es(cfg=None, snap_store=None, order_mgr=None) -> ExitStrategy:
-    return ExitStrategy(
+def _es(cfg=None, snap_store=None, order_mgr=None) -> JangDongMinStrategy:
+    return JangDongMinStrategy(
+        order_mgr=order_mgr,  # None이어도 됨 (should_trend_decay에서 체크함)
+        risk_mgr=MagicMock(),
         scan_cfg=cfg or _cfg(),
         snap_store=snap_store,
-        order_mgr=order_mgr,
     )
 
 

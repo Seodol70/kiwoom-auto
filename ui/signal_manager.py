@@ -98,8 +98,18 @@ class SignalManager:
         ms.overnight_auto_enabled.connect(lambda: self.win._on_overnight_mode_toggle(True))
 
         # 리스크 매니저
-        self.win.risk_manager.daily_profit_locked.connect(self.win._on_profit_locked)
-        self.win.risk_manager.daily_loss_cut.connect(self.win._on_loss_cut)
+        rm = self.win.risk_manager
+        if rm:
+            rm.daily_loss_cut.connect(self.win._on_loss_cut)
+            rm.daily_loss_cut.connect(lambda: self.win.append_log("🔴 [리스크] 당일 손익 락 발동 (매수 차단)"))
+            rm.daily_loss_cut.connect(lambda: self.win.header.set_risk_status("DANGER", "LOSS CUT"))
+            
+            rm.daily_profit_locked.connect(self.win._on_profit_locked)
+            rm.daily_profit_locked.connect(lambda: self.win.header.set_risk_status("WARNING", "PROFIT LOCK"))
+            
+        # [NEW] 주문 관리자 -> 헤더 사이징 표시 (초기화 시 한 번)
+        mode = getattr(self.win._scan_cfg, "position_sizing_mode", "EQUAL")
+        self.win.header.set_sizing_mode(mode)
 
     def _bind_context_updates(self):
         """중앙 컨텍스트와 UI 동기화"""

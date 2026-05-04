@@ -42,6 +42,13 @@ class RiskManager(QObject):
         self._daily_loss_cut_done = False
         self._manual_unlock_active = False
 
+        # [NEW] 연속 손실 및 냉각기 상태
+        self._consecutive_losses = 0
+        self._cooling_off_until = None
+
+        # 체결 신호 연결 (연속 손실 추적용)
+        self._order_mgr.order_filled.connect(self._on_order_filled)
+
     def update_config(self, scan_cfg: SmartScannerConfig) -> None:
         """설정 객체 참조를 갱신한다."""
         self._scan_cfg = scan_cfg
@@ -74,6 +81,27 @@ class RiskManager(QObject):
             self._daily_loss_cut_done = True
             self.daily_loss_cut.emit()
 
+        # [NEW] 전체 포트폴리오 미실현 손익 체크
+        total_cost = sum(p.avg_price * p.qty for p in self._order_mgr.positions.values())
+        if total_cost > 0:
+            total_unrealized_pnl = sum(p.pnl for p in self._order_mgr.positions.values())
+            total_pnl_pct = (total_unrealized_pnl / total_cost) * 100.0
+            
+            max_loss_cut = float(getattr(self._scan_cfg, "max_portfolio_unrealized_loss_pct", 5.0))
+            if total_pnl_pct <= -max_loss_cut and not self._daily_loss_cut_done:
+                self._daily_loss_cut_done = True
+                self.daily_loss_cut.emit()
+                from logging_config import order_log
+                order_log.warning("[리스크] 포트폴리오 합산 손절 발동: %.2f%% (한도 -%.1f%%)", total_pnl_pct, max_loss_cut)
+
+        # [NEW] 냉각기 상태 업데이트
+        from datetime import datetime
+        if self._cooling_off_until and datetime.now() >= self._cooling_off_until:
+            self._cooling_off_until = None
+            self._new_entry_locked = False
+            from logging_config import order_log
+            order_log.info("[리스크] 냉각기 종료 — 신규 매수 차단 해제")
+
     def reset(self) -> None:
         """자정 리셋"""
         self._new_entry_locked = False
@@ -89,3 +117,34 @@ class RiskManager(QObject):
         """수동으로 신규 매수 락 활성화"""
         self._manual_unlock_active = False
         self._new_entry_locked = True
+
+    # ─── 내부 핸들러 ──────────────────────────────────────────────────
+
+    @pyqtSlot(dict)
+    def _on_order_filled(self, payload: dict) -> None:
+        """체결 시 호출되어 연속 손실을 추적한다."""
+        side = payload.get("side", "")
+        if "매도" not in side:
+            return
+
+        # 실현 손익 확인
+        realized = payload.get("realized_pnl", 0)
+        # realized 가 없으면 (일부 체결 등) 계산 시도 (payload에 없으면 0으로 간주하거나 pass)
+        # OrderManager.order_filled emit 시 realized_pnl이 포함되도록 수정 필요할 수 있음
+        
+        # realized 가 음수면 손절로 간주
+        if realized < 0:
+            self._consecutive_losses += 1
+            limit = int(getattr(self._scan_cfg, "consecutive_loss_limit", 3))
+            if self._consecutive_losses >= limit:
+                # 냉각기 발동
+                from datetime import datetime, timedelta
+                from logging_config import order_log
+                minutes = int(getattr(self._scan_cfg, "cooling_off_minutes", 30))
+                self._cooling_off_until = datetime.now() + timedelta(minutes=minutes)
+                self._new_entry_locked = True
+                order_log.warning("[리스크] %d회 연속 손절 발생 -> %d분간 매수 차단 (냉각기)", self._consecutive_losses, minutes)
+        else:
+            # 익절 시 연속 손실 카운트 초기화
+            if realized > 0:
+                self._consecutive_losses = 0

@@ -61,17 +61,21 @@ class HeaderBar(QWidget):
         self._lbl_conn.setObjectName("conn_off")
         self._lbl_pnl     = self._make("💰 실현손익: —")
         
-        # 지수 라벨 초기 스타일 (명시적 색상 부여)
+        # ── 지수 & 리스크 상태 ──────────────────────────────────────────
         self._lbl_kospi   = self._make("KOSPI: —")
         self._lbl_kosdaq  = self._make("KOSDAQ: —")
-        self._lbl_kospi.setStyleSheet("color: #cdd6f4;")
-        self._lbl_kosdaq.setStyleSheet("color: #cdd6f4;")
+        self._lbl_kospi.setMinimumWidth(150)
+        self._lbl_kosdaq.setMinimumWidth(150)
+
+        # [NEW] 리스크 상태 및 사이징 모드
+        self._lbl_risk_status = QLabel("🛡️ SAFE")
+        self._lbl_risk_status.setObjectName("lbl_risk_status")
+        self._lbl_risk_status.setAlignment(Qt.AlignCenter)
+        self._lbl_risk_status.setMinimumWidth(100)
+
+        self._lbl_sizing = self._make("⚖️ SIZING: EQUAL")
+        self._lbl_sizing.setStyleSheet("color: #89dceb; font-weight: bold;")
         
-        # 지수 라벨 너비 확보 (텍스트 길이에 따라 잘림 방지)
-        self._lbl_kospi.setMinimumWidth(180)
-        self._lbl_kosdaq.setMinimumWidth(180)
-        
-        # ── 초기 지수 테스트 데이터 (표시 여부 확인용) ──────────────────
         self.set_index(0.0, 0.0, 0.0, 0.0, False)
 
 
@@ -143,22 +147,25 @@ class HeaderBar(QWidget):
         lay.addWidget(self._lbl_title)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_kospi)
-        lay.addWidget(self._divider())
         lay.addWidget(self._lbl_kosdaq)
-        lay.addStretch()
         lay.addWidget(self._divider())
+        lay.addWidget(self._lbl_risk_status)
+        lay.addWidget(self._lbl_sizing)
+        
+        lay.addStretch()
+        
         lay.addWidget(self._lbl_account)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_conn)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_pnl)
         lay.addWidget(self._divider())
+        
         lay.addWidget(self._btn_switch_real)
         lay.addWidget(self._btn_overnight)
         lay.addWidget(self._btn_auto)
         lay.addWidget(self._btn_unlock)
         lay.addWidget(self._btn_reload)
-        lay.addWidget(self._btn_restart)
         lay.addWidget(self._btn_exit)
 
 
@@ -232,6 +239,25 @@ class HeaderBar(QWidget):
         """일일 손익 락 수동 해제 요청."""
         self.unlock_requested.emit()
 
+
+    def set_risk_status(self, status: str, text: str = "") -> None:
+        """리스크 상태 업데이트 (SAFE, WARNING, DANGER)"""
+        if status == "SAFE":
+            self._lbl_risk_status.setText("🛡️ SAFE")
+            self._lbl_risk_status.setProperty("status", "safe")
+        elif status == "WARNING":
+            self._lbl_risk_status.setText(f"⚠️ {text or 'WARN'}")
+            self._lbl_risk_status.setProperty("status", "warning")
+        elif status == "DANGER":
+            self._lbl_risk_status.setText(f"🚨 {text or 'LOCK'}")
+            self._lbl_risk_status.setProperty("status", "danger")
+        
+        self._lbl_risk_status.style().unpolish(self._lbl_risk_status)
+        self._lbl_risk_status.style().polish(self._lbl_risk_status)
+
+    def set_sizing_mode(self, mode: str) -> None:
+        """사이징 모드 표시 업데이트"""
+        self._lbl_sizing.setText(f"⚖️ SIZING: {mode}")
 
     def set_connected(self, account: str, mode: str) -> None:
         self._lbl_account.setText(f"🏠 계좌: {account}")
