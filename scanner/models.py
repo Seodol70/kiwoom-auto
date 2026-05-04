@@ -64,6 +64,7 @@ class StockSnapshot:
 
     # 기타 지표
     chejan_strength: float = 100.0  # 체결강도
+    rs_score: float = 0.0           # 지수 대비 강도 (Stock% - Index%)
 
     @property
     def foreign_net(self) -> int: return self.foreign_net_buy

@@ -94,14 +94,26 @@ class Position:
     entry_phase:     int  = 0             # 0=미분류, 1=모닝스캘핑(09~10:30), 2=메인전략(10~14:40)
     # 섹터 쏠림 방지
     sector:          str  = ""            # 업종명 (opt10001 응답, 섹터 노출 집계용)
+    entry_count:     int  = 1             # 진입 횟수 (피라미딩 추적용)
 
     @property
     def pnl(self) -> int:
         """평가손익(원): 수수료·세금 차감 후."""
-        gross    = (self.current_price - self.avg_price) * self.qty
-        buy_fee  = int(self.avg_price    * self.qty * _FEE)              # 매수 수수료
-        sell_fee = int(self.current_price * self.qty * (_FEE + _TAX))    # 매도 수수료+세금
-        return gross - buy_fee - sell_fee
+        if not self.current_price or not self.avg_price:
+            return 0
+        buy_total = self.avg_price * self.qty
+        sell_total = self.current_price * self.qty
+        fees = buy_total * _FEE + sell_total * _FEE
+        tax = sell_total * _TAX
+        return int(sell_total - buy_total - fees - tax)
+
+    @property
+    def pnl_pct(self) -> float:
+        """평가손익률(%): 수수료·세금 차감 전 단순 계산."""
+        if not self.avg_price or self.avg_price <= 0:
+            return 0.0
+        cur = self.current_price if self.current_price > 0 else self.avg_price
+        return (cur - self.avg_price) / self.avg_price * 100
 
     @property
     def return_pct_vs_avg(self) -> float:
@@ -590,8 +602,14 @@ class OrderManager(QObject):
             return
 
         if code in self.positions:
-            logger.debug("중복 매수 방지 — %s 이미 보유 중", code)
-            return
+            # ✅ 피라미딩(추가 진입) 판정
+            if self._can_pyramid(code):
+                logger.info("🚀 [피라미딩] %s(%s) 추가 진입 조건 충족 (수익률 %.2f%%)", 
+                            name, code, self.positions[code].pnl_pct)
+                # 추가 진입 허용 (아래 로직 계속 진행)
+            else:
+                logger.debug("중복 매수 방지 — %s 이미 보유 중 (피라미딩 조건 미충족)", code)
+                return
 
         # [NEW] 당일 손절 블랙리스트 — 손절 종목 당일 재매수 차단 (익절은 허용)
         if code in self._stop_loss_today:
@@ -672,7 +690,15 @@ class OrderManager(QObject):
         self._pending_near_high[code] = (_near_high, _ctp)
         self._pending_eod[code] = bool(getattr(signal, "eod_trade", False))
         self._pending_entry_phase[code] = int(getattr(signal, "entry_phase", 0))
+        self._pending_entry_phase[code] = int(getattr(signal, "entry_phase", 0))
         self._pending_sector[code] = _sector
+
+        # ✅ 피라미딩인 경우 수량 조절 (기본 50%)
+        is_pyramid = code in self.positions
+        if is_pyramid:
+            pyramid_ratio = float(getattr(cfg.RISK, "pyramid_order_ratio", 0.5))
+            qty = max(1, int(qty * pyramid_ratio))
+            order_log.info("[피라미딩사이징] 수량 조절 (ratio %.1f): %d주", pyramid_ratio, qty)
 
         self.buy(code, name, qty, price=0)  # 시장가 매수
 
@@ -714,6 +740,33 @@ class OrderManager(QObject):
             self._force_sell_issued.discard(code)
             return False
         return True
+
+    def _can_pyramid(self, code: str) -> bool:
+        """
+        피라미딩(추가 진입) 가능 여부 확인.
+        조건: 수익률 > 1.5% AND 진입 횟수 < 2
+        """
+        pos = self.positions.get(code)
+        if not pos:
+            return False
+        
+        # 설정 로드 (기본값: 수익 1.5% 이상, 최대 2회 진입)
+        _RISK = cfg.RISK
+        min_profit = float(_RISK.get("pyramid_min_profit_pct", 1.5))
+        max_entries = int(_RISK.get("pyramid_max_entries", 2))
+        
+        profit_ok = pos.pnl_pct >= min_profit
+        count_ok = getattr(pos, "entry_count", 1) < max_entries
+        
+        if profit_ok and count_ok:
+            return True
+        
+        if not profit_ok and count_ok:
+            logger.debug("[피라미딩거절] %s 수익률(%.2f%%) < 기준(%.2f%%)", code, pos.pnl_pct, min_profit)
+        elif not count_ok:
+            logger.debug("[피라미딩거절] %s 진입횟수(%d) >= 최대(%d)", code, getattr(pos, "entry_count", 1), max_entries)
+            
+        return False
 
     def mark_stop_loss(self, code: str) -> None:
         """
@@ -1262,6 +1315,13 @@ class OrderManager(QObject):
 
             if code in self.positions:
                 pos = self.positions[code]
+                
+                # ✅ 신규 주문(피라미딩)의 첫 체결인 경우 진입 횟수 증가
+                if _prev_cum == 0:
+                    pos.entry_count = getattr(pos, "entry_count", 1) + 1
+                    logger.info("🚀 [피라미딩체결] %s(%s) 진입 횟수 증가 -> %d회", 
+                                name, code, pos.entry_count)
+
                 total_qty   = pos.qty + filled_qty
                 pos.avg_price = (pos.avg_price * pos.qty + filled_price * filled_qty) // total_qty
                 pos.qty      = total_qty

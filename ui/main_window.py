@@ -138,6 +138,7 @@ class MainWindow(QMainWindow):
         self._log_timer = QTimer(self)
         self._log_timer.timeout.connect(self._flush_logs)
         self._log_timer.start(500)  # 0.5초마다 일괄 업데이트
+        self._today_watch: dict[str, Any] = {} # 감시 종목 추적
 
         # [상태 관리] 중앙 컨텍스트 초기화
         self.ctx = AppContext()
@@ -806,11 +807,13 @@ class MainWindow(QMainWindow):
         import os
         from PyQt5.QtWidgets import QMessageBox
         msg = (
-            "실전/모의 서버를 전환하시겠습니까?\n\n"
-            "1. [예] 클릭 시 프로그램이 재시작됩니다.\n"
-            "2. 나타나는 키움 로그인 창에서 '모의투자' 항목을 다음과 같이 설정해 주세요.\n"
-            "   - 실전 서버 접속 시: '모의투자' 체크 해제 (빈칸)\n"
-            "   - 모의 서버 접속 시: '모의투자' 체크 선택 (V 표시)\n\n"
+            "🚨 [서버 모드 전환] 안내\n\n"
+            "실전/모의 서버를 전환하시겠습니까?\n"
+            "전환 시 프로그램이 재시작되며 키움 로그인 창이 나타납니다.\n\n"
+            "⚠️ 중요 (로그인 창 설정):\n"
+            "- 실전 전환 시: '모의투자' 체크박스 해제(V 표시 없앰)\n"
+            "- 모의 전환 시: '모의투자' 체크박스 선택(V 표시 활성)\n\n"
+            "※ 자동 로그인이 설정되어 있다면 키움 트레이 아이콘 메뉴에서 '계좌비밀번호 저장' 설정을 먼저 해제해 주세요.\n\n"
             "계속하시겠습니까?"
         )
         reply = QMessageBox.question(
@@ -819,16 +822,22 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.Yes:
             # 다음 부팅 시 어떤 모드로 들어갈지 임시 저장 (1: 실전, 0: 모의)
-            target_mode = "1" if not self.ctx.server_mode == "실전투자" else "0"
+            current_is_real = (getattr(self.ctx, "server_mode", "") == "실전투자")
+            target_mode = "0" if current_is_real else "1"
+            
             with open("force_mode.tmp", "w") as f:
                 f.write(target_mode)
 
-            cache_file = "params/last_account.txt"
+            # 계좌 캐시 파일 삭제 (절대 경로로 확실히 처리)
+            _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cache_file = os.path.join(_ROOT, "params", "last_account.txt")
             if os.path.exists(cache_file):
                 try:
                     os.remove(cache_file)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("[Switch] 캐시 삭제 실패: %s", e)
+            
+            # 재시작 호출
             self.header._on_restart_clicked()
 
 

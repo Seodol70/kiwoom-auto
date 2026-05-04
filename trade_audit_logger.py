@@ -177,35 +177,10 @@ class TradeAuditLogger:
     def log_signal(self, sig, snap, cfg=None) -> None:
         """
         신호 발생 시 호출. 인메모리 행을 생성하고 지표값을 스냅샷한다.
-
-        Args:
-            sig:  ScanSignal(code, name, signal_type, price, reason)
-            snap: StockSnapshot
-            cfg:  SmartScannerConfig (Optional)
         """
         try:
-            from strategy.jang_dong_min import calc_ma, calc_rsi, calc_ema
-
-            closes          = list(getattr(snap, "closes_1min", None) or [])
-            ma_s_period     = getattr(cfg, "jdm_ma_short",   7) if cfg else 7
-            ma_l_period     = getattr(cfg, "jdm_ma_long",   15) if cfg else 15
-            ema_s_period    = getattr(cfg, "ema_disp_short", 10) if cfg else 10
-            ema_l_period    = getattr(cfg, "ema_disp_long",  20) if cfg else 20
-
-            rsi   = calc_rsi(closes, 14)
-            ma_s  = calc_ma(closes,  ma_s_period)
-            ma_l  = calc_ma(closes,  ma_l_period)
-            ema_s = calc_ema(closes, ema_s_period)
-            ema_l = calc_ema(closes, ema_l_period)
-
-            # 거래량 급증 배수 (직전 lookback분 평균 대비)
-            vol_ratio: Optional[float] = None
-            vols     = list(getattr(snap, "volumes_1min", None) or [])
-            lookback = getattr(cfg, "volume_surge_lookback", 10) if cfg else 10
-            if len(vols) >= lookback + 1:
-                avg = sum(vols[-(lookback + 1):-1]) / lookback
-                if avg > 0:
-                    vol_ratio = round(vols[-1] / avg, 2)
+            from analysis.feature_engineer import extract_ml_features
+            features = extract_ml_features(sig, snap, cfg)
 
             now = datetime.now()
             key = f"{sig.code}_{now.strftime('%H%M%S')}"
@@ -217,22 +192,12 @@ class TradeAuditLogger:
                 "name":                     sig.name,
                 "signal_type":              getattr(sig, "signal_type", ""),
                 "signal_time":              now.strftime("%H:%M:%S"),
-                "signal_price":             getattr(sig, "price", ""),
                 "signal_reason":            getattr(sig, "reason", ""),
-                "rsi_at_signal":            f"{rsi:.2f}"  if rsi   is not None else "",
-                "ma_short_at_signal":       f"{ma_s:.0f}" if ma_s  is not None else "",
-                "ma_long_at_signal":        f"{ma_l:.0f}" if ma_l  is not None else "",
-                "ema_short_at_signal":      f"{ema_s:.0f}" if ema_s is not None else "",
-                "ema_long_at_signal":       f"{ema_l:.0f}" if ema_l is not None else "",
-                "chejan_strength_at_signal":f"{getattr(snap, 'chejan_strength', 0):.1f}",
-                "volume_ratio_at_signal":   f"{vol_ratio:.2f}" if vol_ratio is not None else "",
-                "change_pct_at_signal":     f"{getattr(snap, 'change_pct', 0):.2f}",
                 "trade_amount_at_signal":   getattr(snap, "trade_amount", ""),
-                "kospi_chg_at_signal":      f"{getattr(cfg, 'kospi_chg_pct',  0):.2f}" if cfg else "",
-                "kosdaq_chg_at_signal":     f"{getattr(cfg, 'kosdaq_chg_pct', 0):.2f}" if cfg else "",
-                "investor_score_at_signal": str(getattr(snap, "investor_score", 0)),
                 "final_status":             "SIGNAL_ONLY",
             })
+            # feature_engineer에서 추출된 특성들 업데이트
+            row.update(features)
 
             with self._lock:
                 self._pending_rows[key] = row

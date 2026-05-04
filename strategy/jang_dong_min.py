@@ -174,6 +174,14 @@ class JangDongMinStrategy(BaseStrategy):
         if self._should_trend_decay(pos):
             return True, "추세소멸"
 
+        # 8. 클라이맥스 탑 (단기 과열 익절)
+        if self._should_climax_exit(pos):
+            return True, "Climax Top (과열)"
+
+        # 9. 거래량 실린 하락 (Distribution 차단)
+        if self._should_distribution_exit(pos):
+            return True, "Distribution (세력이탈)"
+
         return False, "HOLD"
 
     def should_partial_exit(self, pos: Any, ctx: ExitContext) -> tuple[bool, float]:
@@ -266,6 +274,50 @@ class JangDongMinStrategy(BaseStrategy):
         from scanner.indicator_service import IndicatorService
         ema20 = IndicatorService.calc_ema(snap.closes_1min, 20)
         return bool(ema20 and pos.current_price > ema20)
+
+    def _should_climax_exit(self, pos: Any) -> bool:
+        """단기 급등 후 거래량 폭발 시 익절"""
+        if float(pos.price_change_pct_vs_avg) < 10.0:  # 최소 10% 이상 수익 시에만 고려
+            return False
+            
+        snap = self._snap_store.get_snapshot(pos.code) if self._snap_store else None
+        if not snap or not snap.volumes_1min:
+            return False
+            
+        # 최근 20분 평균 거래량 대비 4배 이상 폭발
+        vols = list(snap.volumes_1min)
+        if len(vols) < 21:
+            return False
+            
+        avg_vol = np.mean(vols[-21:-1])
+        cur_vol = vols[-1]
+        
+        # 주가 급등(당일 20% 이상 or 진입 후 15% 이상) + 거래량 4배
+        is_surge = snap.change_pct >= 20.0 or float(pos.price_change_pct_vs_avg) >= 15.0
+        is_vol_climax = cur_vol >= avg_vol * 4.0
+        
+        return is_surge and is_vol_climax
+
+    def _should_distribution_exit(self, pos: Any) -> bool:
+        """거래량 실린 음봉/하락 시 탈출 (손절가 도달 전이라도)"""
+        snap = self._snap_store.get_snapshot(pos.code) if self._snap_store else None
+        if not snap or not snap.volumes_1min or len(snap.volumes_1min) < 2:
+            return False
+            
+        # 현재가가 직전가 대비 하락 (음봉 기조)
+        price_drop = pos.current_price < snap.closes_1min[-1]
+        
+        # 거래량 평소보다 2.5배 이상 (세력 이탈 의심)
+        avg_vol = np.mean(snap.volumes_1min[-21:-1]) if len(snap.volumes_1min) >= 21 else snap.volumes_1min[0]
+        cur_vol = snap.volumes_1min[-1]
+        is_high_vol = cur_vol >= avg_vol * 2.5
+        
+        # 수익권이 아닐 때 거래량 실린 하락은 위험 신호
+        # 수익권일 때는 트레일 스탑이 있으므로 조금 더 여유를 줌
+        if float(pos.price_change_pct_vs_avg) < 0 and price_drop and is_high_vol:
+            return True
+            
+        return False
 
 # ---------------------------------------------------------------------------
 # 기술적 지표 계산 (유틸리티)

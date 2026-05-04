@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""
+Premium Dark QSS Stylesheet
+"""
+
+_DARK_QSS = """
 /* ─── 전역 스타일 (Premium Dark) ─────────────────────────── */
 * {
     font-family: 'Malgun Gothic', 'Outfit', 'Inter', sans-serif;
@@ -93,47 +99,117 @@ QPushButton#btn_restart {
     border: none;
 }
 QPushButton#btn_exit {
-    background: #f38ba8;
-    color: #11111b;
+    background: #f38ba8; /* Red */
+    color: #ffffff;      /* 밝은 색으로 변경 */
+    font-weight: bold;
     border: none;
 }
 
-/* ─── 테이블 (Sleek List) ───────────────────────────────── */
+/* ─── 입력 필드 및 드롭다운 ────────────────────────────── */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    background: #1e1e2e;
+    border: 1px solid #313244;
+    border-radius: 4px;
+    padding: 4px;
+    color: #cdd6f4;
+}
+QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {
+    border-color: #cba6f7;
+}
+
+/* 익절/손절 레이블 강조 */
+QLabel#lbl_tp { color: #a6e3a1; font-weight: bold; } /* 초록색 익절 */
+QLabel#lbl_sl { color: #f38ba8; font-weight: bold; } /* 빨간색 손절 */
+
+/* ─── 테이블 (QTableWidget) ────────────────────────────── */
 QTableWidget {
-    background: #0d0d14;
+    background: #11111b;
+    alternate-background-color: #181825; /* 홀수 행 배경색 */
     border: none;
-    gridline-color: #181825;
-    selection-background-color: #313244;
+    gridline-color: #313244;
+    border-radius: 8px;
 }
 QHeaderView::section {
-    background: #11111b;
+    background: #181825;
     color: #9399b2;
+    padding: 8px;
     border: none;
-    border-bottom: 2px solid #1e1e2e;
-    padding: 6px;
-    font-weight: 700;
-    text-transform: uppercase;
-    font-size: 8pt;
+    font-weight: bold;
+    border-bottom: 1px solid #313244;
+}
+QTableWidget::item {
+    padding: 5px;
+    border-bottom: 1px solid #1e1e2e;
+}
+QTableWidget::item:selected {
+    background: #313244;
+    color: #f5e0dc;
 }
 
-/* ─── 로그 (Console style) ──────────────────────────────── */
-QTextEdit#log_area {
-    background: #09090f;
-    font-family: 'Consolas', 'Courier New', monospace;
-    font-size: 9pt;
-    line-height: 140%;
+/* 테이블 내부 매수/매도 버튼 */
+QTableWidget QPushButton {
+    background: #313244;
+    border: 1px solid #45475a;
+    border-radius: 3px;
+    padding: 2px;
+    font-size: 8pt;
+    min-width: 40px;
+}
+QTableWidget QPushButton:hover {
+    background: #45475a;
+}
+
+/* 특정 버튼 강조 */
+QPushButton#btn_manual_buy {
+    background: #fab387; /* Peach */
+    color: #11111b;
+}
+QPushButton#btn_manual_sell {
+    background: #f38ba8; /* Red */
+    color: #11111b;
 }
 
 /* ─── 스크롤바 ────────────────────────────────────────── */
 QScrollBar:vertical {
-    background: transparent;
-    width: 6px;
+    border: none;
+    background: #11111b;
+    width: 10px;
+    margin: 0px;
 }
 QScrollBar::handle:vertical {
     background: #313244;
-    border-radius: 3px;
+    min-height: 20px;
+    border-radius: 5px;
 }
-QScrollBar::handle:vertical:hover {
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+/* ─── 로그 패널 (QTextEdit) ────────────────────────────── */
+QTextEdit#log_output {
+    background: #0b0b12;
+    border: 1px solid #1e1e2e;
+    border-radius: 8px;
+    padding: 10px;
+    line-height: 1.5;
+}
+
+/* ─── 메시지 박스 (QMessageBox) ────────────────────────── */
+QMessageBox {
+    background-color: #1e1e2e;
+}
+QMessageBox QLabel {
+    color: #cdd6f4;
+    font-size: 10pt;
+}
+QMessageBox QPushButton {
+    background: #313244;
+    border: 1px solid #45475a;
+    border-radius: 4px;
+    padding: 5px 15px;
+    color: #cdd6f4;
+}
+QMessageBox QPushButton:hover {
     background: #45475a;
 }
 """

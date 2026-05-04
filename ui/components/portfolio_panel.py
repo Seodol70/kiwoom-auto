@@ -70,7 +70,7 @@ class PortfolioPanel(QWidget):
 
 
         lbl_tp = QLabel("익절")
-        lbl_tp.setObjectName("risk_label")
+        lbl_tp.setObjectName("lbl_tp")
         info_lay.addWidget(lbl_tp)
         self._spin_tp = _NoWheelDoubleSpinBox()
         self._spin_tp.setObjectName("spin_tp")
@@ -88,7 +88,7 @@ class PortfolioPanel(QWidget):
 
 
         lbl_sl = QLabel("손절")
-        lbl_sl.setObjectName("risk_label")
+        lbl_sl.setObjectName("lbl_sl")
         info_lay.addWidget(lbl_sl)
         self._spin_sl = _NoWheelDoubleSpinBox()
         self._spin_sl.setObjectName("spin_sl")

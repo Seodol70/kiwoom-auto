@@ -87,12 +87,13 @@ class ScannerWorker(QObject):
             if top_df.empty:
                 if not _empty_logged:
                     self.log_message.emit(
-                        "[ScannerWorker] SnapshotStore 비어있음 — opt10030 스캔 대기 중"
+                        "[ScannerWorker] SnapshotStore 비어있음 — 데이터 수집 대기 중"
                     )
                     _log.debug("[ScannerWorker] SnapshotStore 비어있음")
                     _empty_logged = True
-                elapsed = time.monotonic() - t0
-                time.sleep(max(0.0, self._cfg.scan_interval - elapsed))
+                
+                # 초기 실행 시 데이터가 없으면 1초만 대기하고 다시 확인 (기존에는 scan_interval 만큼 대기함)
+                time.sleep(1.0)
                 continue
 
 

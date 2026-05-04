@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 from strategy.base import ExitContext
+from strategy.jang_dong_min import JangDongMinStrategy
 
 
 
@@ -86,10 +87,13 @@ class TradingController(QObject):
         self._kospi_chg_pct = 0.0
         self._kosdaq_chg_pct = 0.0
 
-        from strategy.jang_dong_min import JangDongMinStrategy
         self._strategy = JangDongMinStrategy(
             self._order_mgr, self._risk_mgr, self._scan_cfg, self._snap_store
         )
+        
+        # [AI] 신호 필터 초기화
+        from app.ai_filter import AIFilter
+        self._ai_filter = AIFilter()
 
         # 리스크 매니저 신호 연결
         if self._risk_mgr:
@@ -103,6 +107,16 @@ class TradingController(QObject):
     def set_auto_trading(self, enabled: bool) -> None:
         self._auto_trading = enabled
         logger.info("[TradingController] 자동매매 %s", "ON" if enabled else "OFF")
+
+    def set_risk_params(self, tp: float = None, sl: float = None) -> None:
+        """UI(SpinBox)에서 변경된 익절/손절 기준을 실시간 반영"""
+        if tp is not None:
+            # ConfigManager(self._scan_cfg)의 런타임 값 업데이트
+            self._scan_cfg.set_runtime("take_profit_pct", tp)
+            logger.info("[TradingController] 익절 기준 실시간 변경: %.2f%%", tp)
+        if sl is not None:
+            self._scan_cfg.set_runtime("stop_loss_pct", sl)
+            logger.info("[TradingController] 손절 기준 실시간 변경: %.2f%%", sl)
 
     # ─── 신호 필터링 ──────────────────────────────────────────────────
 
@@ -133,6 +147,40 @@ class TradingController(QObject):
             self.signal_rejected.emit(f"{sig.code}: {reason}")
             self._record_signal(sig)
             return False
+
+        # ✅ AI 필터 검증 (필터 체인 마지막 단계)
+        snap = self._snap_store.get_snapshot(sig.code)
+        if snap:
+            from analysis.feature_engineer import extract_ml_features
+            features = extract_ml_features(sig, snap, self._scan_cfg)
+            
+            # AI 판정 실행 (설정된 임계값 사용)
+            ai_thr = float(getattr(self._scan_cfg, "ai_threshold", 0.5))
+            ai_passed, win_rate = self._ai_filter.should_enter(features, threshold=ai_thr)
+            
+            msg = f"🤖 [AI분석] {sig.name}({sig.code}) 예상승률 {win_rate*100:.1f}%"
+            if not ai_passed:
+                self.log_message.emit(f"{msg} → 진입 부적합 (거절, 기준 {ai_thr*100:.0f}%)")
+                self.signal_rejected.emit(f"{sig.code}: AI 거절 ({win_rate*100:.0f}%)")
+                return False
+            
+            # 승인 시 로그 (모델이 준비된 경우만)
+            if self._ai_filter.is_ready:
+                self.log_message.emit(f"{msg} → 진입 승인 (기준 {ai_thr*100:.0f}%)")
+
+        # ✅ RS 필터 검증 (지수 대비 강도)
+        if snap:
+            rs_score = features.get("rs_score", 0)
+            rs_thr = float(getattr(self._scan_cfg, "rs_threshold", 0.0))
+            if rs_score < rs_thr:
+                self.log_message.emit(f"📉 [RS필터] {sig.name} RS={rs_score:.2f} (기준 {rs_thr:.2f}) → 거절")
+                self.signal_rejected.emit(f"{sig.code}: RS 필터 거절 ({rs_score:.2f})")
+                return False
+            else:
+                if getattr(self._scan_cfg, "exploration_mode", False):
+                    self.log_message.emit(f"📈 [RS필터] {sig.name} RS={rs_score:.2f} (기준 {rs_thr:.2f}) → 데이터 수집 통과")
+                else:
+                    self.log_message.emit(f"📈 [RS필터] {sig.name} RS={rs_score:.2f} (지수 대비 강세) → 통과")
 
         # ✅ 모든 필터 통과 → 진입 신호 전송
         self._order_mgr.handle_signal(sig)
@@ -410,6 +458,12 @@ class TradingController(QObject):
 
         self._kospi_chg_pct = kp['change_pct']
         self._kosdaq_chg_pct = kd['change_pct']
+        
+        # [NEW] RS 필터 및 지표 계산을 위해 Config에 지수 정보 동기화
+        if self._scan_cfg:
+            self._scan_cfg.kospi_chg_pct = self._kospi_chg_pct
+            self._scan_cfg.kosdaq_chg_pct = self._kosdaq_chg_pct
+
         logger.info("[지수업데이트] KOSPI: %.2f(%.2f%%) / KOSDAQ: %.2f(%.2f%%)", 
                     kp['current'], kp['change_pct'], kd['current'], kd['change_pct'])
 

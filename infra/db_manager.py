@@ -64,6 +64,7 @@ class DatabaseManager:
                         kospi_chg_at_signal REAL,
                         kosdaq_chg_at_signal REAL,
                         investor_score_at_signal INTEGER,
+                        rs_score REAL,
                         buy_order_time TEXT,
                         buy_order_price INTEGER,
                         buy_order_qty INTEGER,

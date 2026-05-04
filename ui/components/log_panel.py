@@ -231,7 +231,7 @@ class LogPanel(QWidget):
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setFont(QFont("Consolas", 9))
-        self._log.setObjectName("log_area")
+        self._log.setObjectName("log_output")
         # Qt 내장 블록 수 제한 — 초과 시 가장 오래된 블록을 O(1)로 자동 제거
         # (수동 cursor 루프 불필요 — 메인 스레드 블로킹 없음)
         self._log.document().setMaximumBlockCount(self._MAX_BLOCKS)
@@ -242,7 +242,7 @@ class LogPanel(QWidget):
         self._sys_log = QTextEdit()
         self._sys_log.setReadOnly(True)
         self._sys_log.setFont(QFont("Consolas", 9))
-        self._sys_log.setObjectName("log_area")
+        self._sys_log.setObjectName("log_output")
         self._sys_log.document().setMaximumBlockCount(self._MAX_BLOCKS)
         splitter.addWidget(self._sys_log)
 

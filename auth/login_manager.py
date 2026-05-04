@@ -178,36 +178,34 @@ class LoginManager(QObject):
 
     def show_and_login(self) -> bool:
         """
-        저장된 캐시가 있으면 다이얼로그 없이 바로 접속하고,
-        없으면 서버 선택 다이얼로그를 표시한 뒤 CommConnect를 호출한다.
-
-        Returns:
-            True -> 로그인 성공
+        1. [NEW] 실전/모의 전환 버튼을 통한 재시작인 경우 최우선 처리
+        2. 저장된 캐시가 있으면 다이얼로그 없이 바로 접속
+        3. 캐시가 없으면 서버 선택 다이얼로그 표시
         """
+        import os
+        
+        # [우선순위 1] 서버 전환 요청 확인
+        if os.path.exists("force_mode.tmp"):
+            logger.info("🚀 모드 전환 요청 감지 - 캐시를 무시하고 직접 접속 시도")
+            return self._connect()
+
+        # [우선순위 2] 기존 계좌 캐시 확인
         cache = self._load_last_account()
         if cache and "account" in cache:
             self.account = cache["account"]
             self.use_real = cache.get("use_real", False)
-            # 서버 접속 후 실제 모드를 다시 확인하겠지만, 캐시 시점의 정보를 우선 표시
             self.server_mode = "실전투자" if self.use_real else "모의투자"
-            logger.info("캐시된 설정으로 다이얼로그 생략 접속: %s 모드", self.server_mode)
+            logger.info("캐시된 설정으로 자동 접속: %s 모드", self.server_mode)
             
-            # 접속 성공 시 바로 True 반환
             if self._connect(preferred_account=self.account):
                 return True
             
-            # 자동 접속 실패(기간 만료, 비번 오류 등) 시 캐시 삭제 후 선택창으로 폴백
-            import os
+            # 실패 시 캐시 삭제 후 폴백
             if os.path.exists(self._account_cache_file):
                 os.remove(self._account_cache_file)
-            logger.warning("캐시로 자동 접속 실패! 서버 선택 창으로 넘어갑니다.")
+            logger.warning("캐시 자동 접속 실패! 서버 선택 창으로 넘어갑니다.")
 
-        # [NEW] 실전/모의 전환 버튼을 통한 재시작인 경우 다이얼로그 생략
-        import os
-        if os.path.exists("force_mode.tmp"):
-            logger.info("모드 전환 요청 감지 - 다이얼로그 생략")
-            return self._connect()
-
+        # [우선순위 3] 사용자 선택 다이얼로그
         dlg = LoginDialog()
         if dlg.exec() != QDialog.Accepted:
             logger.info("로그인 취소")
