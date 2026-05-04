@@ -3,6 +3,7 @@
 import sys
 from datetime import datetime, time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 # 테스트 코드는 프로젝트 루트에서 실행되므로 경로 설정
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -98,6 +99,9 @@ def test_trading_controller_init():
 
     # Mock RiskManager
     class MockRiskManager:
+        daily_loss_cut    = MagicMock()
+        daily_profit_locked = MagicMock()
+
         @property
         def is_new_entry_locked(self):
             return False

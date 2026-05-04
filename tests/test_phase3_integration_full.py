@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from datetime import datetime, time
 from dataclasses import dataclass
+from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -20,6 +21,8 @@ from app.trading_controller import TradingController
 
 
 class MockOrderManager:
+    order_filled = MagicMock()   # pyqtSignal stub (RiskManager.__init__ 연결용)
+
     def __init__(self):
         self.positions = {}
         self.available_cash = 1000000

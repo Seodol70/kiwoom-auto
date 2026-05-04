@@ -33,7 +33,7 @@ import threading
 import logging
 import logging.handlers
 from datetime import datetime
-from typing import Optional
+from typing import Any
 
 
 logger = logging.getLogger(__name__)
@@ -291,7 +291,6 @@ class MainWindow(QMainWindow):
             login_mgr=self.login_mgr,
             smart_scanner=self._smart_scanner,
             parent=self,
-        )
         )
         # self._watchdog 시그널은 SignalManager에서 일괄 연결됨
         self._watchdog.start()
@@ -1067,18 +1066,9 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(dict)
     def _on_portfolio_refresh(self, data: dict) -> None:
-        """watch_today를 주입하고, 헤더(당일 실현손익)/보유현황을 함께 갱신한다."""
         self.header.set_pnl(self.order_mgr.daily_realized_pnl)
-        # 보유 여유분(max_positions - 현재 보유수)만큼만 감시중 표시
-        positions = data.get("positions", {})
-        slack = max(0, self.order_mgr.max_positions - len(positions))
-        # 보유 종목은 포함, 미보유 감시는 slack개로 제한 (최근 신호 우선)
-        watch: dict = {}
-        non_pos = {c: v for c, v in self._today_watch.items() if c not in positions}
-        recent_non_pos = dict(list(non_pos.items())[-slack:]) if slack else {}
-        watch.update({c: v for c, v in self._today_watch.items() if c in positions})
-        watch.update(recent_non_pos)
-        data["watch_today"] = watch
+        data["watch_today"] = self._today_watch
+        data["max_positions"] = self.order_mgr.max_positions
         self.portfolio_panel.refresh(data)
 
 

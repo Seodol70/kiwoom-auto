@@ -140,9 +140,16 @@ class PortfolioPanel(QWidget):
 
     @pyqtSlot(dict)
     def refresh(self, data: dict) -> None:
-        cash        = data.get("cash", 0)
-        positions   = data.get("positions", {})       # dict[code, Position]
-        watch_today = data.get("watch_today", {})     # dict[code, {name, price, signal_type}]
+        cash          = data.get("cash", 0)
+        positions     = data.get("positions", {})       # dict[code, Position]
+        max_positions = data.get("max_positions", len(positions))
+
+        # 보유 여유분만큼만 감시중(미보유) 표시 — 최근 신호 우선, 보유 종목은 항상 포함
+        all_watch   = data.get("watch_today", {})
+        slack       = max(0, max_positions - len(positions))
+        non_pos     = {c: v for c, v in all_watch.items() if c not in positions}
+        watch_today = {c: v for c, v in all_watch.items() if c in positions}
+        watch_today.update(dict(list(non_pos.items())[-slack:]) if slack else {})
 
 
         self._lbl_cash.setText(f"  예수금: {cash:,} 원")

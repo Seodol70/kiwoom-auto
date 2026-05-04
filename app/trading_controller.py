@@ -161,7 +161,7 @@ class TradingController(QObject):
             return False
 
         # ✅ AI 필터 검증 (필터 체인 마지막 단계)
-        snap = self._snap_store.get_snapshot(sig.code)
+        snap = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
         if snap:
             from analysis.feature_engineer import extract_ml_features
             features = extract_ml_features(sig, snap, self._scan_cfg)
