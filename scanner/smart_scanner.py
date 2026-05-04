@@ -948,7 +948,14 @@ class SmartScanner(QObject):
             logger.info("[주기 스캔] WATCH 모드 — opt10030 스캔 스킵 (SetRealReg 감시 중)")
             self._log_store_health()
             return False
-        
+
+        # 장 시작 전(08:30 이전)에는 opt10030이 데이터를 제공하지 않음 — 스킵
+        now_t = datetime.now().time()
+        from datetime import time as _time
+        if now_t < _time(8, 30):
+            logger.debug("[주기 스캔] 장 전 (%s) — opt10030 스킵", now_t.strftime("%H:%M"))
+            return False
+
         if hasattr(self._kiwoom, 'is_connected') and not self._kiwoom.is_connected():
             logger.warning("[주기 스캔] 연결 끊김 — 스킵")
             return False

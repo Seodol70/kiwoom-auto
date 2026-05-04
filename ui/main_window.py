@@ -138,7 +138,7 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
 
     def _setup_news_analyzer(self) -> None:
         """뉴스 분석기 초기화"""
-        from analysis.news_analyzer import NewsAnalyzer
+        from scanner.news_analyzer import NewsAnalyzer
         self._news_analyzer = NewsAnalyzer()
 
     def start_after_login(self) -> None:
