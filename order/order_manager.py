@@ -1533,7 +1533,6 @@ class OrderManager(QObject):
                 filled_qty,
                 f"{filled_price:,}",
             )
-        self.order_filled.emit(payload)
 
     def cleanup_stale_data(self, active_codes: set[str]) -> int:
         """오래된 내부 상태(신호 시각, 주문 기록 등)를 정리하여 메모리 누수를 방지한다."""

@@ -249,8 +249,8 @@ class MainWindowSlots:
         """수동 매도 요청"""
         pos = self.order_mgr.positions.get(code)
         if pos:
-            self.trading_controller.force_exit(code, "사용자 수동매도")
-            self.append_log(f"📤 [수동매도] {pos.name}({code}) 시장가 청산 주문 전송")
+            ok, msg = self.trading_controller.manual_sell(code, pos.name, pos.qty)
+            self.append_log(f"📤 [수동매도] {msg}")
 
     @pyqtSlot(str)
     def _on_code_selected(self, code: str) -> None:
