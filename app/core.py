@@ -96,6 +96,9 @@ class ApplicationContext(QObject):
         # ── SmartScanner ↔ OrderManager 연결 (의존성 주입) ──
         self.smart_scanner._order_mgr = self.order_mgr
 
+        # ── TradingController 상태 주입 (AppState) ──
+        self.trading_controller._ctx = self.state
+
         # ── 텔레그램 ──
         self.tg_bot = None
         if cfg.get("TELEGRAM", {}).get("enabled") and cfg.get("TELEGRAM", {}).get("token"):

@@ -79,9 +79,8 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self.market_scheduler = self.app_context.market_scheduler
         self.risk_manager = self.app_context.risk_manager
         self.trading_controller = self.app_context.trading_controller
-        
-        # 상태 주입 (이미 AppContext에서 일부 수행했으나 명시적 동기화)
-        self.trading_controller._ctx = self.state
+
+        # 상태 동기화 (AppContext에서 이미 _ctx 주입됨)
         self.order_mgr.set_state(self.state)
         self.order_mgr.set_health_monitor(self._health_monitor)
         self._tg = getattr(self.app_context, "tg_bot", None)
