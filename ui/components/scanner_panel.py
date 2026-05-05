@@ -87,13 +87,6 @@ class ScannerPanel(QWidget):
         if self._table.rowCount() != len(rows):
             self._table.setRowCount(len(rows))
 
-        # [DEBUG] 첫 5개 종목명 로깅
-        for i, row in enumerate(rows[:5]):
-            code = row.get("code", "?")
-            name = row.get("name", "?")
-            logging.warning("[스캐너] 종목 #%d: code=%s, name=%s (type=%s, repr=%r)",
-                          i, code, name, type(name).__name__, name)
-
         now = time.time()
         for r, row in enumerate(rows):
             code = row["code"]

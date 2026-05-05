@@ -84,13 +84,6 @@ class ScannerWorker(QObject):
 
             top_df = self._store.top_by_trade_amount(self._cfg.display_top_n)
 
-            # [DEBUG] top_df의 첫 몇 개 종목명 로깅
-            if not top_df.empty and "name" in top_df.columns:
-                for i, (code, row) in enumerate(top_df.head(5).iterrows()):
-                    name = row.get("name", "?")
-                    _log.warning("[ScannerWorker] top_df #%d: code=%s, name=%s (type=%s, repr=%r)",
-                               i, code, name, type(name).__name__, name)
-
             if top_df.empty:
                 if not _empty_logged:
                     self.log_message.emit(
@@ -233,13 +226,6 @@ class ScannerWorker(QObject):
             has_new_signal = signal_cnt > 0
             time_ok = (now_ui - self._last_ui_emit) >= self._UI_INTERVAL
             if rows and (has_new_signal or time_ok):
-                # [DEBUG] 첫 5개 종목 상세 로깅
-                for i, r in enumerate(rows[:5]):
-                    name = r.get("name", "?")
-                    _log.warning("[ScannerWorker] 종목 #%d: code=%s, name=%s (bytes=%r, type=%s)",
-                               i, r.get("code"), name, name.encode('utf-8') if isinstance(name, str) else name,
-                               type(name).__name__)
-
                 self.watch_list_updated.emit(rows)
                 self._last_ui_emit = now_ui
                 _log.debug("[ScannerWorker] watch_list_updated %d종목 (신호 %d개)", len(rows), signal_cnt)
