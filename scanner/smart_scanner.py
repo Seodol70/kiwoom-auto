@@ -978,11 +978,25 @@ class SmartScanner(QObject):
                 for code in all_codes:
                     pv = self.universe_mgr._prev_volumes.get(code, 0)
                     if pv > 0:
+                        # GetMasterCodeName의 CP949 인코딩 보정
+                        raw_name = self._kiwoom._ocx.dynamicCall("GetMasterCodeName(QString)", [code])
+                        try:
+                            # str로 온 것이 CP949 인코딩인 경우 변환 시도
+                            if raw_name and any(ord(c) > 127 for c in raw_name):
+                                # 이미 유니코드라면 그대로 사용
+                                name = raw_name
+                            else:
+                                # CP949로 인코딩된 것을 UTF-8로 변환
+                                name = raw_name.encode('latin-1').decode('cp949') if raw_name else ""
+                        except Exception:
+                            # 변환 실패 시 원본 사용
+                            name = raw_name or ""
+
                         fallback_rows.append({
                             "code": code,
-                            "name": self._kiwoom._ocx.dynamicCall("GetMasterCodeName(QString)", [code]),
+                            "name": name.strip(),
                             "current_price": 0,
-                            "trade_amount": pv * 1000, # 대략적인 거래대금 추정 (거래량 기반)
+                            "trade_amount": pv * 1000,
                             "volume": pv,
                             "change_pct": 0.0,
                             "prev_close": 0

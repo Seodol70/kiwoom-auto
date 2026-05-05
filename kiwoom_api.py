@@ -804,7 +804,16 @@ class KiwoomManager(KiwoomProtocol):
         return [c for c in raw.strip().split(";") if c]
 
     def get_stock_name(self, code: str) -> str:
-        return self._ocx.dynamicCall("GetMasterCodeName(QString)", code).strip()
+        """종목명 조회 (CP949 인코딩 보정)"""
+        raw_name = self._ocx.dynamicCall("GetMasterCodeName(QString)", code).strip()
+        try:
+            # CP949 인코딩 보정 (키움API 특성)
+            if raw_name and any(ord(c) > 127 for c in raw_name):
+                return raw_name  # 이미 유니코드
+            else:
+                return raw_name.encode('latin-1').decode('cp949') if raw_name else ""
+        except Exception:
+            return raw_name
 
     # -----------------------------------------------------------------------
     # TR 공통 헬퍼

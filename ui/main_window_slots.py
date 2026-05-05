@@ -267,7 +267,7 @@ class MainWindowSlots:
         volumes = [c['volume'] for c in candles]
         
         # 2. 종목명 및 포지션 정보
-        name = self._kiwoom._ocx.dynamicCall("GetMasterCodeName(QString)", [code])
+        name = self._kiwoom.get_stock_name(code)  # CP949 인코딩 보정 적용
         position = self.order_mgr.positions.get(code)
         
         # 3. 전략 파라미터 (트레일가, 손절%)
