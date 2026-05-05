@@ -45,6 +45,7 @@ class RiskManager(QObject):
         # [NEW] 연속 손실 및 냉각기 상태
         self._consecutive_losses = 0
         self._cooling_off_until = None
+        self._manual_unlock_active = False
 
         # 상태 복원 확인 로그
         if self._state:

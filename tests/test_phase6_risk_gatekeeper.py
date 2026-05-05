@@ -12,17 +12,13 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-def _make_fresh_session_mgr():
-    """Fresh session state를 반환하는 mock session manager 생성"""
-    session_mgr = MagicMock()
-    session_mgr.load.return_value = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "daily_realized_pnl": 0.0,
-        "is_loss_cut_locked": False,
-        "is_profit_locked": False,
-        "timestamp": datetime.now().isoformat(),
-    }
-    return session_mgr
+def _make_fresh_app_state_mock():
+    """Fresh AppState mock 생성"""
+    app_state = MagicMock()
+    app_state.profit_locked = False
+    app_state.loss_cut_locked = False
+    app_state.daily_realized_pnl = 0.0
+    return app_state
 
 def test_risk_lock_integration(qapp):
     # 1. Setup Mock Objects
@@ -43,7 +39,7 @@ def test_risk_lock_integration(qapp):
     win._scan_cfg = scan_cfg
     
     # 2. Setup RiskManager
-    rm = RiskManager(order_mgr=order_mgr, scan_cfg=scan_cfg, session_mgr=_make_fresh_session_mgr())
+    rm = RiskManager(order_mgr=order_mgr, scan_cfg=scan_cfg, app_state=state)
     win.risk_manager = rm
     
     # Mock TradingController
@@ -54,16 +50,16 @@ def test_risk_lock_integration(qapp):
     sig_mgr = SignalManager(win)
     sig_mgr.bind_all()
     
-    # Verify risk_locked is False initially
-    assert state.risk_locked is False
-    
+    # Verify loss_cut_locked is False initially
+    assert state.loss_cut_locked is False
+
     # 4. Trigger Loss Cut
     order_mgr.daily_realized_pnl = -60_000 # Exceeds loss_cut_won(50k)
     rm.check()
-    
-    # 5. Check if AppState.risk_locked is True via SignalManager binding
-    # RiskManager.daily_loss_cut -> SignalManager -> AppState.risk_locked = True
-    assert state.risk_locked is True
+
+    # 5. Check if AppState.loss_cut_locked is True via SignalManager binding
+    # RiskManager.daily_loss_cut -> SignalManager -> AppState.loss_cut_locked = True
+    assert state.loss_cut_locked is True
 
 def test_order_manager_gatekeeper_integration(qapp):
     # 1. Setup
@@ -73,22 +69,22 @@ def test_order_manager_gatekeeper_integration(qapp):
     order_mgr.set_state(state)
     
     # Initially allowed
-    state.risk_locked = False
+    state.loss_cut_locked = False
     state.update_market_data(2500, 0, 800, 0, False) # No crash
-    
+
     # Mock stock info for universe filter
     kiwoom._ocx.dynamicCall.return_value = "정상"
-    
+
     # 2. Test Allowed Case
     # We need to bypass universe filter by providing a 'pure equity' name
     from scanner.universe import is_pure_equity_name
     assert order_mgr._is_buy_allowed("005930", "삼성전자") is True
-    
-    # 3. Test Risk Locked Case
-    state.risk_locked = True
+
+    # 3. Test Loss Cut Case
+    state.loss_cut_locked = True
     assert order_mgr._is_buy_allowed("005930", "삼성전자") is False
-    
+
     # 4. Test Market Crash Case
-    state.risk_locked = False
+    state.loss_cut_locked = False
     state.update_market_data(2500, 0, 800, 0, True) # Crash!
     assert order_mgr._is_buy_allowed("005930", "삼성전자") is False

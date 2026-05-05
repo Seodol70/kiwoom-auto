@@ -38,17 +38,13 @@ def _make_rm(daily_pnl: float = 0.0, profit_lock: int = 100_000, loss_cut: int =
     scan_cfg.daily_profit_lock_won = profit_lock
     scan_cfg.daily_loss_cut_won    = loss_cut
 
-    # Mock session manager to return fresh state (not persisted)
-    session_mgr = MagicMock()
-    session_mgr.load.return_value = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "daily_realized_pnl": 0.0,
-        "is_loss_cut_locked": False,
-        "is_profit_locked": False,
-        "timestamp": datetime.now().isoformat(),
-    }
+    # Mock AppState (new signature)
+    app_state = MagicMock()
+    app_state.profit_locked = False
+    app_state.loss_cut_locked = False
+    app_state.daily_realized_pnl = daily_pnl
 
-    rm = RiskManager(order_mgr=order_mgr, scan_cfg=scan_cfg, session_mgr=session_mgr)
+    rm = RiskManager(order_mgr=order_mgr, scan_cfg=scan_cfg, app_state=app_state)
     return rm, order_mgr, scan_cfg
 
 

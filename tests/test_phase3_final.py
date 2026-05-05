@@ -49,17 +49,13 @@ class MockConfig:
     trend_protect_enabled = True
 
 
-def _make_fresh_session_mgr():
-    """Fresh session state를 반환하는 mock session manager 생성"""
-    session_mgr = MagicMock()
-    session_mgr.load.return_value = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "daily_realized_pnl": 0.0,
-        "is_loss_cut_locked": False,
-        "is_profit_locked": False,
-        "timestamp": datetime.now().isoformat(),
-    }
-    return session_mgr
+def _make_fresh_app_state():
+    """Fresh AppState mock 생성"""
+    app_state = MagicMock()
+    app_state.profit_locked = False
+    app_state.loss_cut_locked = False
+    app_state.daily_realized_pnl = 0.0
+    return app_state
 
 
 def test_phase3_modules():
@@ -78,7 +74,7 @@ def test_phase3_modules():
     print("[OK] MarketScheduler 작동 확인")
 
     # 2. RiskManager
-    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None, session_mgr=_make_fresh_session_mgr())
+    risk_mgr = RiskManager(order_mgr, scan_cfg, parent=None, app_state=_make_fresh_app_state())
     assert not risk_mgr.is_new_entry_locked, "RiskManager 초기 상태 오류"
     risk_mgr.check()  # 정상 작동 확인
     print("[OK] RiskManager 작동 확인")

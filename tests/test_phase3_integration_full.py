@@ -73,17 +73,13 @@ class MockConfig:
     trend_protect_enabled = True
 
 
-def _make_fresh_session_mgr():
-    """Fresh session state를 반환하는 mock session manager 생성"""
-    session_mgr = MagicMock()
-    session_mgr.load.return_value = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "daily_realized_pnl": 0.0,
-        "is_loss_cut_locked": False,
-        "is_profit_locked": False,
-        "timestamp": datetime.now().isoformat(),
-    }
-    return session_mgr
+def _make_fresh_app_state():
+    """Fresh AppState mock 생성"""
+    app_state = MagicMock()
+    app_state.profit_locked = False
+    app_state.loss_cut_locked = False
+    app_state.daily_realized_pnl = 0.0
+    return app_state
 
 
 @dataclass
@@ -110,7 +106,7 @@ class MockMainWindow(QObject):
 
         # Phase 3: Application Layer
         self.market_scheduler = MarketScheduler(self)
-        self.risk_manager = RiskManager(self.order_mgr, self._scan_cfg, self, session_mgr=_make_fresh_session_mgr())
+        self.risk_manager = RiskManager(self.order_mgr, self._scan_cfg, self, app_state=_make_fresh_app_state())
         self.trading_controller = TradingController(
             order_mgr=self.order_mgr, scan_cfg=self._scan_cfg,
             risk_mgr=self.risk_manager, parent=self

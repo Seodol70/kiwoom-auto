@@ -137,17 +137,13 @@ def test_portfolio_loss_cut():
     p1 = MagicMock(avg_price=10000, qty=100, pnl=-60000) # -6%
     om.positions = {"000001": p1}
 
-    # Mock session manager to return fresh state (not persisted)
-    session_mgr = MagicMock()
-    session_mgr.load.return_value = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "daily_realized_pnl": 0.0,
-        "is_loss_cut_locked": False,
-        "is_profit_locked": False,
-        "timestamp": datetime.now().isoformat(),
-    }
+    # Mock AppState (new signature)
+    app_state = MagicMock()
+    app_state.profit_locked = False
+    app_state.loss_cut_locked = False
+    app_state.daily_realized_pnl = 0.0
 
-    rm = RiskManager(om, cfg, session_mgr=session_mgr)
+    rm = RiskManager(om, cfg, app_state=app_state)
     rm.daily_loss_cut = MagicMock()
 
     rm.check()
@@ -163,17 +159,13 @@ def test_cooling_off():
     cfg.consecutive_loss_limit = 2
     cfg.cooling_off_minutes = 10
 
-    # Mock session manager to return fresh state (not persisted)
-    session_mgr = MagicMock()
-    session_mgr.load.return_value = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "daily_realized_pnl": 0.0,
-        "is_loss_cut_locked": False,
-        "is_profit_locked": False,
-        "timestamp": datetime.now().isoformat(),
-    }
+    # Mock AppState (new signature)
+    app_state = MagicMock()
+    app_state.profit_locked = False
+    app_state.loss_cut_locked = False
+    app_state.daily_realized_pnl = 0.0
 
-    rm = RiskManager(om, cfg, session_mgr=session_mgr)
+    rm = RiskManager(om, cfg, app_state=app_state)
 
     # Simulate 1st loss
     rm._on_order_filled({"side": "매도체결", "realized_pnl": -1000})
