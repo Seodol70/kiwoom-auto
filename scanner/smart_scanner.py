@@ -854,6 +854,12 @@ class SmartScanner(QObject):
 
                     if rows:
                         result = rows[:target]
+                        # [DEBUG] opt10030 응답 상세 로깅
+                        for i, r in enumerate(result[:5]):
+                            name = r.get("name", "?")
+                            logger.warning("[opt10030] 응답 #%d: code=%s, name=%s (type=%s, repr=%r)",
+                                         i, r.get("code"), name, type(name).__name__, name)
+
                         logger.info("[opt10030] 최종 %d종목 확보", len(result))
                         self._last_volume_rows = result
                         self._last_volume_updated = time.monotonic()
@@ -968,7 +974,14 @@ class SmartScanner(QObject):
         
         logger.info("[주기 스캔] opt10030 즉시 조회 (캐시나이 %.1fs)", cache_age)
         rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, on_progress=prog_cb)
-        
+
+        # [DEBUG] _fetch_top_volume_rows에서 받은 rows 로깅
+        if rows:
+            for i, r in enumerate(rows[:5]):
+                name = r.get("name", "?")
+                logger.warning("[스캔] _fetch_top_volume_rows 결과 #%d: code=%s, name=%s (type=%s, repr=%r)",
+                             i, r.get("code"), name, type(name).__name__, name)
+
         if not rows:
             # [NEW] TR 실패 시(공휴일/장전) 전일 거래량 캐시 기반 전 종목 폴백
             logger.warning("[주기 스캔] TR 조회 실패 -> 전일 거래량 캐시 기반 유니버스 생성 시도")

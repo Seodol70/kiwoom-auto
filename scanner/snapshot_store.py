@@ -133,8 +133,11 @@ class SnapshotStore:
                                  row.get("code"), curr)
 
         first = rows[0]
-        logger.debug("[⚠️ bulk_update] 첫 행 진단 — code=%s name=%s | price=%s open=%s high=%s low=%s | volume=%s trade_amt=%s prev_close=%s chg_pct=%s",
-                     first.get("code"), first.get("name"),
+        first_name = first.get("name", "?")
+        logger.warning("[⚠️ bulk_update] 첫 행 진단 — code=%s name=%s (type=%s, repr=%r, bytes=%r) | price=%s open=%s high=%s low=%s | volume=%s trade_amt=%s prev_close=%s chg_pct=%s",
+                     first.get("code"), first_name,
+                     type(first_name).__name__, first_name,
+                     first_name.encode('utf-8') if isinstance(first_name, str) else first_name,
                      first.get("current_price"), first.get("open_price"), first.get("high_price"), first.get("low_price"),
                      first.get("volume"), first.get("trade_amount"),
                      first.get("prev_close"), first.get("change_pct"))
