@@ -2,11 +2,11 @@
 IndicatorService — 기술지표 계산 고속화 및 AI 피처 생성
 """
 
-from __future__ import annotations
 import logging
 import numpy as np
 import pandas as pd
-from typing import Optional, Any, TYPE_CHECKING, Dict
+from functools import lru_cache
+from typing import Optional, Any, TYPE_CHECKING, Dict, Union
 
 if TYPE_CHECKING:
     from scanner.models import StockSnapshot
@@ -18,31 +18,19 @@ class IndicatorService:
     """기술지표 계산 서비스 — 모든 지표 계산을 고속화하여 담당"""
 
     @staticmethod
-    def calc_rsi(closes: list[float] | np.ndarray, period: int = 14) -> Optional[float]:
-        """Wilder's Smoothing 방식의 RSI 고속 계산"""
-        if closes is None or len(closes) < period + 1:
-            return None
+    @lru_cache(maxsize=1024)
+    def _calc_rsi_cached(closes_tuple: tuple[float, ...], period: int) -> Optional[float]:
+        """내부 캐시용 RSI 계산"""
         try:
-            if isinstance(closes, list):
-                arr = np.array(closes, dtype=np.float64)
-            else:
-                arr = closes.astype(np.float64)
-                
+            arr = np.array(closes_tuple, dtype=np.float64)
             deltas = np.diff(arr)
             gains = np.where(deltas > 0, deltas, 0.0)
             losses = np.where(deltas < 0, -deltas, 0.0)
-
-            if len(gains) < period:
-                return None
-
-            # Wilder's Smoothing (alpha = 1/period)
-            # pandas ewm(alpha=1/period, adjust=False) 사용
+            if len(gains) < period: return None
             s_gains = pd.Series(gains)
             s_losses = pd.Series(losses)
-            
             avg_gain = s_gains.ewm(alpha=1.0/period, adjust=False).mean().iloc[-1]
             avg_loss = s_losses.ewm(alpha=1.0/period, adjust=False).mean().iloc[-1]
-
             if avg_loss == 0: return 100.0
             rs = avg_gain / avg_loss
             return float(100.0 - (100.0 / (1.0 + rs)))
@@ -50,22 +38,36 @@ class IndicatorService:
             return None
 
     @staticmethod
-    def calc_ema(closes: list[float] | np.ndarray, period: int) -> Optional[float]:
-        """고속 EMA 계산"""
-        if closes is None or len(closes) < period:
-            return None
+    def calc_rsi(closes: list[float] | np.ndarray, period: int = 14) -> Optional[float]:
+        if closes is None or len(closes) < period + 1: return None
+        return IndicatorService._calc_rsi_cached(tuple(closes), period)
+
+    @staticmethod
+    @lru_cache(maxsize=1024)
+    def _calc_ema_cached(closes_tuple: tuple[float, ...], period: int) -> Optional[float]:
         try:
-            s = pd.Series(closes)
+            s = pd.Series(closes_tuple)
             return float(s.ewm(span=period, adjust=False).mean().iloc[-1])
         except Exception:
             return None
 
     @staticmethod
-    def calc_ma(closes: list[float] | np.ndarray, period: int) -> Optional[float]:
-        """고속 MA 계산"""
-        if closes is None or len(closes) < period:
+    def calc_ema(closes: list[float] | np.ndarray, period: int) -> Optional[float]:
+        if closes is None or len(closes) < period: return None
+        return IndicatorService._calc_ema_cached(tuple(closes), period)
+
+    @staticmethod
+    @lru_cache(maxsize=1024)
+    def _calc_ma_cached(closes_tuple: tuple[float, ...], period: int) -> Optional[float]:
+        try:
+            return float(np.mean(closes_tuple[-period:]))
+        except Exception:
             return None
-        return float(np.mean(closes[-period:]))
+
+    @staticmethod
+    def calc_ma(closes: list[float] | np.ndarray, period: int) -> Optional[float]:
+        if closes is None or len(closes) < period: return None
+        return IndicatorService._calc_ma_cached(tuple(closes), period)
 
     @staticmethod
     def calc_vwap(prices: np.ndarray, volumes: np.ndarray) -> Optional[float]:

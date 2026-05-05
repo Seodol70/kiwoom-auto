@@ -16,12 +16,11 @@ TradeAuditLogger — 매매 행위 일별 CSV 감사 로그
 CSV 파일: logs/trade_audit_YYYYMMDD.csv (일별 자동 분리)
 """
 
-from __future__ import annotations
-
 import csv
 import logging
 import os
 import threading
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -118,6 +117,30 @@ class TradeAuditLogger:
             self.db = db_manager
 
         self._ensure_file()
+        
+        # [NEW] 배치 기록용 버퍼
+        self._write_buffer: list[dict] = []
+        self._last_flush_time = datetime.now()
+        self._flush_interval_sec = 5.0
+        self._stop_event = threading.Event()
+        self._flush_thread = threading.Thread(target=self._bg_flush_loop, daemon=True)
+        self._flush_thread.start()
+
+    def stop(self) -> None:
+        """배치 스레드 중지 및 잔여 데이터 저장."""
+        self._stop_event.set()
+        self.flush_all()
+
+    def _bg_flush_loop(self) -> None:
+        """백그라운드에서 주기적으로 버퍼를 파일에 씀."""
+        while not self._stop_event.is_set():
+            time_to_wait = max(0.1, self._flush_interval_sec - (datetime.now() - self._last_flush_time).total_seconds())
+            if self._stop_event.wait(time_to_wait):
+                break
+            
+            with self._lock:
+                if self._write_buffer:
+                    self._do_batch_write()
 
     # ── 파일 관리 ─────────────────────────────────────────────────────────────
 
@@ -153,24 +176,51 @@ class TradeAuditLogger:
         return sorted(matched)[-1]   # signal_time suffix(HHmmss) 기준 최신
 
     def _flush_row(self, key: str) -> None:
-        """단일 행을 CSV 및 SQLite에 저장한다. Lock 내부에서만 호출."""
-        self._check_date_rollover()
+        """단일 행을 버퍼에 추가한다. Lock 내부에서만 호출."""
         row = self._pending_rows.get(key)
         if row is None:
             return
             
-        # 1. CSV 저장
-        path = self._csv_path()
-        with open(path, "a", newline="", encoding="utf-8-sig") as f:
-            csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore").writerow(row)
+        self._write_buffer.append(row.copy())
         
-        # 2. SQLite 저장 (upsert)
-        if self.db:
-            # DB 컬럼과 일치하도록 가공 (빈 문자열 -> None 등 필요한 경우)
-            db_data = {k: (None if v == "" else v) for k, v in row.items()}
-            self.db.upsert_trade(key, db_data)
+        # 버퍼가 너무 크면 즉시 기록 (방어용)
+        if len(self._write_buffer) >= 50:
+            self._do_batch_write()
+
+    def _do_batch_write(self) -> None:
+        """버퍼의 내용을 실제 파일과 DB에 씀. Lock 내부에서 호출 권장."""
+        if not self._write_buffer:
+            return
             
-        logger.debug("[TradeAudit] flush (CSV+DB) — %s", key)
+        try:
+            self._check_date_rollover()
+            path = self._csv_path()
+            rows_to_write = self._write_buffer[:]
+            self._write_buffer.clear()
+            self._last_flush_time = datetime.now()
+
+            # 1. CSV 저장
+            with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
+                for row in rows_to_write:
+                    writer.writerow(row)
+            
+            # 2. SQLite 저장
+            if self.db:
+                db_batch = []
+                for row in rows_to_write:
+                    # key 생성 (code + signal_time)
+                    code = row.get("code")
+                    sig_time = row.get("signal_time", "").replace(":", "")
+                    key = f"{code}_{sig_time}"
+                    db_data = {k: (None if v == "" else v) for k, v in row.items()}
+                    db_batch.append((key, db_data))
+                
+                self.db.upsert_trades_batch(db_batch)
+                
+            logger.debug("[TradeAudit] Batch flush 완료 (%d건)", len(rows_to_write))
+        except Exception as e:
+            logger.error("[TradeAudit] Batch write 오류: %s", e)
 
     # ── 공개 API ──────────────────────────────────────────────────────────────
 

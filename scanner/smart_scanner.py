@@ -248,6 +248,10 @@ class SmartScanner(QObject):
         self._last_reserve_refresh: float = 0.0
         self._RESERVE_INTERVAL: float = 10.0   # 10초마다 예비 top-2 재선정
 
+        # [NEW] 자원 정리 주기 (메모리 누수 방지)
+        self._last_cleanup_ts: float = 0.0
+        self._CLEANUP_INTERVAL: float = 600.0  # 10분마다 정리
+
 
         # 거래대금 '9시(장시작) 대비' 증가율 — 종목별 당일 최초 관측값(설정: pre_filter_time 이후·양수)을 기준
         self._amt_baseline_date: Optional[date] = None
@@ -469,6 +473,16 @@ class SmartScanner(QObject):
                         snap = self.store.get_snapshot(code)
                         if snap:
                             self._evaluate(snap)
+            # [NEW] 주기적 자원 정리 (10분 간격)
+            if t0 - self._last_cleanup_ts >= self._CLEANUP_INTERVAL:
+                self._last_cleanup_ts = t0
+                active = set(self.watch_q.subscribed)
+                c_store = self.store.cleanup_stale_data(active)
+                c_order = 0
+                if self._order_mgr:
+                    c_order = self._order_mgr.cleanup_stale_data(active)
+                logger.info("[Cleanup] 주기적 자원 정리 완료 — SnapshotStore: %d건, OrderManager: %d건", c_store, c_order)
+
             elapsed = time.monotonic() - t0
             # WATCH 모드: 0.1초(초정밀 대기) / SEARCH 모드: 기본 주기(1초)
             interval = 0.1 if self._universe_paused else self.cfg.scan_interval

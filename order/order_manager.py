@@ -608,7 +608,7 @@ class OrderManager(QObject):
                 return
 
             # [NEW] 주문 가격 호가 단위 보정 (Tick Size Alignment)
-            from scanner.universe import align_price_to_hoga
+            from scanner.universe import align_price_to_hoga, get_hoga_unit
             m_type = getattr(snap, "market_type", "10") if snap else "10"
             
             curr = int(_info.get("current_price", 0))
@@ -1055,17 +1055,6 @@ class OrderManager(QObject):
         """시장가(price=0) 또는 지정가 매수 주문을 전송한다."""
         return self._send(OrderType.BUY, code, name, qty, price, order_type)
 
-    @staticmethod
-    def _price_tick(price: int) -> int:
-        """KRX 호가 단위 반환 (현재가 기준)."""
-        if price < 1_000:      return 1
-        if price < 5_000:      return 5
-        if price < 10_000:     return 10
-        if price < 50_000:     return 50
-        if price < 100_000:    return 100
-        if price < 500_000:    return 500
-        return 1_000
-
     def force_exit(
         self,
         code: str,
@@ -1289,6 +1278,17 @@ class OrderManager(QObject):
         price: int,
         price_type: str = "",
     ) -> str:
+        """최종 주문 전송 (호가 단위 정렬 보강)."""
+        if qty <= 0:
+            return "0"
+
+        # [NEW] 최종 가격 보정 (최종 수비수)
+        if price > 0:
+            from scanner.universe import align_price_to_hoga
+            snap = self._snap_store.get_snapshot(code)
+            m_type = getattr(snap, "market_type", "10") if snap else "10"
+            price = align_price_to_hoga(price, m_type, "round")
+
         # OrderExecutor에 위임
         ret, rq_name = self._executor.send(order_type, code, name, qty, price, price_type)
 
@@ -1355,11 +1355,7 @@ class OrderManager(QObject):
         self._kiwoom._ocx.OnReceiveChejanData.connect(self._on_chejan_data)
 
     def _on_chejan_data(self, gubun: str, item_cnt: int, fid_list: str) -> None:
-        """
-        체결/잔고 이벤트.
-        gubun "0" → 주문 접수/체결
-        gubun "1" → 잔고 변동
-        """
+        """라우터 역할: FID 파싱 → 타입 판별 → 핸들러 호출"""
         def cj(fid: int) -> str:
             return self._kiwoom._ocx.dynamicCall(
                 "GetChejanData(int)", [fid]
@@ -1373,17 +1369,13 @@ class OrderManager(QObject):
         name        = cj(302)
         _raw_qty    = cj(911)
         _raw_price  = cj(910)
-        # FID 911 = 주문 내 누적 체결량 (이번 이벤트 단독 수량이 아님)
         _cum_qty    = abs(int(_raw_qty   or 0))
         filled_price= abs(int(_raw_price or 0))
         order_no    = cj(9203)
-        # 증분 체결량 = 누적 - 이전 누적
         _prev_cum   = self._order_fill_cumulative.get(order_no, 0)
         filled_qty  = max(0, _cum_qty - _prev_cum)
         self._order_fill_cumulative[order_no] = _cum_qty
-        logger.info("체결원시 — %s FID910(체결가)=%r FID911(누적체결량)=%r 이전=%d → 증분=%d price=%d",
-                    name, _raw_price, _raw_qty, _prev_cum, filled_qty, filled_price)
-        # FID 905 주문구분: "+매수"/"+매도" 문자열로 반환됨 (int 변환 불가)
+
         _ot_str = cj(905)
         if "매수" in _ot_str:
             order_type = OrderType.BUY
@@ -1403,225 +1395,169 @@ class OrderManager(QObject):
             rec.filled_price = filled_price
             rec.filled_at    = datetime.now()
 
-        is_app_buy = order_type == OrderType.BUY and code in self._app_pending_buys
-
-        # [취소 후 뒤늦은 체결 방어] 이미 취소한 매수 주문이 뒤늦게 체결된 경우 즉시 청산
+        # 취소 후 뒤늦은 체결 방어
         if order_type == OrderType.BUY and order_no in self._cancelled_buy_orders:
-            self._cancelled_buy_orders.discard(order_no)
-            logger.warning(
-                "[취소후체결] %s(%s) 취소 주문 %s 이 뒤늦게 체결됨 (%d주 @%d) — 즉시 시장가 청산",
-                name, code, order_no, filled_qty, filled_price,
-            )
-            # 포지션에 반영한 뒤 즉시 청산
-            if code in self.positions:
-                pos = self.positions[code]
-                total_qty = pos.qty + filled_qty
-                # 가중 평균단가 갱신 (지연 체결분 포함)
-                pos.avg_price = (pos.avg_price * pos.qty + filled_price * filled_qty) // total_qty
-                pos.qty = total_qty
-            else:
-                self.positions[code] = Position(
-                    code=code, name=name,
-                    qty=filled_qty, avg_price=filled_price,
-                    current_price=filled_price,
-                )
-            self.sell(code, name, self.positions[code].qty)
+            self._handle_cancelled_buy(code, name, filled_qty, filled_price, order_no)
             return
 
-        avg_buy_for_log: Optional[int] = None  # 매도 체결 로그용 (포지션 갱신 전 평단)
-
-        # 포지션 반영
+        # 분기: 매수 vs 매도
         if order_type == OrderType.BUY:
-            # [P2] 매수 체결 → 미체결 추적 해제
-            self._pending_buy_time.pop(code, None)
-            self._pending_buy_info.pop(code, None)
-            # Phase G-1: PendingOrderMeta에서 추출
-            meta = self._pending_meta.pop(code, PendingOrderMeta())
-            trend_level = meta.trend_level
-            trend_prev_level = meta.trend_prev_level
-            _near_high = meta.near_daily_high
-            _ctp = meta.custom_tp_pct
-            _eod_trade = meta.eod_trade
-            _entry_phase = meta.entry_phase
-            _sector_fill = meta.sector
-            candle_stop = meta.candle_stop
-            if is_app_buy:
-                rem = self._app_pending_buys[code] - filled_qty
-                if rem <= 0:
-                    del self._app_pending_buys[code]
-                    # 주문 완전 체결 → 누적 체결량 및 주문 중 상태 해제
-                    self._order_fill_cumulative.pop(order_no, None)
-                    self._pending.discard(code)
-                else:
-                    self._app_pending_buys[code] = rem
+            self._handle_buy_fill(code, name, filled_qty, filled_price, order_no, _prev_cum)
+        else:
+            self._handle_sell_fill(code, name, filled_qty, filled_price, order_no)
 
-            if code in self.positions:
-                pos = self.positions[code]
-                
-                # ✅ 신규 주문(피라미딩)의 첫 체결인 경우 진입 횟수 증가
-                if _prev_cum == 0:
-                    pos.entry_count = getattr(pos, "entry_count", 1) + 1
-                    logger.info("🚀 [피라미딩체결] %s(%s) 진입 횟수 증가 -> %d회", 
-                                name, code, pos.entry_count)
+    def _handle_cancelled_buy(self, code: str, name: str, filled_qty: int, filled_price: int, order_no: str) -> None:
+        """취소 후 뒤늦은 체결 방어"""
+        self._cancelled_buy_orders.discard(order_no)
+        logger.warning(
+            "[취소후체결] %s(%s) 취소 주문 %s 이 뒤늦게 체결됨 (%d주 @%d) — 즉시 시장가 청산",
+            name, code, order_no, filled_qty, filled_price,
+        )
+        if code in self.positions:
+            pos = self.positions[code]
+            total_qty = pos.qty + filled_qty
+            pos.avg_price = (pos.avg_price * pos.qty + filled_price * filled_qty) // total_qty
+            pos.qty = total_qty
+        else:
+            self.positions[code] = Position(
+                code=code, name=name,
+                qty=filled_qty, avg_price=filled_price,
+                current_price=filled_price,
+            )
+        self.sell(code, name, self.positions[code].qty)
 
-                total_qty   = pos.qty + filled_qty
-                pos.avg_price = (pos.avg_price * pos.qty + filled_price * filled_qty) // total_qty
-                pos.qty      = total_qty
-                # 신규 체결 시 진입 시점 추세를 덮어써 최신 상태로 유지
-                pos.trend_level = int(trend_level)
-                pos.trend_prev_level = int(trend_prev_level)
-                if is_app_buy:
-                    pos.qty_buy_today_app += filled_qty
-                    pos.opened_by_app = True
-                    if pos.buy_date is None:
-                        pos.buy_date = date.today()
+    def _handle_buy_fill(self, code: str, name: str, filled_qty: int, filled_price: int, order_no: str, prev_cum: int) -> None:
+        """매수 체결 전담"""
+        is_app_buy = code in self._app_pending_buys
+        
+        self._pending_buy_time.pop(code, None)
+        self._pending_buy_info.pop(code, None)
+        meta = self._pending_meta.pop(code, PendingOrderMeta())
+        
+        if is_app_buy:
+            rem = self._app_pending_buys[code] - filled_qty
+            if rem <= 0:
+                del self._app_pending_buys[code]
+                self._order_fill_cumulative.pop(order_no, None)
+                self._pending.discard(code)
             else:
-                self.positions[code] = Position(
-                    code=code, name=name,
-                    qty=filled_qty, avg_price=filled_price,
-                    current_price=filled_price,
-                    buy_date=date.today() if is_app_buy else None,
-                    entry_time=datetime.now() if is_app_buy else None,
-                    opened_by_app=is_app_buy,
-                    qty_buy_today_app=filled_qty if is_app_buy else 0,
-                    candle_stop_price=candle_stop,
-                    trend_level=int(trend_level),
-                    trend_prev_level=int(trend_prev_level),
-                    near_daily_high=_near_high,
-                    custom_tp_pct=_ctp,
-                    eod_trade=_eod_trade,
-                    entry_phase=_entry_phase,
-                    sector=_sector_fill,
-                )
-                position_log.info(
-                    "[포지션생성] %s(%s) 체결가=%d 수량=%d 섹터=[%s] trend_lv=%d phase=%d",
-                    name, code, filled_price, filled_qty,
-                    _sector_fill or "-", int(trend_level), int(_entry_phase),
-                )
-                if _near_high:
-                    logger.info("[신고가근처] %s(%s) — 일봉 신고가 근처 진입, TP 상향 적용 (custom_tp=%.1f%%)",
-                                name, code, _ctp)
-                if _eod_trade:
-                    logger.info("[EOD] %s(%s) — 종가매매 진입, 당일 강제청산 제외 / 익일 갭 체크 관리",
-                                name, code)
-            # 예수금 차감 (수수료 포함하여 더 정확하게 계산)
-            buy_amt = filled_qty * filled_price
-            fee = int(buy_amt * _FEE)
-            self.cash -= (buy_amt + fee)
-            self._today_fill_log.append({
-                "ts": datetime.now().strftime("%H:%M:%S"),
-                "side": "buy",
-                "code": code,
-                "name": name,
-                "qty": filled_qty,
-                "price": filled_price,
-                "amount": filled_qty * filled_price,
-            })
-            if self._audit:
-                self._audit.log_buy_fill(code, filled_qty, filled_price)
-            # [NEW] 포지션 실시간 등록
-            if self.on_position_opened:
-                self.on_position_opened(code)
-            realized_for_signal = 0
+                self._app_pending_buys[code] = rem
 
-        elif order_type == OrderType.SELL:
-            if code in self.positions:
-                pos = self.positions[code]
-                avg_buy_for_log = pos.avg_price
-                # 실제 순익 = 가격차이 - 매도수수료 - 증권세 - 매수수수료(평단 기준)
-                sell_amount = filled_price * filled_qty
-                buy_amount  = pos.avg_price * filled_qty
-                cost = round(sell_amount * (_FEE + _TAX) + buy_amount * _FEE)
-                realized = (filled_price - pos.avg_price) * filled_qty - cost
-                self._today_fill_log.append({
-                    "ts": datetime.now().strftime("%H:%M:%S"),
-                    "side": "sell",
-                    "code": code,
-                    "name": name,
-                    "qty": filled_qty,
-                    "price": filled_price,
-                    "amount": filled_qty * filled_price,
-                    "realized": realized,
-                })
-                realized_for_signal = realized
-                # [NEW] 매도 체결을 파일에 append → 재시작 후에도 복구 가능
-                _is_partial = code in self._partial_pending_codes
-                self._partial_pending_codes.discard(code)
-                self._append_fill_to_file(
-                    realized=realized, code=code, name=name,
-                    sell_price=filled_price, avg_price=pos.avg_price, qty=filled_qty,
-                    is_partial=_is_partial,
-                )
-                if self._audit:
-                    self._audit.log_sell_fill(
-                        code, filled_qty, filled_price,
-                        avg_buy_price=pos.avg_price,
-                        realized_pnl=realized,
-                    )
-                self._recompute_daily_realized_from_ledger()
-                sell_from_today = min(filled_qty, pos.qty_buy_today_app)
-                pos.qty_buy_today_app -= sell_from_today
-                pos.qty -= filled_qty
-                if pos.qty <= 0:
-                    _pnl_pct = (filled_price - avg_buy_for_log) / avg_buy_for_log * 100 if avg_buy_for_log else 0
-                    position_log.info(
-                        "[포지션청산] %s(%s) 매도가=%d 평균매입=%d 손익=%+.2f%% 실현손익=%+d",
-                        name, code, filled_price, avg_buy_for_log, _pnl_pct, realized,
-                    )
-                    # [NEW] 포지션 실시간 해제
-                    if self.on_position_closed:
-                        self.on_position_closed(code)
-                    del self.positions[code]
-                    # 강제 매도 발령 해제 (체결 완료) + 재시도 카운터 초기화
-                    self._force_sell_issued.discard(code)
-                    self._pending_sell_retries.pop(code, None)
-                    # 매도 체결 완료 → 대기 중인 매수 신호 실행
-                    if self._queued_signal is not None:
-                        queued = self._queued_signal
-                        self._queued_signal = None
-                        logger.info("[큐 신호 실행] 매도 완료 후 대기 신호 처리 — %s(%s)",
-                                    queued.name, queued.code)
-                        self.handle_signal(queued)
-            self.cash += filled_qty * filled_price
+        if code in self.positions:
+            pos = self.positions[code]
+            if prev_cum == 0:
+                pos.entry_count = getattr(pos, "entry_count", 1) + 1
+                logger.info("🚀 [피라미딩체결] %s(%s) 진입 횟수 증가 -> %d회", name, code, pos.entry_count)
 
+            total_qty = pos.qty + filled_qty
+            pos.avg_price = (pos.avg_price * pos.qty + filled_price * filled_qty) // total_qty
+            pos.qty = total_qty
+            pos.trend_level = int(meta.trend_level)
+            pos.trend_prev_level = int(meta.trend_prev_level)
+            if is_app_buy:
+                pos.qty_buy_today_app += filled_qty
+                pos.opened_by_app = True
+                if pos.buy_date is None: pos.buy_date = date.today()
+        else:
+            self.positions[code] = Position(
+                code=code, name=name,
+                qty=filled_qty, avg_price=filled_price,
+                current_price=filled_price,
+                buy_date=date.today() if is_app_buy else None,
+                entry_time=datetime.now() if is_app_buy else None,
+                opened_by_app=is_app_buy,
+                qty_buy_today_app=filled_qty if is_app_buy else 0,
+                candle_stop_price=meta.candle_stop,
+                trend_level=int(meta.trend_level),
+                trend_prev_level=int(meta.trend_prev_level),
+                near_daily_high=meta.near_daily_high,
+                custom_tp_pct=meta.custom_tp_pct,
+                eod_trade=meta.eod_trade,
+                entry_phase=meta.entry_phase,
+                sector=meta.sector,
+            )
+            position_log.info(
+                "[포지션생성] %s(%s) 체결가=%d 수량=%d 섹터=[%s] trend_lv=%d phase=%d",
+                name, code, filled_price, filled_qty,
+                meta.sector or "-", int(meta.trend_level), int(meta.entry_phase),
+            )
+
+        # 공통 마무리 로직
+        buy_amt = filled_qty * filled_price
+        fee = int(buy_amt * _FEE)
+        self.cash -= (buy_amt + fee)
+        self._today_fill_log.append({
+            "ts": datetime.now().strftime("%H:%M:%S"),
+            "side": "buy", "code": code, "name": name,
+            "qty": filled_qty, "price": filled_price, "amount": buy_amt
+        })
+        if self._audit: self._audit.log_buy_fill(code, filled_qty, filled_price)
+        if self.on_position_opened: self.on_position_opened(code)
+        self._finalize_fill(code, name, filled_qty, filled_price, OrderType.BUY)
+
+    def _handle_sell_fill(self, code: str, name: str, filled_qty: int, filled_price: int, order_no: str) -> None:
+        """매도 체결 전담"""
+        if code not in self.positions:
+            return
+            
+        pos = self.positions[code]
+        avg_buy_for_log = pos.avg_price
+        sell_amount = filled_price * filled_qty
+        buy_amount  = pos.avg_price * filled_qty
+        cost = round(sell_amount * (_FEE + _TAX) + buy_amount * _FEE)
+        realized = (filled_price - pos.avg_price) * filled_qty - cost
+        
+        self._today_fill_log.append({
+            "ts": datetime.now().strftime("%H:%M:%S"),
+            "side": "sell", "code": code, "name": name,
+            "qty": filled_qty, "price": filled_price, "amount": sell_amount, "realized": realized
+        })
+        
+        self._partial_pending_codes.discard(code)
+        self._append_fill_to_file(
+            realized=realized, code=code, name=name,
+            sell_price=filled_price, avg_price=pos.avg_price, qty=filled_qty,
+            is_partial=code in self._partial_pending_codes,
+        )
+        if self._audit:
+            self._audit.log_sell_fill(code, filled_qty, filled_price, avg_buy_price=pos.avg_price, realized_pnl=realized)
+            
+        self._recompute_daily_realized_from_ledger()
+        sell_from_today = min(filled_qty, pos.qty_buy_today_app)
+        pos.qty_buy_today_app -= sell_from_today
+        pos.qty -= filled_qty
+        
+        if pos.qty <= 0:
+            _pnl_pct = (filled_price - avg_buy_for_log) / avg_buy_for_log * 100 if avg_buy_for_log else 0
+            position_log.info("[포지션청산] %s(%s) 매도가=%d 손익=%+.2f%%", name, code, filled_price, _pnl_pct)
+            if self.on_position_closed: self.on_position_closed(code)
+            del self.positions[code]
+            self._force_sell_issued.discard(code)
+            self._pending_sell_retries.pop(code, None)
+            if self._queued_signal:
+                queued = self._queued_signal
+                self._queued_signal = None
+                self.handle_signal(queued)
+
+        self.cash += filled_qty * filled_price
+        self._finalize_fill(code, name, filled_qty, filled_price, OrderType.SELL, realized, avg_buy_for_log)
+
+    def _finalize_fill(self, code, name, filled_qty, filled_price, order_type, realized=0, avg_buy=None):
+        """체결 공통 마무리 (상태 정리, 신호 발행)"""
         self._pending.discard(code)
         self._pending_sell_time.pop(code, None)
-
+        
         payload = {
-            "time":         datetime.now().strftime("%H:%M:%S"),
-            "side":         "매수체결" if order_type == OrderType.BUY else "매도체결",
-            "code":         code,
-            "name":         name,
-            "filled_qty":   filled_qty,
-            "filled_price": filled_price,
-            "realized_pnl": realized_for_signal,
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "side": "매수체결" if order_type == OrderType.BUY else "매도체결",
+            "code": code, "name": name, "filled_qty": filled_qty, "filled_price": filled_price, "realized_pnl": realized
         }
-        if avg_buy_for_log is not None:
-            payload["avg_buy_price"] = avg_buy_for_log
-
-        # [NEW] AppState 직접 업데이트 (체결 즉시 UI 반영)
-        if self.state:
-            self.state.update_portfolio(self.cash, dict(self.positions))
-
+        if avg_buy: payload["avg_buy_price"] = avg_buy
+        if self.state: self.state.update_portfolio(self.cash, dict(self.positions))
         self.order_filled.emit(payload)
-
-        if order_type == OrderType.SELL and avg_buy_for_log is not None:
-            logger.info(
-                "체결 — %s %s %d주 매수가 %s원 → 매도가 %s원",
-                name,
-                payload["side"],
-                filled_qty,
-                f"{avg_buy_for_log:,}",
-                f"{filled_price:,}",
-            )
-        else:
-            logger.info(
-                "체결 — %s %s %d주 @%s원",
-                name,
-                payload["side"],
-                filled_qty,
-                f"{filled_price:,}",
-            )
+        
+        side_nm = "매수" if order_type == OrderType.BUY else "매도"
+        logger.info("체결 — %s %s %d주 @%s원", name, side_nm, filled_qty, f"{filled_price:,}")
 
     def cleanup_stale_data(self, active_codes: set[str]) -> int:
         """오래된 내부 상태(신호 시각, 주문 기록 등)를 정리하여 메모리 누수를 방지한다."""
