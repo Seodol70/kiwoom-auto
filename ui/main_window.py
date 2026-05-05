@@ -173,11 +173,13 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
                     logger.warning("[MainWindow] 스캐너 스레드 강제 종료")
                     self._scan_thread.terminate()
 
-            # 3. 텔레그램 봇 중단
-            if self._tg: 
-                self._tg.stop()
+            # 4. 데이터 강제 Flush (Clean Exit)
+            if hasattr(self, "_audit") and self._audit:
+                logger.info("[MainWindow] 매매 로그 강제 저장(Flush) 시작")
+                self._audit.flush_all()
+                logger.info("[MainWindow] 매매 로그 저장 완료")
 
-            # 4. 키움 API 세션 정리 (필요 시)
+            # 5. 키움 API 세션 정리 (필요 시)
             # self._kiwoom.logout() 등
 
         except Exception as e:

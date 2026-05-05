@@ -909,6 +909,15 @@ def check_eod_entry(
 
 
 
+def check_indicator_warmup(snap: StockSnapshot, min_candles: int = 15) -> Optional[str]:
+    """[NEW] 지표 워밍업 체크 — 캔들 개수가 부족한 장 초반 신뢰도 낮은 지표 차단."""
+    count = len(snap.closes_1min)
+    if count < min_candles:
+        # 데이터가 아예 없으면 차단, 약간(10~14개) 있으면 로그 기록 후 진행 여부 결정
+        if count < 10:
+            return f"WARMUP_LACK({count})"
+    return None
+
 def check_jdm_entry(
     snap: StockSnapshot,
     cfg:  SmartScannerConfig,
@@ -1195,6 +1204,16 @@ def check_jdm_entry(
             return None
         spread_tag = f"MA{cfg.jdm_ma_short}/{cfg.jdm_ma_long} {ma_s:.0f}/{ma_l:.0f} ({spread_pct:.2f}%)"
         rsi_tag    = f"RSI{rsi:.0f}"
+
+
+    # ── [NEW] 지표 워밍업 체크 (Warm-up) ──────────────────────────────────────────
+    warmup_reason = check_indicator_warmup(snap, 15)
+    if warmup_reason:
+        ScannerLogger.near_miss(
+            snap.code, snap.name, "WARMUP",
+            reason=f"[{_slot}] 지표 워밍업 부족 ({len(snap.closes_1min)}분봉) — 장 초반 지표 신뢰도 낮음",
+        )
+        return None
 
 
     # ── 거래량 및 체결강도 체크 (MA 평가 후 진행) ────────────────────────────────────

@@ -588,21 +588,34 @@ class OrderManager(QObject):
         if not self._is_buy_allowed(code, name):
             return
 
+        # [NEW] 데이터 신선도 체크 (Data Freshness)
+        # 네트워크 지연으로 인한 3초 이상 과거 데이터 기반 신호 거절
+        snap = self._snap_store.get_snapshot(code)
+        if snap and snap.updated_at:
+            delay = (datetime.now() - snap.updated_at).total_seconds()
+            if delay > 3.0:
+                logger.warning("[신호거절] %s(%s) 시세 지연 %.1f초 (3초 초과) — 신선도 미달", name, code, delay)
+                return
+
         _sector = ""
         try:
             _RISK = cfg.RISK
             _mx = float(_RISK.get("max_change_pct", 15.0))
             _info = self._kiwoom.get_stock_info(code)
 
-            # [2026-04-23] opt10001 실패 → 매수 거절 (호가 부족 신호)
-            # 원인: opt10001 TR 실패 종목은 이미 호가가 줄어들고 있음
-            # 효과: 타임아웃 방지 + 자금 효율화 + 손실 차단
             if _info is None:
-                msg = f"매수 거절 — opt10001 실패 (스냅샷/섹터 정보 부족 = 호가 감소 징조)"
-                order_log.warning("[opt10001차단] %s(%s) — %s", name, code, msg)
-                logger.warning(msg)
-                self.order_failed.emit(msg)
+                logger.warning("[매수거절] %s(%s) 실시간 정보 조회 실패 (opt10001)", name, code)
                 return
+
+            # [NEW] 주문 가격 호가 단위 보정 (Tick Size Alignment)
+            from scanner.universe import align_price_to_hoga
+            m_type = getattr(snap, "market_type", "10") if snap else "10"
+            
+            curr = int(_info.get("current_price", 0))
+            if curr > 0:
+                price = align_price_to_hoga(curr, m_type, "round") # 현재가 기준 재정렬
+            else:
+                price = align_price_to_hoga(price, m_type, "round")
 
             _pct = float(_info.get("change_pct", 0) or 0)
             _sector = str(_info.get("sector", "")).strip()
@@ -1091,7 +1104,8 @@ class OrderManager(QObject):
             sell_price = 0  # 기본: 시장가
             if retries >= 2:
                 cur = pos.current_price or pos.avg_price
-                tick = self._price_tick(cur)
+                from scanner.universe import get_hoga_unit
+                tick = get_hoga_unit(cur, getattr(pos, "market_type", "10"))
                 sell_price = max(1, cur - tick)
                 logger.warning(
                     "[force_exit] %s(%s) 지정가 에스컬레이션 — %d원 (%d회 타임아웃)",

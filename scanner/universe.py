@@ -246,3 +246,45 @@ def seconds_until(t: dtime) -> float:
     if target <= now:
         target += timedelta(days=1)
     return max(0.0, (target - now).total_seconds())
+
+
+# ─── 호가 단위(Tick Size) 관련 유틸리티 (2023년 KRX 규정 기준) ───────────
+
+def get_hoga_unit(price: int, market_type: str = "10") -> int:
+    """
+    현재 가격과 시장 구분(KOSPI/KOSDAQ)에 따른 호가 단위를 반환한다.
+    "0": KOSPI, "10": KOSDAQ
+    """
+    p = abs(int(price))
+    if p < 2000:
+        return 1
+    elif p < 5000:
+        return 5
+    elif p < 20000:
+        return 10
+    elif p < 50000:
+        return 50
+    
+    # 5만원 이상부터는 코스피/코스닥 차이 없음 (단일화)
+    if p < 200000:
+        return 100
+    elif p < 500000:
+        return 500
+    else:
+        return 1000
+
+
+def align_price_to_hoga(price: float, market_type: str = "10", direction: str = "round") -> int:
+    """
+    가격을 해당 종목의 호가 단위에 맞게 보정한다.
+    direction: "round"(반올림), "up"(올림), "down"(내림)
+    """
+    if price <= 0: return 0
+    unit = get_hoga_unit(int(price), market_type)
+    
+    if direction == "up":
+        return int(((price + unit - 0.1) // unit) * unit)
+    elif direction == "down":
+        return int((price // unit) * unit)
+    else: # round
+        return int(((price + (unit / 2)) // unit) * unit)
