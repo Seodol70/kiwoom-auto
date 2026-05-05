@@ -149,6 +149,14 @@ class IndicatorService:
         return 0
 
     @staticmethod
+    def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:
+        """피봇 2차 저항선(R2) 계산. P=(고+저+종)/3, R2=P+(고-저)"""
+        if prev_high <= 0 or prev_low <= 0 or prev_close <= 0:
+            return 0.0
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        return pivot + (prev_high - prev_low)
+
+    @staticmethod
     def check_daily_alignment(daily_closes: list[float], current_price: Optional[float] = None) -> dict:
         """일봉 정배열 확인"""
         res = {"is_aligned": False, "ma5": 0.0, "ma10": 0.0, "ma20": 0.0}
