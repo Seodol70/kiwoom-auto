@@ -681,6 +681,11 @@ class PortfolioWorker(QObject):
             return
         try:
             cash = self._om._sync_with_balance(self._balance_result)
+            
+            # [CRITICAL] 매도 감시 엔진 가동: 잔고 동기화 직후 청산 조건(SL/TP/Trail) 체크
+            if self._tc:
+                self._tc.update_portfolio_prices()
+                
             self.refresh_done.emit({
                 "cash": cash,
                 "positions": dict(self._om.positions),

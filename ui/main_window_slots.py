@@ -221,7 +221,13 @@ class MainWindowSlots:
     @pyqtSlot()
     def _on_auto_trade_started(self) -> None:
         """첫 신호 포착 등으로 자동매매가 실제 개시됨"""
-        self.append_log("🚀 [엔진] 첫 신호 포착 — 실시간 자동매매 감시를 시작합니다.")
+        # [CRITICAL] 로그만 남기지 않고 실제 스위치를 켭니다.
+        if not self.state.auto_trading:
+            self.header.set_auto_checked(True)
+            self._on_auto_trade_toggle(True)
+            self.append_log("🚀 [엔진] 첫 신호 포착 — 자동매매가 자동으로 시작되었습니다.")
+        else:
+            self.append_log("🚀 [엔진] 첫 신호 포착 — 실시간 자동매매 감시를 시작합니다.")
 
     @pyqtSlot()
     def _on_reload_config(self) -> None:
