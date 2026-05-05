@@ -256,37 +256,21 @@ class MainWindowSlots:
     def _on_code_selected(self, code: str) -> None:
         """종목 선택 시 차트 표시"""
         if not code: return
-        
-        # 1. 캔들 데이터 조회 (최근 100개, 1분봉)
-        candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=100)
-        if not candles:
-            # 공휴일/장전 등 데이터가 없으면 일봉이라도 시도
-            candles = self._kiwoom.get_daily_candles(code, count=40)
-            
-        closes = [c['close'] for c in candles]
-        volumes = [c['volume'] for c in candles]
-        
-        # 2. 종목명 및 포지션 정보
-        name = self._kiwoom.get_stock_name(code)  # CP949 인코딩 보정 적용
-        position = self.order_mgr.positions.get(code)
-        
-        # 3. 전략 파라미터 (트레일가, 손절%)
-        sl_pct = float(getattr(self._scan_cfg, "jdm_stop_loss_pct", -1.5))
-        trail_price = 0
-        if position and hasattr(position, "trail_stop_price"):
-            trail_price = position.trail_stop_price
-            
-        # 4. 차트 업데이트
+
+        # TradingController에서 차트 데이터 조회
+        data = self.trading_controller.get_chart_data(code)
+
+        # 차트 업데이트
         self.chart_panel.update_chart(
-            closes=closes,
-            volumes=volumes,
+            closes=data["closes"],
+            volumes=data["volumes"],
             code=code,
-            name=name,
-            position=position,
-            trail_price=trail_price,
-            sl_pct=sl_pct
+            name=data["name"],
+            position=data["position"],
+            trail_price=data["trail_price"],
+            sl_pct=data["sl_pct"]
         )
-        logger.info("[차트] 종목 선택됨: %s(%s) - %d캔들 로드", name, code, len(closes))
+        logger.info("[차트] 종목 선택됨: %s(%s) - %d캔들 로드", data["name"], code, len(data["closes"]))
 
     @pyqtSlot()
     def _on_market_opened(self) -> None:

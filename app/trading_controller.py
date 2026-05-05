@@ -258,6 +258,50 @@ class TradingController(QObject):
             
         return True, f"✅ [수동매수] {name}({code}) {qty}주 {otype_str} 요청 완료 (ID: {order_no})"
 
+    def get_chart_data(self, code: str) -> dict[str, Any]:
+        """차트 표시용 데이터 조회 — 캔들, 포지션, 위험 파라미터"""
+        result = {
+            "code": code,
+            "closes": [],
+            "volumes": [],
+            "name": "",
+            "position": None,
+            "trail_price": 0,
+            "sl_pct": -1.5,
+        }
+
+        if not code:
+            return result
+
+        try:
+            # 1. 캔들 데이터 (1분봉 100개, 없으면 일봉 40개)
+            candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=100)
+            if not candles:
+                candles = self._kiwoom.get_daily_candles(code, count=40)
+
+            if candles:
+                result["closes"] = [c['close'] for c in candles]
+                result["volumes"] = [c['volume'] for c in candles]
+
+            # 2. 종목명
+            result["name"] = self._kiwoom.get_stock_name(code)
+
+            # 3. 포지션 정보
+            pos = self._order_mgr.positions.get(code)
+            result["position"] = pos
+
+            # 4. 전략 파라미터
+            result["sl_pct"] = float(getattr(self._scan_cfg, "jdm_stop_loss_pct", -1.5))
+
+            # 5. 트레일 스탑가
+            if pos and hasattr(pos, "trail_stop_price"):
+                result["trail_price"] = pos.trail_stop_price
+
+            return result
+        except Exception as e:
+            logger.error("[차트데이터] 조회 오류 — %s: %s", code, e)
+            return result
+
     def tick_investor_refresh(self) -> bool:
         """수급 갱신 타이머 콜백 — 시간·상태 조건 충족 시 TR 호출. 반환: 조회 여부"""
         if not getattr(self._scan_cfg, "investor_filter_enabled", False):
