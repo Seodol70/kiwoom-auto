@@ -157,28 +157,35 @@ class DatabaseManager:
 
     def upsert_trade(self, trade_key: str, data: dict):
         """매매 내역 Insert 또는 Update"""
+        self.upsert_trades_batch([(trade_key, data)])
+
+    def upsert_trades_batch(self, trade_list: list[tuple[str, dict]]):
+        """매매 내역 대량 Insert 또는 Update (트랜잭션 활용)"""
+        if not trade_list:
+            return
+            
         from contextlib import closing
         try:
-            columns = list(data.keys())
-            placeholders = ", ".join(["?" for _ in columns])
-            update_stmt = ", ".join([f"{col}=excluded.{col}" for col in columns if col != 'trade_key'])
-            
-            # trade_key가 이미 있으면 update, 없으면 insert (SQLite 3.24+)
-            query = f"""
-                INSERT INTO trades (trade_key, {", ".join(columns)})
-                VALUES (?, {placeholders})
-                ON CONFLICT(trade_key) DO UPDATE SET
-                    {update_stmt},
-                    updated_at=CURRENT_TIMESTAMP
-            """
-            
-            params = [trade_key] + [data[col] for col in columns]
-            
             with closing(self._get_connection()) as conn:
-                conn.execute(query, params)
+                for trade_key, data in trade_list:
+                    columns = list(data.keys())
+                    placeholders = ", ".join(["?" for _ in columns])
+                    update_stmt = ", ".join([f"{col}=excluded.{col}" for col in columns if col != 'trade_key'])
+                    
+                    query = f"""
+                        INSERT INTO trades (trade_key, {", ".join(columns)})
+                        VALUES (?, {placeholders})
+                        ON CONFLICT(trade_key) DO UPDATE SET
+                            {update_stmt},
+                            updated_at=CURRENT_TIMESTAMP
+                    """
+                    params = [trade_key] + [data[col] for col in columns]
+                    conn.execute(query, params)
+                
                 conn.commit()
+                logger.debug("[DatabaseManager] %d건 배치 upsert 완료", len(trade_list))
         except Exception as e:
-            logger.error("[DatabaseManager] upsert_trade 실패 (key=%s): %s", trade_key, e)
+            logger.error("[DatabaseManager] upsert_trades_batch 실패: %s", e)
 
     def insert_signal(self, data: dict):
         """AI 학습용 신호 데이터 저장"""

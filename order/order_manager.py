@@ -670,12 +670,6 @@ class OrderManager(QObject):
                 self.order_failed.emit(msg)
                 return
 
-        # [NEW] 당일 손절 블랙리스트 — 손절 종목 당일 재매수 차단 (익절은 허용)
-        if code in self._stop_loss_today:
-            msg = f"손절 재매수 차단 — {name}({code}) 당일 손절 이력 있음"
-            logger.info(msg)
-            self.order_failed.emit(msg)
-            return
 
         if len(self.positions) + len(self._pending) >= self.max_positions:
             msg = f"최대 보유 종목 수 초과 ({self.max_positions}종목) — {name}({code}) 신호 대기열 등록"
@@ -789,7 +783,8 @@ class OrderManager(QObject):
             
             # 1. 하드 스탑 (-3.0% 등) — 즉시 탈출
             if pos.pnl_pct <= _hard:
-                logger.warning("🚨 [하드스탑] %s(%s) 임계치 돌파 (%.2f%%) — 즉시 매도", pos.name, code, pos.pnl_pct)
+                logger.warning("🚨 [하드스탑] %s(%s) 임계치 돌파 (%.2f%%) — 즉시 매도 및 블랙리스트 등록", pos.name, code, pos.pnl_pct)
+                self.mark_stop_loss(code)
                 self.force_sell(code)
                 return
 
@@ -801,7 +796,8 @@ class OrderManager(QObject):
                 else:
                     elapsed = (datetime.now() - pos.sl_triggered_at).total_seconds()
                     if elapsed >= 3.0:
-                        logger.warning("📉 [확정손절] %s(%s) 3초간 손절가 하회 — 매도 실행", pos.name, code)
+                        logger.warning("📉 [확정손절] %s(%s) 3초간 손절가 하회 — 매도 및 블랙리스트 등록", pos.name, code)
+                        self.mark_stop_loss(code)
                         self.force_sell(code)
                     else:
                         logger.debug("⏳ [손절대기] %s 관찰 중... (%.1fs)", pos.name, elapsed)
@@ -1001,18 +997,6 @@ class OrderManager(QObject):
     def _is_buy_allowed(self, code: str, name: str) -> bool:
         """매수 직전 강제 차단 (유니버스 필터 + 전역 리스크 필터)."""
         # 0) 전역 리스크 및 지수 급락 체크 (AppState 기반)
-        if self.state:
-            if self.state.risk_locked:
-                msg = f"매수 차단 — 리스크 잠금 상태 (손절 한도 초과 등) ({name})"
-                logger.warning(msg)
-                self.order_failed.emit(msg)
-                return False
-            if self.state.is_crash:
-                msg = f"매수 차단 — 지수 급락 감지 상태 ({name})"
-                logger.warning(msg)
-                self.order_failed.emit(msg)
-                return False
-
         from scanner.universe import is_pure_equity_name
         
         # 1) 이름 키워드 차단
@@ -1031,6 +1015,13 @@ class OrderManager(QObject):
         if any(w in state for w in blocked_words):
             msg = f"매수 차단 — 위험 상태 종목 ({name} {code}, 상태={state or '없음'})"
             logger.warning(msg)
+            self.order_failed.emit(msg)
+            return False
+
+        # 3) 당일 손절 블랙리스트 차단 (익절/수동매도 시에는 재진입 허용)
+        if code in self._stop_loss_today:
+            msg = f"매수 차단 — {name}({code}) 당일 손절 블랙리스트 종목"
+            logger.info(msg)
             self.order_failed.emit(msg)
             return False
 

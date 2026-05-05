@@ -364,25 +364,42 @@ class TradeAuditLogger:
         """
         미완 행 전부를 CSV에 저장한다.
         장 마감 또는 프로그램 종료 시(closeEvent) 호출.
-
-        Args:
-            status_override: 지정하면 모든 미완 행의 final_status를 이 값으로 덮어쓴다.
-                             None이면 현재 단계에 따라 PARTIAL / SIGNAL_ONLY 자동 결정.
         """
         try:
             with self._lock:
-                for key in list(self._pending_rows.keys()):
-                    row        = self._pending_rows[key]
-                    cur_status = row.get("final_status", "SIGNAL_ONLY")
-                    if status_override:
-                        row["final_status"] = status_override
-                    elif cur_status in (
-                        "ORDERED", "BOUGHT", "SELL_DECIDED", "SELL_ORDERED"
-                    ):
-                        row["final_status"] = "PARTIAL"
-                    # SIGNAL_ONLY는 그대로 유지
-                    self._flush_row(key)
-                self._pending_rows.clear()
-            logger.info("[TradeAudit] flush_all 완료")
+                if not self._pending_rows:
+                    return
+
+                self._check_date_rollover()
+                path = self._csv_path()
+                db_batch = []
+
+                # CSV 파일 한 번만 열어서 모두 쓰기
+                with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
+                    
+                    for key in list(self._pending_rows.keys()):
+                        row        = self._pending_rows[key]
+                        cur_status = row.get("final_status", "SIGNAL_ONLY")
+                        if status_override:
+                            row["final_status"] = status_override
+                        elif cur_status in ("ORDERED", "BOUGHT", "SELL_DECIDED", "SELL_ORDERED"):
+                            row["final_status"] = "PARTIAL"
+                        
+                        # 1. CSV 행 추가
+                        writer.writerow(row)
+                        
+                        # 2. DB 배치 목록에 추가
+                        if self.db:
+                            db_data = {k: (None if v == "" else v) for k, v in row.items()}
+                            db_batch.append((key, db_data))
+                            
+                        del self._pending_rows[key]
+
+                # 3. DB 배치 저장 (한 번의 트랜잭션)
+                if db_batch and self.db:
+                    self.db.upsert_trades_batch(db_batch)
+
+            logger.info("[TradeAudit] flush_all 완료 (%d건)", len(db_batch) if db_batch else 0)
         except Exception:
             logger.exception("[TradeAudit] flush_all 오류")
