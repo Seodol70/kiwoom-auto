@@ -637,18 +637,27 @@ class PortfolioWorker(QObject):
         self._om = order_manager
         self._tc = trading_controller
         self._balance_result: dict = {}  # Step 1 결과 임시 저장
+        self._timers: list[QTimer] = []  # 생명주기 관리용 타이머 목록
 
+
+    def _schedule_retry(self, delay_ms: int, fn) -> None:
+        """타이머로 콜백 스케줄. stop() 시 취소 가능하게 관리."""
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(fn)
+        t.start(delay_ms)
+        self._timers.append(t)
 
     @pyqtSlot()
     def sync(self) -> None:
         """Step 1: balance TR만 실행 → 350ms 후 Step 2 (holdings) 실행."""
         _kw = getattr(self._om, "_kiwoom", None)
-        
+
         # _tr_busy 또는 _scan_in_progress 중이면 3초 뒤 재시도
         scan_busy = self._tc and getattr(self._tc, '_scan_in_progress', False)
-        
+
         if (_kw and getattr(_kw, "_tr_busy", False)) or scan_busy:
-            QTimer.singleShot(3000, self.sync)
+            self._schedule_retry(3000, self.sync)
             return
         try:
             self._om._roll_daily_state_if_needed()
@@ -657,7 +666,7 @@ class PortfolioWorker(QObject):
                 return  # TR 차단 또는 서버 응답 없음
             self._balance_result = balance
             # 350ms 뒤 Step 2 실행 — event loop이 다른 이벤트 처리 가능
-            QTimer.singleShot(350, self._sync_step2)
+            self._schedule_retry(350, self._sync_step2)
         except Exception as e:
             self.log_message.emit(f"[잔고갱신 오류 step1] {e}")
 
@@ -668,7 +677,7 @@ class PortfolioWorker(QObject):
         _kw = getattr(self._om, "_kiwoom", None)
         if _kw and getattr(_kw, "_tr_busy", False):
             # 다른 TR이 끼어든 경우 — 1초 뒤 다시 시도
-            QTimer.singleShot(1000, self._sync_step2)
+            self._schedule_retry(1000, self._sync_step2)
             return
         try:
             cash = self._om._sync_with_balance(self._balance_result)
@@ -681,7 +690,10 @@ class PortfolioWorker(QObject):
 
 
     def stop(self) -> None:
-        pass   # QTimer 정지는 MainWindow에서 처리
+        """모든 예약된 타이머 취소 — 좀비 콜백 방지"""
+        for t in self._timers:
+            t.stop()
+        self._timers.clear()
 
 
 

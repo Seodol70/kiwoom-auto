@@ -318,6 +318,13 @@ class HeaderBar(QWidget):
             "잔고 동기화 시 opt10074 계좌 당일 실현손익에, 그 이후 앱에서 받은 매도 체결 손익을 더한 값입니다."
         )
 
+    def set_auto_checked(self, checked: bool) -> None:
+        """자동매매 버튼 상태 공개 인터페이스"""
+        self._btn_auto.setChecked(checked)
+
+    def set_overnight_checked(self, checked: bool) -> None:
+        """야간보유 버튼 상태 공개 인터페이스"""
+        self._btn_overnight.setChecked(checked)
 
     @pyqtSlot(float, float, float, float, bool)
     def set_index(self, kospi_current: float, kospi_chg: float,

@@ -104,7 +104,7 @@ class SignalManager:
         ms.overnight_timecut.connect(self.tc.check_overnight_timecut)
         ms.phase1_cutoff.connect(lambda: self.tc.liquidate_phase1_positions(forced=True))
         ms.phase1_trail.connect(lambda: self.tc.liquidate_phase1_positions(forced=False))
-        ms.overnight_auto_enabled.connect(lambda: self.win.header._btn_overnight.setChecked(True))
+        ms.overnight_auto_enabled.connect(lambda: self.win.header.set_overnight_checked(True))
         ms.overnight_auto_enabled.connect(lambda: self.win._on_overnight_mode_toggle(True))
 
         # 리스크 매니저
@@ -138,8 +138,8 @@ class SignalManager:
 
     def _bind_context_updates(self):
         """중앙 상태 관리자와 UI 동기화"""
-        self.state.auto_trading_changed.connect(self.win.header._btn_auto.setChecked)
-        self.state.overnight_mode_changed.connect(self.win.header._btn_overnight.setChecked)
+        self.state.auto_trading_changed.connect(self.win.header.set_auto_checked)
+        self.state.overnight_mode_changed.connect(self.win.header.set_overnight_checked)
         self.state.market_data_updated.connect(self.win._on_market_data_updated)
         self.state.account_changed.connect(self.win.header.set_connected)
         self.state.log_requested.connect(self.win.append_log)
