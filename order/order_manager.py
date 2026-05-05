@@ -248,6 +248,12 @@ class OrderManager(QObject):
         # 포지션 실시간 현재가 구독 콜백 (SmartScanner에서 주입)
         self.on_position_opened: Optional[Callable[[str], None]] = None
         self.on_position_closed: Optional[Callable[[str], None]] = None
+        
+        self._snap_store = None # [NEW] 호가 잔량 확인용
+
+    def set_snapshot_store(self, store) -> None:
+        """호가 잔량 확인을 위해 SnapshotStore 인스턴스를 주입받는다."""
+        self._snap_store = store
 
         self.state = None  # AppState 주입용
         self._health = None  # HealthMonitor 주입용
@@ -752,6 +758,17 @@ class OrderManager(QObject):
             qty = max(1, int(qty * pyramid_ratio))
             order_log.info("[피라미딩사이징] 수량 조절 (ratio %.1f): %d주", pyramid_ratio, qty)
 
+        # ✅ [NEW] 호가 잔량 기반 슬리피지 방지 (Liquidity-Aware Sizing)
+        # 매수 수량이 현재 매도 총잔량의 30%를 넘지 않도록 제한
+        if self._snap_store:
+            snap = self._snap_store.get_snapshot(code)
+            if snap and snap.total_ask_qty > 0:
+                liquidity_limit = max(1, int(snap.total_ask_qty * 0.3))
+                if qty > liquidity_limit:
+                    order_log.info("[사이징] 호가잔량 부족 조정: %d -> %d주 (매도잔량 %d의 30%%)", 
+                                   qty, liquidity_limit, snap.total_ask_qty)
+                    qty = liquidity_limit
+
         self.buy(code, name, qty, price=0)  # 시장가 매수
 
     @pyqtSlot(str, int, int)
@@ -762,9 +779,38 @@ class OrderManager(QObject):
         # position_repo 를 통해 포지션 현재가 갱신
         if hasattr(self, "position_repo"):
             self.position_repo.update_price(code, price)
-        # 폴백: position_repo 없을 경우 직접 갱신
+        # ─── [NEW] 실시간 침착한 손절 (3초 유예 로직) ───────────────────────
         if code in self.positions:
-            self.positions[code].current_price = price
+            pos = self.positions[code]
+            pos.current_price = price
+            
+            _sl = float(cfg.RISK.get("stop_loss_pct", -1.2))
+            _hard = float(cfg.RISK.get("hard_stop_pct", -3.0))
+            
+            # 1. 하드 스탑 (-3.0% 등) — 즉시 탈출
+            if pos.pnl_pct <= _hard:
+                logger.warning("🚨 [하드스탑] %s(%s) 임계치 돌파 (%.2f%%) — 즉시 매도", pos.name, code, pos.pnl_pct)
+                self.force_sell(code)
+                return
+
+            # 2. 일반 손절 (-1.2% 등) — 3초 유예
+            if pos.pnl_pct <= _sl:
+                if pos.sl_triggered_at is None:
+                    pos.sl_triggered_at = datetime.now()
+                    logger.info("⏳ [손절대기] %s(%s) 손절가 하회 (%.2f%%) — 3초 관찰 시작", pos.name, code, pos.pnl_pct)
+                else:
+                    elapsed = (datetime.now() - pos.sl_triggered_at).total_seconds()
+                    if elapsed >= 3.0:
+                        logger.warning("📉 [확정손절] %s(%s) 3초간 손절가 하회 — 매도 실행", pos.name, code)
+                        self.force_sell(code)
+                    else:
+                        logger.debug("⏳ [손절대기] %s 관찰 중... (%.1fs)", pos.name, elapsed)
+            else:
+                # 가격이 다시 회복되면 타이머 초기화 (털기 방지의 핵심)
+                if pos.sl_triggered_at is not None:
+                    logger.info("✅ [손절취소] %s(%s) 가격 회복 (%.2f%%) — 보유 유지", pos.name, code, pos.pnl_pct)
+                    pos.sl_triggered_at = None
+
         # 추세 레벨 갱신
         self.update_position_trend(code, trend_level)
 

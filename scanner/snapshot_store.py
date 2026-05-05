@@ -176,9 +176,12 @@ class SnapshotStore:
                     logger.warning("[SnapshotStore] %s 시세 캐시 업데이트 오류: %s", code, e)
 
                 st.change_pct    = float(new_df.at[code, "change_pct"])    if "change_pct"    in new_df.columns else 0.0
-                st.volume        = int(new_df.at[code, "volume"])          if "volume"        in new_df.columns else 0
                 st.trade_amount  = int(new_df.at[code, "trade_amount"])    if "trade_amount"  in new_df.columns else 0
                 st.prev_close    = int(new_df.at[code, "prev_close"])      if "prev_close"    in new_df.columns else st.prev_close
+                
+                # [NEW] 초기 누적 데이터 설정 (VWAP 보정용)
+                if st.cumulative_volume == 0: st.cumulative_volume = st.volume
+                if st.cumulative_amount == 0: st.cumulative_amount = st.trade_amount
                 st.updated_at = datetime.now()
 
         logger.debug("[SnapshotStore.bulk_update] 적재 완료 — df 행수=%d", len(self._df))
@@ -196,6 +199,8 @@ class SnapshotStore:
         volume:       int,
         trade_amount: int = None,
         change_pct:   float = None,
+        cum_vol:      int = 0,
+        cum_amt:      int = 0,
     ) -> None:
         """실시간 체결 한 틱을 해당 종목 상태에 반영한다."""
         with self._lock:
@@ -208,7 +213,21 @@ class SnapshotStore:
             if change_pct is not None:
                 st.change_pct = change_pct
             
-            st.volume = volume
+            # [NEW] 틱 거래량(차분) 계산: 누적 데이터가 들어오면 이전 누적치와 비교
+            tick_vol = 0
+            if cum_vol > 0:
+                if st.cumulative_volume > 0:
+                    tick_vol = max(0, cum_vol - st.cumulative_volume)
+                else:
+                    # 최초 수신 시에는 현재 틱 거래량을 알 수 없으므로 0 혹은 volume(보통 0으로 처리)
+                    tick_vol = 0
+                st.cumulative_volume = cum_vol
+            
+            if cum_amt > 0:
+                st.cumulative_amount = cum_amt
+
+            # st.volume(누적) 업데이트
+            st.volume = cum_vol if cum_vol > 0 else volume
             if trade_amount is not None:
                 st.trade_amount = trade_amount
             
@@ -218,15 +237,15 @@ class SnapshotStore:
             if hasattr(st, "chejan_str") and st.chejan_str > 0:
                 st.chejan_history.append(st.chejan_str)
 
-            # 2. 틱 속도 계산용 히스토리 갱신
+            # 2. 틱 속도 계산용 히스토리 갱신 (누적이 아닌 '순수 틱 거래량' 사용)
             _ts_now = time.monotonic()
-            st.tick_ts_vol.append((_ts_now, volume))
+            st.tick_ts_vol.append((_ts_now, tick_vol))
             _cutoff_70 = _ts_now - 70.0
             while st.tick_ts_vol and st.tick_ts_vol[0][0] < _cutoff_70:
                 st.tick_ts_vol.popleft()
 
-            # 3. [Phase 3] 분봉 프로세서 위임
-            completed = self._processor.process_tick(code, float(current_price), volume)
+            # 3. [Phase 3] 분봉 프로세서 위임 (순수 틱 거래량 사용)
+            completed = self._processor.process_tick(code, float(current_price), tick_vol)
             if completed:
                 def _append_limit(lst, val, limit=120):
                     lst.append(val)
@@ -334,6 +353,8 @@ class SnapshotStore:
             trend_prev_level = trend_prev_lv,
             chejan_strength  = chejan_str,
             chejan_history   = chejan_hist,
+            cumulative_volume = st.cumulative_volume,
+            cumulative_amount = st.cumulative_amount,
             market_type      = m_type,
             rank             = safe_int_cell("rank", 0),
             rsi              = _rsi_cached,

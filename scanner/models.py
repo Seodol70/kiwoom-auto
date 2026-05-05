@@ -24,6 +24,8 @@ class InternalStockState:
     prev_close: int = 0
     volume: int = 0
     trade_amount: int = 0
+    cumulative_volume: int = 0  # FID 15 (당일거래량)
+    cumulative_amount: int = 0  # FID 13 (누적거래대금, 단위: 천원)
     change_pct: float = 0.0
     market_type: str = "10" # "0": KOSPI, "10": KOSDAQ
     
@@ -112,6 +114,17 @@ class StockSnapshot:
     lows_1min: list[float] = field(default_factory=list)
     volumes_1min: list[int] = field(default_factory=list)
 
+    # 누적 데이터 (True VWAP 계산용)
+    cumulative_volume: int = 0  # FID 15 (당일거래량)
+    cumulative_amount: int = 0  # FID 13 (누적거래대금, 단위: 천원)
+
+    @property
+    def vwap(self) -> Optional[float]:
+        """당일 누적 데이터를 기반으로 한 정확한 VWAP (True VWAP)"""
+        if self.cumulative_volume > 0:
+            return (self.cumulative_amount * 1000.0) / self.cumulative_volume
+        return None
+
     # 수급 정보
     foreign_net_buy: int = 0
     inst_net_buy: int = 0
@@ -125,6 +138,7 @@ class StockSnapshot:
     chejan_strength: float = 100.0  # 체결강도
     chejan_history: list[float] = field(default_factory=list) # 체결강도 히스토리
     rs_score: float = 0.0           # 지수 대비 강도 (Stock% - Index%)
+    sl_triggered_at: Optional[datetime] = None # [NEW] 손절가 하회 시작 시각
 
     @property
     def foreign_net(self) -> int: return self.foreign_net_buy

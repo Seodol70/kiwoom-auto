@@ -744,31 +744,30 @@ class SmartScanner(QObject):
 
         # 주식체결 처리
         try:
-            price = safe_int(fid(10))
-            vol   = safe_int(fid(13))
-            # [FIX] FID 14는 "누적거래금액"이 아니라 "현재 틱의 거래금액"
-            # → opt10030의 누적 거래대금을 보존하기 위해 실시간 업데이트 제외
-            high  = safe_int(fid(17))
-            low   = safe_int(fid(18))
-            open_ = safe_int(fid(16))
-            pct   = safe_float(fid(12))
+            price    = safe_int(fid(10))
+            cum_vol  = safe_int(fid(15))  # [FIX] FID 15: 당일거래량 (누적)
+            cum_amt  = safe_int(fid(13))  # [FIX] FID 13: 누적거래대금 (단위: 천원)
+            high     = safe_int(fid(17))
+            low      = safe_int(fid(18))
+            open_    = safe_int(fid(16))
+            pct      = safe_float(fid(12))
             strength_raw = safe_float(fid(20))    # [NEW] FID 20: 체결강도
-            # FID 20은 일부 상황에서 실제값의 100배로 반환됨 (e.g., 91818 → 918.18%)
-            # 10000 이상이면 100으로 나눠서 정규화
+            
+            # FID 20 정규화 (10000 이상이면 100으로 나눔)
             strength = strength_raw / 100.0 if strength_raw >= 10000.0 else strength_raw
-
 
             if price <= 0:
                 return   # 유효하지 않은 체결 데이터
 
-
-            # ① DataFrame 갱신 (API 재호출 없음)
-            # trade_amount는 opt10030의 누적값을 유지 (FID 14는 현재 틱만 포함)
+            # ① DataFrame 및 상태 갱신
+            # 누적 거래량(cum_vol)과 누적 거래대금(cum_amt)을 직접 전달하여 VWAP 정밀도 확보
             self.store.update_price(
                 code=code, current_price=price, high_price=high,
-                low_price=low, open_price=open_, volume=vol,
-                trade_amount=None,  # ← 거래대금은 opt10030 값만 사용
+                low_price=low, open_price=open_, volume=cum_vol,
+                trade_amount=cum_amt,
                 change_pct=pct,
+                cum_vol=cum_vol,
+                cum_amt=cum_amt,
             )
             snap_now = self.store.get_snapshot(code)
             amt = int(snap_now.trade_amount) if snap_now else 0
