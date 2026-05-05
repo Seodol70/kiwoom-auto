@@ -65,7 +65,7 @@ class MainWindowUI:
         self.chart_panel = ChartPanel()
         right_v.addWidget(self.portfolio_panel)
         right_v.addWidget(self.chart_panel)
-        right_v.setSizes([320, 520])   # 보유현황:차트 ≈ 38:62
+        right_v.setSizes([560, 280])   # 보유현황:차트 ≈ 66:33 (차트 크기 축소)
         h_split.addWidget(right_v)
 
         # 4 : 6 비율

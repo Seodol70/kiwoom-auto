@@ -153,9 +153,37 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self._fb_thread.start()
 
     def closeEvent(self, event) -> None:
-        """프로그램 종료 시 자원 정리"""
-        self.append_log("👋 프로그램 종료 중...")
-        if self._tg: self._tg.stop()
+        """프로그램 종료 시 자원 정리 및 스레드 조기 중단"""
+        self.append_log("👋 프로그램 종료 중... (자원 정리 중)")
+        logger.info("[MainWindow] 종료 절차 시작")
+
+        try:
+            # 1. 타이머 중단
+            if hasattr(self, "_log_timer"): self._log_timer.stop()
+            if hasattr(self, "_port_refresh_timer"): self._port_refresh_timer.stop()
+            if hasattr(self, "_scan_refresh_timer"): self._scan_refresh_timer.stop()
+
+            # 2. 백그라운드 워커/스레드 안전 종료
+            if hasattr(self, "_scan_worker"):
+                self._scan_worker.stop()
+            
+            if hasattr(self, "_scan_thread") and self._scan_thread.isRunning():
+                self._scan_thread.quit()
+                if not self._scan_thread.wait(1000): # 최대 1초 대기
+                    logger.warning("[MainWindow] 스캐너 스레드 강제 종료")
+                    self._scan_thread.terminate()
+
+            # 3. 텔레그램 봇 중단
+            if self._tg: 
+                self._tg.stop()
+
+            # 4. 키움 API 세션 정리 (필요 시)
+            # self._kiwoom.logout() 등
+
+        except Exception as e:
+            logger.error("[MainWindow] 종료 처리 중 오류: %s", e)
+        
+        logger.info("[MainWindow] 종료 절차 완료")
         super().closeEvent(event)
 
 

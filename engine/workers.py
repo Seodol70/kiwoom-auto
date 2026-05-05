@@ -48,6 +48,11 @@ class ScannerWorker(QObject):
         self._UI_INTERVAL: float = 3.0
 
 
+    def stop(self) -> None:
+        """스캐너 루프 중단"""
+        self._running = False
+        logger.info("[ScannerWorker] 중단 신호 수신")
+
     @pyqtSlot()
     def run(self) -> None:
         import logging as _logging
@@ -188,13 +193,16 @@ class ScannerWorker(QObject):
                             else:           _trend_text = "횡보"
 
                 # ② 신호 판단 — candidate_codes에만 수행
+                # ② 신호 판단 — candidate_codes에만 수행 (UI 표시용)
                 if code in candidate_codes:
                     sig_type, reason = self._evaluate_signal(
                         code, snap, row, candidate_codes, _slot, _now_t, _log, self._cfg, _is
                     )
-                    signal_cnt += self._maybe_emit_signal(
-                        snap, sig_type, reason, code, _log, _tnow, snap.investor_score
-                    )
+                    # [2026-05-05 Refactor] 의사결정 일원화
+                    # 주문 신호 발행(emit)은 SmartScanner에서 전담하므로 여기서는 스킵합니다.
+                    # signal_cnt += self._maybe_emit_signal(...)
+                    if sig_type:
+                        signal_cnt += 1 
                 else:
                     self._signal_prev_active[code] = False
 

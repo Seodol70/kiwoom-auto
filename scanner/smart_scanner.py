@@ -1149,19 +1149,30 @@ class SmartScanner(QObject):
                 logger.debug("[SmartScanner] 보유종목 청산되었으나 감시 상위권이므로 구독 유지: %s", code)
 
     def _ensure_candle_data(self, top_codes: list[str]) -> None:
-        """부족한 분봉 데이터를 비동기적으로 로딩하도록 예약한다."""
+        """부족한 분봉 데이터를 비동기적으로 로딩하도록 예약한다. (장초반 Turbo 모드 포함)"""
+        from datetime import time as _time
+        now_t = datetime.now().time()
+        # [NEW] 장 초반(09:00~09:10) Turbo 모드 판정
+        is_opening = _time(9, 0) <= now_t <= _time(9, 10)
+        
         min_bars = 55
-        load_max = 6
+        load_max = 30 if is_opening else 6  # 장초반에는 더 많이
         codes_need_all = [c for c in top_codes if self.store.get_candle_count(c) < min_bars]
         
-        if not self._initial_candle_load_done:
-            codes_need = codes_need_all
-            logger.info("[주기 스캔] 첫 일괄 로딩 시작 (%d종목)", len(codes_need))
+        # 첫 실행이거나 장초반이면 더 공격적으로 전체 로딩 시도
+        if not self._initial_candle_load_done or is_opening:
+            codes_need = codes_need_all if is_opening else codes_need_all[:50]
+            if is_opening:
+                logger.info("[TurboWarmup] 장초반 공격적 로딩 시작 (%d종목)", len(codes_need))
+            elif not self._initial_candle_load_done:
+                logger.info("[주기 스캔] 첫 일괄 로딩 시작 (%d종목)", len(codes_need))
         else:
             codes_need = codes_need_all[:load_max]
 
         if codes_need:
-            QTimer.singleShot(500, lambda c=list(codes_need): self._load_candles_async(c, 0))
+            # 장초반에는 200ms 후 즉시 시작
+            delay = 200 if is_opening else 500
+            QTimer.singleShot(delay, lambda c=list(codes_need): self._load_candles_async(c, 0))
 
     def _print_diagnostic_logs(self) -> None:
         """진단용 로그를 출력한다."""
@@ -1410,8 +1421,11 @@ class SmartScanner(QObject):
             logger.warning("[STEP-H async] %s 1분봉 로딩 실패: %s", code, e)
 
 
-        # 다음 종목을 350ms 후 처리 (TR 간격 0.25s + 여유 100ms)
-        QTimer.singleShot(350, lambda: self._load_candles_async(codes, idx + 1))
+        # 다음 종목을 비동기 처리
+        from datetime import time as _time
+        is_opening = _time(9, 0) <= datetime.now().time() <= _time(9, 10)
+        interval = 250 if is_opening else 350  # 장초반 Turbo: 0.25초 (최소 간격)
+        QTimer.singleShot(interval, lambda: self._load_candles_async(codes, idx + 1))
 
 
     # ── 수급 필터: opt10059 10분 주기 갱신 ────────────────────────────────────

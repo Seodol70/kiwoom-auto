@@ -659,17 +659,22 @@ class OrderManager(QObject):
                             name, code, self.positions[code].pnl_pct)
                 # 추가 진입 허용 (아래 로직 계속 진행)
             else:
-                logger.debug("중복 매수 방지 — %s 이미 보유 중 (피라미딩 조건 미충족)", code)
+                msg = f"중복 매수 차단 — {name}({code}) 이미 보유 중 (피라미딩 조건 미충족)"
+                logger.debug(msg)
+                self.order_failed.emit(msg)
                 return
 
         # [NEW] 당일 손절 블랙리스트 — 손절 종목 당일 재매수 차단 (익절은 허용)
         if code in self._stop_loss_today:
-            logger.info("손절 재매수 차단 — %s(%s) 당일 손절 이력", name, code)
+            msg = f"손절 재매수 차단 — {name}({code}) 당일 손절 이력 있음"
+            logger.info(msg)
+            self.order_failed.emit(msg)
             return
 
         if len(self.positions) + len(self._pending) >= self.max_positions:
-            msg = f"최대 보유 종목 수 초과 ({self.max_positions}종목) — 신호 대기열 등록"
+            msg = f"최대 보유 종목 수 초과 ({self.max_positions}종목) — {name}({code}) 신호 대기열 등록"
             logger.info(msg)
+            self.order_failed.emit(msg)
             self._queued_signal = signal   # 매도 체결 완료 시 자동 실행
             return
 
