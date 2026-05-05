@@ -806,13 +806,12 @@ class KiwoomManager(KiwoomProtocol):
     def get_stock_name(self, code: str) -> str:
         """종목명 조회 (CP949 인코딩 보정)"""
         raw_name = self._ocx.dynamicCall("GetMasterCodeName(QString)", code).strip()
+        if not raw_name:
+            return ""
         try:
-            # CP949 인코딩 보정 (키움API 특성)
-            if raw_name and any(ord(c) > 127 for c in raw_name):
-                return raw_name  # 이미 유니코드
-            else:
-                return raw_name.encode('latin-1').decode('cp949') if raw_name else ""
-        except Exception:
+            # CP949 → UTF-8 변환 (키움API는 CP949 인코딩)
+            return raw_name.encode('latin-1').decode('cp949')
+        except (UnicodeDecodeError, UnicodeEncodeError, AttributeError):
             return raw_name
 
     # -----------------------------------------------------------------------

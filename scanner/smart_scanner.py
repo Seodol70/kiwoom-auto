@@ -994,14 +994,12 @@ class SmartScanner(QObject):
                         # GetMasterCodeName의 CP949 인코딩 보정
                         raw_name = self._kiwoom._ocx.dynamicCall("GetMasterCodeName(QString)", [code])
                         try:
-                            # str로 온 것이 CP949 인코딩인 경우 변환 시도
-                            if raw_name and any(ord(c) > 127 for c in raw_name):
-                                # 이미 유니코드라면 그대로 사용
-                                name = raw_name
+                            # CP949 → UTF-8 변환 (키움API는 CP949 인코딩)
+                            if raw_name:
+                                name = raw_name.encode('latin-1').decode('cp949')
                             else:
-                                # CP949로 인코딩된 것을 UTF-8로 변환
-                                name = raw_name.encode('latin-1').decode('cp949') if raw_name else ""
-                        except Exception:
+                                name = ""
+                        except (UnicodeDecodeError, UnicodeEncodeError, AttributeError):
                             # 변환 실패 시 원본 사용
                             name = raw_name or ""
 
