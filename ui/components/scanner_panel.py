@@ -130,10 +130,11 @@ class ScannerPanel(QWidget):
                 item = self._table.item(r, c)
                 if not item:
                     item = QTableWidgetItem(text)
+                    item.setFont(QFont("Malgun Gothic", 9))
                     self._table.setItem(r, c, item)
                 else:
                     item.setText(text)
-                
+
                 item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignRight if c >= 2 else Qt.AlignLeft))
                 if c in (2, 3): item.setForeground(color)
                 if c == 6:

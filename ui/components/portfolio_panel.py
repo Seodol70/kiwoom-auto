@@ -134,6 +134,7 @@ class PortfolioPanel(QWidget):
     def _make_item(self, text: str, align_right: bool = False,
                    fg: Optional[QColor] = None) -> QTableWidgetItem:
         item = QTableWidgetItem(text)
+        item.setFont(QFont("Malgun Gothic", 9))
         item.setTextAlignment(
             Qt.AlignVCenter | (Qt.AlignRight if align_right else Qt.AlignLeft)
         )

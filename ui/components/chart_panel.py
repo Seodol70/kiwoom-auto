@@ -58,6 +58,10 @@ class ChartPanel(QWidget):
         self._price_plot.getAxis("left").setTickFont(_font)
         self._price_plot.getAxis("bottom").setTickFont(_font)
         self._price_plot.getAxis("bottom").setStyle(showValues=False)
+        # 축 레이블 폰트 설정
+        for axis_name in ["left", "bottom"]:
+            axis = self._price_plot.getAxis(axis_name)
+            axis.label.setFont(_font)
 
 
         self._fill_base  = self._price_plot.plot(pen=None)
@@ -95,7 +99,8 @@ class ChartPanel(QWidget):
 
         # 범례
         leg = self._price_plot.addLegend(offset=(10, 10))
-        # Legend item text 폰트는 스타일 옵션이나 레이블 직접 조작 필요 (일단 기본 유지)
+        # 범례 텍스트 폰트 설정
+        leg.setLabelTextSize("9pt")
 
 
         # 거래량 플롯 (하단 30%)
@@ -105,6 +110,10 @@ class ChartPanel(QWidget):
         self._volume_plot.getAxis("left").setTickFont(_font)
         self._volume_plot.getAxis("bottom").setTickFont(_font)
         self._volume_plot.setLabel("bottom", "분봉 (분)")
+        # 축 레이블 폰트 설정
+        for axis_name in ["left", "bottom"]:
+            axis = self._volume_plot.getAxis(axis_name)
+            axis.label.setFont(_font)
         self._volume_plot.setXLink(self._price_plot)
         self._vol_bars = pg.BarGraphItem(x=[], height=[], width=0.7, pen=None)
         self._volume_plot.addItem(self._vol_bars)
