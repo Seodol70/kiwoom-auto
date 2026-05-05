@@ -192,10 +192,12 @@ class MainWindowSlots:
 
     @pyqtSlot(str, str, int)
     def _on_manual_buy(self, code: str, name: str, price: int) -> None:
-        """수동 매수 다이얼로그 호출"""
+        """수동 매수 다이얼로그 호출 및 주문 실행"""
         dlg = ManualBuyDialog(code, name, price, parent=self)
         if dlg.exec() == QDialog.Accepted:
-            pass # ManualBuyDialog 내부에서 주문 처리 시그널 발생
+            qty, otype, oprice = dlg.result_values()
+            ok, msg = self.trading_controller.manual_buy(code, name, qty, oprice, otype)
+            self.append_log(f"📤 [수동매수] {msg}")
 
     @pyqtSlot(dict)
     def _on_portfolio_refresh(self, data: dict) -> None:

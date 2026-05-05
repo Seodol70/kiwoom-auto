@@ -222,9 +222,9 @@ class IndicatorService:
         return summary
 
     @staticmethod
-    def get_ai_features(snap: 'StockSnapshot') -> Dict[str, float]:
+    def get_ai_features(snap: 'StockSnapshot', index_history: dict[str, list[float]] = None, config: any = None) -> dict[str, float]:
         """
-        AI 학습용 정규화된 피처 벡터 생성 (고급 피처 포함).
+        AI 모델 학습/추론에 사용할 20종 이상의 정규화된 피처를 생성한다.
         """
         features = {}
         closes = snap.closes_1min
@@ -369,6 +369,53 @@ class IndicatorService:
                 features["f_candle_body"] = 0.0
                 features["f_candle_upper_tail"] = 0.0
                 features["f_candle_lower_tail"] = 0.0
+
+            # 17. 지수 가속도 (Market Velocity)
+            if index_history:
+                # 종목의 시장(코스피/코스닥) 결정
+                m_type = "KOSDAQ" if getattr(snap, "market_type", "10") == "10" else "KOSPI"
+                hist = index_history.get(m_type, [])
+                if len(hist) >= 3:
+                    velocity = hist[-1] - hist[-3] # 3분간의 변화량
+                    features["f_index_velocity"] = np.clip(velocity * 5.0, -1.0, 1.0)
+                else:
+                    features["f_index_velocity"] = 0.0
+            else:
+                features["f_index_velocity"] = 0.0
+
+            # 18. 호가 유동성 점수 (Liquidity Depth)
+            # 주문 금액 대비 매수 호가 잔량 확인
+            target_amount = 1_500_000 # 기본 주문 금액 150만원
+            if config:
+                target_amount = getattr(config, "fixed_order_amount", 1_500_000)
+            
+            total_bid_val = getattr(snap, "total_bid_qty", 0) * snap.current_price
+            if target_amount > 0:
+                liq_score = total_bid_val / (target_amount * 10) # 주문량의 10배 이상이면 1.0
+                features["f_liquidity_score"] = np.clip(liq_score, 0.0, 1.0)
+            else:
+                features["f_liquidity_score"] = 1.0
+
+            # 19. VI 거리 (VI Distance)
+            # 정적 VI 기준 (시가 대비 10% 단위로 가정 - 단순화)
+            if snap.open_price > 0:
+                vi_price = snap.open_price * 1.1 # 1차 정적 VI
+                if snap.current_price > vi_price: # 이미 1차 통과 시 2차 (20%)
+                     vi_price = snap.open_price * 1.2
+                
+                dist_to_vi = (vi_price / snap.current_price) - 1.0
+                features["f_vi_distance"] = np.clip(dist_to_vi * 10.0, 0.0, 1.0) # 10% 남았을 때 1.0, 0%일 때 0.0
+            else:
+                features["f_vi_distance"] = 0.5
+
+            # 20. 수급 지속성 (Strength Continuity)
+            chejan_hist = getattr(snap, "chejan_history", [])
+            if len(chejan_hist) >= 3:
+                avg_chejan = sum(chejan_hist[-3:]) / 3
+                continuity = snap.chejan_strength / (avg_chejan + 0.1)
+                features["f_strength_continuity"] = np.clip(continuity / 2.0, 0.0, 1.0)
+            else:
+                features["f_strength_continuity"] = 0.5
 
         except Exception as e:
             logger.error(f"AI 피처 생성 실패: {snap.code}, {e}")

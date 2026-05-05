@@ -68,6 +68,7 @@ class ApplicationContext(QObject):
         # ── SmartScanner ──
         self.smart_scanner = SmartScanner(self.kiwoom, self.scan_cfg)
         self.smart_scanner.store = self.snap_store
+        self.smart_scanner.app_context = self # [NEW] 지수 가속도 등 피처 계산을 위해 컨텍스트 주입
         
         # ── HealthMonitor ──
         def _on_freeze_handler():

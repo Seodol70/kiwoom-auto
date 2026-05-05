@@ -25,6 +25,7 @@ class InternalStockState:
     volume: int = 0
     trade_amount: int = 0
     change_pct: float = 0.0
+    market_type: str = "10" # "0": KOSPI, "10": KOSDAQ
     
     # 호가 잔량
     total_ask_qty: int = 0
@@ -48,6 +49,7 @@ class InternalStockState:
     trend_level: int = 0
     trend_prev_level: int = 0
     sector: str = ""
+    chejan_history: _Deque = field(default_factory=lambda: _Deque(maxlen=20)) # 체결강도 이력
     updated_at: datetime = field(default_factory=datetime.now)
     
     # 틱 데이터 (초당 거래 속도 계산용)
@@ -81,6 +83,7 @@ class StockSnapshot:
     volume: int
     trade_amount: int
     change_pct: float
+    market_type: str = "10"
     
     # 호가 잔량
     total_ask_qty: int = 0
@@ -120,6 +123,7 @@ class StockSnapshot:
 
     # 기타 지표
     chejan_strength: float = 100.0  # 체결강도
+    chejan_history: list[float] = field(default_factory=list) # 체결강도 히스토리
     rs_score: float = 0.0           # 지수 대비 강도 (Stock% - Index%)
 
     @property

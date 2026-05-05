@@ -99,6 +99,7 @@ class SnapshotStore:
             st = self._states.get(code)
             return len(st.mins) if st else 0
 
+    _NUM_COLS = [
         "current_price", "open_price", "high_price", "low_price",
         "volume", "trade_amount", "prev_close", "change_pct", "rank",
         "prev_volume", "vol_ratio", "total_ask_qty", "total_bid_qty",
@@ -213,6 +214,10 @@ class SnapshotStore:
             
             st.updated_at = datetime.now()
 
+            # [NEW] 체결강도 히스토리 업데이트
+            if hasattr(st, "chejan_str") and st.chejan_str > 0:
+                st.chejan_history.append(st.chejan_str)
+
             # 2. 틱 속도 계산용 히스토리 갱신
             _ts_now = time.monotonic()
             st.tick_ts_vol.append((_ts_now, volume))
@@ -279,6 +284,8 @@ class SnapshotStore:
             trend_lv      = st.trend_level
             trend_prev_lv = st.trend_prev_level
             chejan_str    = st.chejan_str
+            chejan_hist   = list(st.chejan_history)
+            m_type        = getattr(st, "market_type", "10")
 
         nm = row_copy.get("name", "")
         name_s = str(nm) if nm is not None else ""
@@ -326,6 +333,8 @@ class SnapshotStore:
             trend_level     = trend_lv,
             trend_prev_level = trend_prev_lv,
             chejan_strength  = chejan_str,
+            chejan_history   = chejan_hist,
+            market_type      = m_type,
             rank             = safe_int_cell("rank", 0),
             rsi              = _rsi_cached,
             updated_at       = updated_at,

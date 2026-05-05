@@ -426,6 +426,14 @@ class SmartScanner(QObject):
 
 
         top_codes = self.top_mgr.get_top_codes()
+        # market_type 태깅
+        with self.store._lock:
+            for m in self.cfg.markets:
+                m_codes = self._kiwoom.get_code_list_by_market(m)
+                for c in m_codes:
+                    if c in self.store._states:
+                        self.store._states[c].market_type = m
+
         self.watch_q.refresh(top_codes)
         self._prefiltered = True
 
@@ -575,8 +583,9 @@ class SmartScanner(QObject):
         reason = " | ".join(r for r in [r_breakout, r_gate] if r)
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
         
-        # [NEW] AI 피처 추출
-        ai_features = IndicatorService.get_ai_features(snap)
+        # [NEW] AI 피처 추출 (지수 가속도, 호가 유동성 등 20종)
+        idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
+        ai_features = IndicatorService.get_ai_features(snap, index_history=idx_hist, config=self.cfg)
         
         return ScanSignal(
             snap.code, snap.name, "BREAKOUT", snap.current_price, reason,
@@ -612,7 +621,8 @@ class SmartScanner(QObject):
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
         
         # [NEW] AI 피처 추출
-        ai_features = IndicatorService.get_ai_features(snap)
+        idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
+        ai_features = IndicatorService.get_ai_features(snap, index_history=idx_hist, config=self.cfg)
         
         # 일봉 맥락 — TP 상향 여부 판단
         from scanner.indicator_service import IndicatorService
@@ -642,7 +652,8 @@ class SmartScanner(QObject):
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
         
         # [NEW] AI 피처 추출
-        ai_features = IndicatorService.get_ai_features(snap)
+        idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
+        ai_features = IndicatorService.get_ai_features(snap, index_history=idx_hist, config=self.cfg)
         
         return ScanSignal(
             snap.code, snap.name, "PULLBACK", snap.current_price, r_pullback,

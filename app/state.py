@@ -34,6 +34,10 @@ class AppState(QObject):
         # 내부 상태 저장소
         self._auto_trading = False
         self._overnight_mode = False
+        self.kospi_chg: float = 0.0
+        self.kosdaq_chg: float = 0.0
+        self.index_history: dict[str, list[float]] = {"KOSPI": [], "KOSDAQ": []}
+        self.max_history: int = 10  # 최근 10분 지수 저장
         self._tp_pct = 3.0
         self._sl_pct = -2.5
         self._account = "—"
@@ -172,6 +176,16 @@ class AppState(QObject):
     @property
     def is_crash(self) -> bool:
         with self._lock: return self._is_crash
+
+    def update_index(self, kospi: float, kosdaq: float) -> None:
+        with self._lock:
+            self.kospi_chg = kospi
+            self.kosdaq_chg = kosdaq
+            # 히스토리 업데이트
+            for name, val in [("KOSPI", kospi), ("KOSDAQ", kosdaq)]:
+                self.index_history[name].append(val)
+                if len(self.index_history[name]) > self.max_history:
+                    self.index_history[name].pop(0)
 
     def update_market_data(self, kp_cur: float, kp_chg: float, kd_cur: float, kd_chg: float, is_crash: bool):
         with self._lock:
