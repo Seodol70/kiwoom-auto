@@ -427,7 +427,10 @@ class TradingController(QObject):
             # HealthMonitor ACK
             if self._health_monitor:
                 self._health_monitor.ack()
-            
+
+            # 지수 급락 감지 (코스피/코스닥 지수 갱신)
+            self.check_market_crash()
+
             top_codes = []
             if self._smart_scanner:
                 top_codes = self._smart_scanner.run_periodic_scan(on_progress=None)

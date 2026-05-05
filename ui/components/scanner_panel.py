@@ -49,7 +49,11 @@ class ScannerPanel(QWidget):
 
         self._table = QTableWidget(0, len(self._HEADERS))
         self._table.setHorizontalHeaderLabels(self._HEADERS)
+        # 한글 폰트 설정 (깨짐 방지)
+        table_font = QFont("Malgun Gothic", 9)
+        self._table.setFont(table_font)
         hdr = self._table.horizontalHeader()
+        hdr.setFont(QFont("Malgun Gothic", 9))
         hdr.setSectionResizeMode(QHeaderView.Interactive)
         hdr.setStretchLastSection(False)
         col_widths = [65, 120, 78, 60, 95, 65, 80, 42]

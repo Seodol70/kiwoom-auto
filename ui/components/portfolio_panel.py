@@ -110,7 +110,11 @@ class PortfolioPanel(QWidget):
 
         self._table = QTableWidget(0, len(self._HEADERS))
         self._table.setHorizontalHeaderLabels(self._HEADERS)
+        # 한글 폰트 설정 (깨짐 방지)
+        table_font = QFont("Malgun Gothic", 9)
+        self._table.setFont(table_font)
         hdr = self._table.horizontalHeader()
+        hdr.setFont(QFont("Malgun Gothic", 9))
         hdr.setSectionResizeMode(QHeaderView.Interactive)
         hdr.setStretchLastSection(False)
         # 컬럼별 최적 너비 (코드/명/수량/평균단가/현재가/수익률/손익/상태/수동매도)
