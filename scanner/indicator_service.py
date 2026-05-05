@@ -372,8 +372,10 @@ class IndicatorService:
 
             # 17. 지수 가속도 (Market Velocity)
             if index_history:
-                # 종목의 시장(코스피/코스닥) 결정
-                m_type = "KOSDAQ" if getattr(snap, "market_type", "10") == "10" else "KOSPI"
+                # 종목의 시장(코스피/코스닥) 결정 — StockSnapshot.market_type 사용
+                # "0": KOSPI, "10": KOSDAQ
+                m_code = getattr(snap, "market_type", "10")
+                m_type = "KOSDAQ" if m_code == "10" else "KOSPI"
                 hist = index_history.get(m_type, [])
                 if len(hist) >= 3:
                     velocity = hist[-1] - hist[-3] # 3분간의 변화량

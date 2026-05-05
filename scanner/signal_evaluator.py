@@ -353,13 +353,18 @@ def check_ema20_filter(snap: StockSnapshot, period: int = 20) -> Optional[str]:
 
 def check_vwap_filter(snap: StockSnapshot) -> Optional[str]:
     """VWAP 필터 — 현재가가 당일 VWAP 위에 있어야 진입 허용."""
-    closes = snap.closes_1min
-    vols = snap.volumes_1min
-    if not closes or not vols or len(closes) != len(vols):
-        return None
-        
-    from scanner.indicator_service import IndicatorService
-    vwap = IndicatorService.calc_vwap(np.array(closes), np.array(vols))
+    # [NEW] 우선순위: snap.vwap (당일 누적 데이터 기반 True VWAP)
+    # 이 방식은 장중 재시작 시에도 100% 정확한 VWAP을 보장함.
+    vwap = snap.vwap
+    
+    # 누적 데이터가 없으면 분봉 기반으로 fallback (최초 데이터 수신 전 대비)
+    if vwap is None:
+        closes = snap.closes_1min
+        vols = snap.volumes_1min
+        if closes and vols and len(closes) == len(vols):
+            from scanner.indicator_service import IndicatorService
+            vwap = IndicatorService.calc_vwap(np.array(closes), np.array(vols))
+            
     if vwap is None:
         return None
         

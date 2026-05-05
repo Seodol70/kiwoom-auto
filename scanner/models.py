@@ -138,6 +138,7 @@ class StockSnapshot:
     chejan_strength: float = 100.0  # 체결강도
     chejan_history: list[float] = field(default_factory=list) # 체결강도 히스토리
     rs_score: float = 0.0           # 지수 대비 강도 (Stock% - Index%)
+    exec_velocity_ratio: float = 0.0 # [NEW] 체결 가속도 (10초 체결량 / 1분 평균 10초량)
     sl_triggered_at: Optional[datetime] = None # [NEW] 손절가 하회 시작 시각
 
     @property

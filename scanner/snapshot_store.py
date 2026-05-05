@@ -324,6 +324,20 @@ class SnapshotStore:
                 _r = IndicatorService.calc_rsi(closes_list, 14)
                 if _r is not None and _r > 0: _rsi_cached = float(_r)
             except Exception: pass
+            
+        # [NEW] 체결 가속도(Execution Velocity) 계산 — 10초 체결량 vs 1분 평균
+        # ratio=0.0 은 데이터 부족(fail-open)
+        _vel_ratio = 0.0
+        with self._lock:
+            ts_vol = list(st.tick_ts_vol)
+            if ts_vol:
+                _now = time.monotonic()
+                _v10 = sum(v for t, v in ts_vol if t >= _now - 10.0)
+                _v60 = sum(v for t, v in ts_vol if t >= _now - 60.0)
+                if _v60 > 0:
+                    # 1분 평균 10초량 = _v60 / 6
+                    _avg10 = _v60 / 6.0
+                    _vel_ratio = _v10 / _avg10 if _avg10 > 0 else 0.0
 
         return StockSnapshot(
             code          = code,
@@ -358,6 +372,7 @@ class SnapshotStore:
             market_type      = m_type,
             rank             = safe_int_cell("rank", 0),
             rsi              = _rsi_cached,
+            exec_velocity_ratio = _vel_ratio,
             updated_at       = updated_at,
         )
 

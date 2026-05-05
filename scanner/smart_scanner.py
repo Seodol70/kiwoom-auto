@@ -426,13 +426,8 @@ class SmartScanner(QObject):
 
 
         top_codes = self.top_mgr.get_top_codes()
-        # market_type 태깅
-        with self.store._lock:
-            for m in self.cfg.markets:
-                m_codes = self._kiwoom.get_code_list_by_market(m)
-                for c in m_codes:
-                    if c in self.store._states:
-                        self.store._states[c].market_type = m
+        # [NEW] 모든 감시 종목에 대해 시장 구분(KOSPI/KOSDAQ) 태깅
+        self._tag_market_types()
 
         self.watch_q.refresh(top_codes)
         self._prefiltered = True
@@ -1496,6 +1491,20 @@ class SmartScanner(QObject):
 
 
         QTimer.singleShot(350, lambda: self._refresh_investor_data_async(codes, idx + 1, 0))
+
+
+    def _tag_market_types(self) -> None:
+        """현재 SnapshotStore에 적재된 모든 종목의 시장 구분(KOSPI/KOSDAQ)을 태깅한다."""
+        try:
+            with self.store._lock:
+                for m in self.cfg.markets: # ("0", "10")
+                    m_codes = self._kiwoom.get_code_list_by_market(m)
+                    for c in m_codes:
+                        if c in self.store._states:
+                            self.store._states[c].market_type = m
+            logger.debug("[SmartScanner] 시장 구분 태깅 완료 (KOSPI/KOSDAQ)")
+        except Exception as e:
+            logger.warning("[SmartScanner] 시장 구분 태깅 실패: %s", e)
 
 
 
