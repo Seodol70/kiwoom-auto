@@ -207,8 +207,7 @@ class IndicatorService:
     @staticmethod
     def get_ai_features(snap: 'StockSnapshot') -> Dict[str, float]:
         """
-        AI 학습용 정규화된 피처 벡터 생성.
-        모든 값은 가능한 0~1 또는 -1~1 사이로 정규화되도록 함.
+        AI 학습용 정규화된 피처 벡터 생성 (고급 피처 포함).
         """
         features = {}
         closes = snap.closes_1min
@@ -216,39 +215,36 @@ class IndicatorService:
             return {}
 
         try:
-            # 1. RSI (0~100 -> 0~1)
-            rsi = IndicatorService.calc_rsi(closes, 14)
+            arr = np.array(closes)
+            # 1. RSI (0~1)
+            rsi = IndicatorService.calc_rsi(arr, 14)
             features["f_rsi"] = (rsi / 100.0) if rsi is not None else 0.5
             
             # 2. 이평선 이격도 (현재가/EMA20 - 1.0)
-            ema20 = IndicatorService.calc_ema(closes, 20)
+            ema20 = IndicatorService.calc_ema(arr, 20)
             if ema20 and ema20 > 0:
-                # -0.1 ~ 0.1 범위를 주로 가짐 -> 클리핑 후 매핑
                 gap = (snap.current_price / ema20) - 1.0
-                features["f_ema20_gap"] = np.clip(gap * 5.0, -1.0, 1.0) # 5배 증폭하여 변별력 확보
+                features["f_ema20_gap"] = np.clip(gap * 5.0, -1.0, 1.0)
             else:
                 features["f_ema20_gap"] = 0.0
                 
-            # 3. 볼린저 밴드 위치 (Percent B: (Price - Lower)/(Upper - Lower))
-            bb = IndicatorService.calc_bollinger_bands(closes, 20)
+            # 3. 볼린저 밴드 위치 (Percent B)
+            bb = IndicatorService.calc_bollinger_bands(arr, 20)
             if bb and (bb["upper"] - bb["lower"]) > 0:
                 pct_b = (snap.current_price - bb["lower"]) / (bb["upper"] - bb["lower"])
                 features["f_pct_b"] = np.clip(pct_b, 0.0, 1.0)
             else:
                 features["f_pct_b"] = 0.5
 
-            # 4. 거래량 Surge (최근 1분 거래량 / 최근 20분 평균 거래량)
+            # 4. 거래량 Surge (최근 1분 / 직전 20분 평균)
             vols = snap.volumes_1min
             if len(vols) >= 20:
                 avg_vol = np.mean(vols[-20:-1])
-                if avg_vol > 0:
-                    features["f_vol_surge"] = min(vols[-1] / avg_vol, 10.0) / 10.0 # 10배 상한
-                else:
-                    features["f_vol_surge"] = 0.0
+                features["f_vol_surge"] = min(vols[-1] / avg_vol, 10.0) / 10.0 if avg_vol > 0 else 0.0
             else:
                 features["f_vol_surge"] = 0.0
 
-            # 5. 등락률 (당일 등락률 / 30% 상한)
+            # 5. 등락률 (0~30% -> 0~1)
             features["f_change_pct"] = np.clip(snap.change_pct / 30.0, -1.0, 1.0)
             
             # 6. 체결강도 (0~500 -> 0~1)
@@ -256,6 +252,44 @@ class IndicatorService:
             
             # 7. 추세 단계 (0~3 -> 0~1)
             features["f_trend"] = snap.trend_level / 3.0
+
+            # --- [NEW] 고급 피처 추가 ---
+            
+            # 8. 가격 모멘텀 (최근 3분 변화율)
+            if len(arr) >= 4:
+                price_mom = (arr[-1] / arr[-4]) - 1.0
+                features["f_price_mom"] = np.clip(price_mom * 10.0, -1.0, 1.0) # 10% 변화 시 1.0
+            else:
+                features["f_price_mom"] = 0.0
+
+            # 9. 당일 가격 범위 내 위치 (Intra-day Position)
+            if snap.high_price > snap.low_price:
+                intra_pos = (snap.current_price - snap.low_price) / (snap.high_price - snap.low_price)
+                features["f_intra_pos"] = np.clip(intra_pos, 0.0, 1.0)
+            else:
+                features["f_intra_pos"] = 0.5
+
+            # 10. 최근 10분 변동성 (Volatility)
+            if len(arr) >= 10:
+                recent_range = (np.max(arr[-10:]) - np.min(arr[-10:])) / snap.current_price
+                features["f_volatility"] = np.clip(recent_range * 20.0, 0.0, 1.0) # 5% 변동 시 1.0
+            else:
+                features["f_volatility"] = 0.0
+
+            # 11. 이평선 정배열도 (MA Alignment)
+            ma5 = np.mean(arr[-5:])
+            ma10 = np.mean(arr[-10:])
+            ma20 = np.mean(arr[-20:])
+            if ma5 > ma10 > ma20:
+                features["f_ma_align"] = 1.0
+            elif ma5 > ma10:
+                features["f_ma_align"] = 0.5
+            else:
+                features["f_ma_align"] = 0.0
+
+            # 12. 시장 지수 대비 강도 (Relative Strength)
+            # snap.rs_score 활용 (Stock% - Index%)
+            features["f_rs_score"] = np.clip(snap.rs_score / 5.0, -1.0, 1.0) # 5% 초과 달성 시 1.0
 
         except Exception as e:
             logger.error(f"AI 피처 생성 실패: {snap.code}, {e}")

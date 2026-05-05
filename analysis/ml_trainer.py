@@ -21,10 +21,9 @@ class MLTrainer:
         
         # 학습에 사용할 특성(Features) 정의
         self.feature_cols = [
-            'signal_price', 'rsi_at_signal', 'ma_short_at_signal', 'ma_long_at_signal',
-            'ema_short_at_signal', 'ema_long_at_signal', 'chejan_strength_at_signal',
-            'volume_ratio_at_signal', 'change_pct_at_signal', 'kospi_chg_at_signal',
-            'kosdaq_chg_at_signal', 'investor_score_at_signal', 'rs_score'
+            "f_rsi", "f_ema20_gap", "f_pct_b", "f_vol_surge", 
+            "f_change_pct", "f_strength", "f_trend",
+            "f_price_mom", "f_intra_pos", "f_volatility", "f_ma_align", "f_rs_score"
         ]
 
     def load_data(self):
@@ -32,7 +31,8 @@ class MLTrainer:
         if not os.path.exists(self.db_path):
             return pd.DataFrame()
             
-        query = "SELECT * FROM trades WHERE final_status = 'COMPLETED'"
+        # signals 테이블에서 데이터 로드 (결과값은 추후 라벨링 로직 필요)
+        query = "SELECT * FROM signals"
         try:
             with sqlite3.connect(self.db_path) as conn:
                 df = pd.read_sql_query(query, conn)

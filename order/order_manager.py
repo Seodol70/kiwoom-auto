@@ -35,6 +35,23 @@ _FEE = cfg.COST.get("fee_rate", 0.00015)
 _TAX = cfg.COST.get("tax_rate", 0.0023)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 주문 대기 메타데이터 (Phase G-1: 7개 pending dict → 단일 dataclass)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class PendingOrderMeta:
+    """주문 체결 대기 중 추적하는 종목별 메타데이터."""
+    candle_stop: int = 0                    # 진입 캔들 저가 (체결 시 Position에 반영)
+    trend_level: int = 0                    # 추세 레벨
+    trend_prev_level: int = 0               # 이전 추세 레벨
+    near_daily_high: bool = False           # 일봉 고점 근처 여부
+    custom_tp_pct: float = 0.0              # 커스텀 익절 %
+    sector: str = ""                        # 업종명 (섹터 쏠림 방지용)
+    eod_trade: bool = False                 # EOD 거래 플래그
+    entry_phase: int = 0                    # 진입 페이즈 (1=모닝스캘핑, 2=메인)
+
+
 # ---------------------------------------------------------------------------
 # 상수
 # ---------------------------------------------------------------------------
@@ -188,12 +205,7 @@ class OrderManager(QObject):
         self._pending:  set[str] = set()                 # 주문 중 종목 (중복 방지)
         self._pending_sell_time: dict[str, datetime] = {}  # 매도 주문 접수 시각
         self._app_pending_buys: dict[str, int] = {}       # code -> 남은 앱 매수 주문 수량 (부분체결 추적)
-        self._pending_candle_stop: dict[str, int] = {}    # code -> 진입 캔들 저가 (체결 시 Position에 반영)
-        self._pending_trend: dict[str, tuple[int, int]] = {}  # code -> (trend_level, trend_prev_level)
-        self._pending_near_high: dict[str, tuple[bool, float]] = {}  # code -> (near_daily_high, custom_tp_pct)
-        self._pending_sector: dict[str, str] = {}          # code -> 업종명 (섹터 쏠림 방지용)
-        self._pending_eod: dict[str, bool] = {}                      # code -> eod_trade flag
-        self._pending_entry_phase: dict[str, int] = {}               # code -> entry_phase (1=모닝스캘핑, 2=메인)
+        self._pending_meta: dict[str, PendingOrderMeta] = {}  # code -> 주문 메타데이터 (Phase G-1)
         self._pnl_date: date = date.today()
         # 당일 실현손익 = 파일에서 복구한 이전 세션 합 + 이번 세션 매도 체결 합
         self.daily_realized_pnl: int = 0
@@ -716,21 +728,17 @@ class OrderManager(QObject):
             self.order_failed.emit(msg)
             return
 
-        # 진입 캔들 저가 임시 보관 → 체결 콜백에서 Position에 반영
-        candle_low = getattr(signal, "entry_candle_low", 0)
-        if candle_low > 0:
-            self._pending_candle_stop[code] = candle_low
-        self._pending_trend[code] = (
-            int(getattr(signal, "trend_level", 0) or 0),
-            int(getattr(signal, "trend_prev_level", 0) or 0),
+        # 진입 메타데이터 임시 보관 → 체결 콜백에서 Position에 반영 (Phase G-1)
+        self._pending_meta[code] = PendingOrderMeta(
+            candle_stop=int(getattr(signal, "entry_candle_low", 0) or 0),
+            trend_level=int(getattr(signal, "trend_level", 0) or 0),
+            trend_prev_level=int(getattr(signal, "trend_prev_level", 0) or 0),
+            near_daily_high=bool(getattr(signal, "near_daily_high", False)),
+            custom_tp_pct=float(getattr(signal, "custom_tp_pct", 0.0)),
+            sector=_sector,
+            eod_trade=bool(getattr(signal, "eod_trade", False)),
+            entry_phase=int(getattr(signal, "entry_phase", 0)),
         )
-        _near_high = bool(getattr(signal, "near_daily_high", False))
-        _ctp = float(getattr(signal, "custom_tp_pct", 0.0))
-        self._pending_near_high[code] = (_near_high, _ctp)
-        self._pending_eod[code] = bool(getattr(signal, "eod_trade", False))
-        self._pending_entry_phase[code] = int(getattr(signal, "entry_phase", 0))
-        self._pending_entry_phase[code] = int(getattr(signal, "entry_phase", 0))
-        self._pending_sector[code] = _sector
 
         # ✅ 피라미딩인 경우 수량 조절 (기본 50%)
         is_pyramid = code in self.positions
@@ -1155,7 +1163,7 @@ class OrderManager(QObject):
             self._pending.discard(code)
             self._pending_buy_time.pop(code, None)
             self._pending_buy_info.pop(code, None)
-            self._pending_sector.pop(code, None)      # 섹터 stale 방지
+            self._pending_meta.pop(code, None)        # 메타데이터 정리 (Phase G-1)
             self._app_pending_buys.pop(code, None)
 
     def sell(
@@ -1368,11 +1376,16 @@ class OrderManager(QObject):
             # [P2] 매수 체결 → 미체결 추적 해제
             self._pending_buy_time.pop(code, None)
             self._pending_buy_info.pop(code, None)
-            trend_level, trend_prev_level = self._pending_trend.pop(code, (0, 0))
-            _near_high, _ctp = self._pending_near_high.pop(code, (False, 0.0))
-            _eod_trade = self._pending_eod.pop(code, False)
-            _entry_phase = self._pending_entry_phase.pop(code, 0)
-            _sector_fill = self._pending_sector.pop(code, "")
+            # Phase G-1: PendingOrderMeta에서 추출
+            meta = self._pending_meta.pop(code, PendingOrderMeta())
+            trend_level = meta.trend_level
+            trend_prev_level = meta.trend_prev_level
+            _near_high = meta.near_daily_high
+            _ctp = meta.custom_tp_pct
+            _eod_trade = meta.eod_trade
+            _entry_phase = meta.entry_phase
+            _sector_fill = meta.sector
+            candle_stop = meta.candle_stop
             if is_app_buy:
                 rem = self._app_pending_buys[code] - filled_qty
                 if rem <= 0:
@@ -1403,7 +1416,6 @@ class OrderManager(QObject):
                     if pos.buy_date is None:
                         pos.buy_date = date.today()
             else:
-                candle_stop = self._pending_candle_stop.pop(code, 0)
                 self.positions[code] = Position(
                     code=code, name=name,
                     qty=filled_qty, avg_price=filled_price,

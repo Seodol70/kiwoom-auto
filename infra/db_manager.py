@@ -105,10 +105,30 @@ class DatabaseManager:
                         f_change_pct REAL,
                         f_strength REAL,
                         f_trend REAL,
+                        f_price_mom REAL,
+                        f_intra_pos REAL,
+                        f_volatility REAL,
+                        f_ma_align REAL,
+                        f_rs_score REAL,
                         is_traded INTEGER DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
+                
+                # 기존 DB에 컬럼이 없을 경우 추가 (Migration)
+                cursor.execute("PRAGMA table_info(signals)")
+                existing_cols = [col[1] for col in cursor.fetchall()]
+                new_cols = [
+                    ("f_price_mom", "REAL"),
+                    ("f_intra_pos", "REAL"),
+                    ("f_volatility", "REAL"),
+                    ("f_ma_align", "REAL"),
+                    ("f_rs_score", "REAL")
+                ]
+                for col_name, col_type in new_cols:
+                    if col_name not in existing_cols:
+                        cursor.execute(f"ALTER TABLE signals ADD COLUMN {col_name} {col_type}")
+                        logger.info("[DatabaseManager] 신규 컬럼 추가: %s", col_name)
                 
                 # 3. 인덱스 생성
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_code ON trades(code)")
