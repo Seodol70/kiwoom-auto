@@ -1409,8 +1409,11 @@ class OrderManager(QObject):
             )
             # 포지션에 반영한 뒤 즉시 청산
             if code in self.positions:
-                _pos = self.positions[code]
-                _pos.qty += filled_qty
+                pos = self.positions[code]
+                total_qty = pos.qty + filled_qty
+                # 가중 평균단가 갱신 (지연 체결분 포함)
+                pos.avg_price = (pos.avg_price * pos.qty + filled_price * filled_qty) // total_qty
+                pos.qty = total_qty
             else:
                 self.positions[code] = Position(
                     code=code, name=name,
@@ -1441,8 +1444,9 @@ class OrderManager(QObject):
                 rem = self._app_pending_buys[code] - filled_qty
                 if rem <= 0:
                     del self._app_pending_buys[code]
-                    # 주문 완전 체결 → 누적 체결량 추적 정리
+                    # 주문 완전 체결 → 누적 체결량 및 주문 중 상태 해제
                     self._order_fill_cumulative.pop(order_no, None)
+                    self._pending.discard(code)
                 else:
                     self._app_pending_buys[code] = rem
 
@@ -1495,7 +1499,10 @@ class OrderManager(QObject):
                 if _eod_trade:
                     logger.info("[EOD] %s(%s) — 종가매매 진입, 당일 강제청산 제외 / 익일 갭 체크 관리",
                                 name, code)
-            self.cash -= filled_qty * filled_price
+            # 예수금 차감 (수수료 포함하여 더 정확하게 계산)
+            buy_amt = filled_qty * filled_price
+            fee = int(buy_amt * _FEE)
+            self.cash -= (buy_amt + fee)
             self._today_fill_log.append({
                 "ts": datetime.now().strftime("%H:%M:%S"),
                 "side": "buy",
