@@ -96,6 +96,8 @@ class ApplicationContext(QObject):
 
         # ── SmartScanner ↔ OrderManager 연결 (의존성 주입) ──
         self.smart_scanner._order_mgr = self.order_mgr
+        self.order_mgr.on_position_opened = self.smart_scanner.register_code_realtime
+        self.order_mgr.on_position_closed = self.smart_scanner.unregister_code_realtime
 
         # ── TradingController 상태 주입 (AppState) ──
         self.trading_controller._ctx = self.state

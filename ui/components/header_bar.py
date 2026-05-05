@@ -66,8 +66,6 @@ class HeaderBar(QWidget):
 
         self._lbl_conn    = self._make("🔌 미연결")
         self._lbl_conn.setObjectName("conn_off")
-        self._lbl_cash    = self._make("💵 예수금: —")
-        self._lbl_pnl     = self._make("💰 실현손익: —")
         
         # ── 지수 & 리스크 상태 ──────────────────────────────────────────
         self._lbl_kospi   = self._make("KOSPI: —")
@@ -166,10 +164,6 @@ class HeaderBar(QWidget):
         lay.addWidget(self._lbl_health_led)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_conn)
-        lay.addWidget(self._divider())
-        lay.addWidget(self._lbl_cash)
-        lay.addWidget(self._divider())
-        lay.addWidget(self._lbl_pnl)
         lay.addWidget(self._divider())
         
         lay.addWidget(self._btn_switch_real)
@@ -303,20 +297,12 @@ class HeaderBar(QWidget):
         self._btn_switch_real.setVisible(True)
 
     def update_cash(self, cash: int) -> None:
-        """가용 예수금 업데이트"""
-        self._lbl_cash.setText(f"💵 예수금: {cash:,}원")
-        # 강조 색상 (청록색)
-        self._lbl_cash.setStyleSheet("color: #94e2d5; font-weight: bold;")
-
+        """가용 예수금 업데이트 (UI 항목 제거로 미사용)"""
+        pass
 
     def set_pnl(self, pnl: int) -> None:
-        sign = "+" if pnl >= 0 else ""
-        self._lbl_pnl.setText(f"💰 실현손익: {sign}{pnl:,}원")
-        color = "#f38ba8" if pnl < 0 else "#a6e3a1"
-        self._lbl_pnl.setStyleSheet(f"color: {color};")
-        self._lbl_pnl.setToolTip(
-            "잔고 동기화 시 opt10074 계좌 당일 실현손익에, 그 이후 앱에서 받은 매도 체결 손익을 더한 값입니다."
-        )
+        """실현손익 업데이트 (UI 항목 제거로 미사용)"""
+        pass
 
     def set_auto_checked(self, checked: bool) -> None:
         """자동매매 버튼 상태 공개 인터페이스"""

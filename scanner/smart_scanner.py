@@ -1118,9 +1118,35 @@ class SmartScanner(QObject):
             self.top_mgr.update(code, amt)
 
     def _refresh_realtime_watch(self, top_codes: list[str]) -> None:
-        """실시간 틱 구독 목록을 갱신한다."""
-        reg_codes = top_codes[:self.cfg.realtime_sub_max]
+        """실시간 틱 구독 목록을 갱신한다. (보유 종목 포함)"""
+        # 1. 감시 리스트 구성: 상위 종목 + 현재 보유 종목 (관리용)
+        held_codes = list(self._order_mgr.positions.keys()) if self._order_mgr else []
+        
+        # 보유 종목은 항상 최상단 우선순위로 등록 (실시간 가격 갱신 보장)
+        # set을 사용하여 중복 제거 후 리스트화
+        combined = list(dict.fromkeys(held_codes + top_codes))
+        
+        # Kiwoom SetRealReg 최대 갯수(약 100개) 제한 고려
+        reg_codes = combined[:self.cfg.realtime_sub_max]
+        
         self.watch_q.refresh(reg_codes)
+
+    def register_code_realtime(self, code: str) -> None:
+        """단일 종목 실시간 시세 등록 (보유 종목 진입 시 즉시 호출)"""
+        if self.watch_q:
+            self.watch_q._sub(code)
+            logger.debug("[SmartScanner] 보유종목 실시간 등록: %s", code)
+
+    def unregister_code_realtime(self, code: str) -> None:
+        """단일 종목 실시간 시세 해제 (포지션 청산 시 호출)"""
+        if self.watch_q:
+            # 단, 해당 종목이 Top N 감시 리스트에 있다면 해제하지 않음
+            top_codes = self.top_mgr.get_top_codes()
+            if code not in top_codes:
+                self.watch_q._unsub(code)
+                logger.debug("[SmartScanner] 보유종목 실시간 해제: %s", code)
+            else:
+                logger.debug("[SmartScanner] 보유종목 청산되었으나 감시 상위권이므로 구독 유지: %s", code)
 
     def _ensure_candle_data(self, top_codes: list[str]) -> None:
         """부족한 분봉 데이터를 비동기적으로 로딩하도록 예약한다."""

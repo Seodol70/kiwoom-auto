@@ -48,8 +48,8 @@ class SignalManager:
         
         # 컨트롤러 피드백
         self.tc.signal_rejected.connect(lambda msg: self.win.append_log(f"❌ [진입거절] {msg}"))
-        # 일반 시스템 메시지는 오른쪽 패널로
-        self.tc.log_message.connect(self.win.log_panel.append_syslog)
+        # [NEW] 감시 및 매매 핵심 로그는 왼쪽 패널(append)로 출력
+        self.tc.log_message.connect(self.win.log_panel.append)
         
         # [NEW] 로그 핸들러 시그널 연결 (SysLogQtHandler -> LogPanel)
         if hasattr(self.win, "_sys_handler"):

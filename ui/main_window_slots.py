@@ -232,8 +232,11 @@ class MainWindowSlots:
     @pyqtSlot()
     def _on_reload_config(self) -> None:
         """설정 파일 재로드"""
-        cfg.load()
-        self.append_log("⚙ [설정] adaptive_params.json 및 전역 설정을 재로드했습니다.")
+        from app.config_manager import config_manager as cfg, reload_adaptive
+        cfg.reload()
+        msg = reload_adaptive(self._scan_cfg)
+        self.append_log(f"⚙ [설정] {msg}")
+        self.append_log("✅ [설정] 전역 및 적응형 설정을 재로드했습니다.")
 
     @pyqtSlot(str)
     def _on_manual_sell(self, code: str) -> None:

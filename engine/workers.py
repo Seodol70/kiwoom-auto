@@ -172,6 +172,10 @@ class ScannerWorker(QObject):
                         snap.trend_level = int(_tlv)
                         self._store.update_trend_level(code, int(_tlv))
 
+                        # [NEW] 강세 추세(Level 3) 진입 시 로그 출력 (왼쪽 모니터링 패널용)
+                        if snap.trend_level >= 3 and (snap.trend_prev_level is None or snap.trend_prev_level < 3):
+                            self.log_message.emit(f"🔥 [추세포착] {name}({code}) 강세 추세 진입 (Level 3)")
+
                         _ema_now = _is.calc_ema(_cl, _ema_p)
                         _atr_now = _is.calc_atr(_hi, _lo, _cl, _atr_p)
                         _down_mult = float(getattr(self._cfg, "yosep_downtrend_block_atr", 0.8))

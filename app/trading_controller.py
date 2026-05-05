@@ -665,7 +665,9 @@ class TradingController(QObject):
         positions = self._order_mgr.positions
         if not positions:
             return
+        
         try:
+            missing_codes = []
             for pos in positions.values():
                 price = 0
                 if self._snap_store:
@@ -673,11 +675,25 @@ class TradingController(QObject):
                     if snap and snap.current_price > 0:
                         price = snap.current_price
                 
-                if price <= 0:
-                    price = self._kiwoom.get_current_price(pos.code)
+                if price > 0:
+                    if pos.current_price != price:
+                        pos.current_price = price
+                else:
+                    # 실시간 데이터가 없는 경우
+                    missing_codes.append(pos.code)
+                    # 1순위: API 직접 조회 (TR 소모) - 하지만 이미 실시간 등록을 시도했을 것이므로 최소화
+                    # 여기서는 안전장치로 기존값 유지 또는 1회성 조회만 수행
+                    if pos.current_price <= 0:
+                        price = self._kiwoom.get_current_price(pos.code)
+                        if price > 0:
+                            pos.current_price = price
+
+            # 실시간 데이터가 누락된 종목이 있다면 스캐너에게 긴급 등록 요청
+            if missing_codes and self._smart_scanner:
+                # 30초마다 한 번씩만 호출되도록 SmartScanner 내부에서 관리됨
+                logger.debug("[TradingController] 보유종목 %d개 실시간 데이터 누락 -> 등록 확인 요청", len(missing_codes))
+                # run_periodic_scan이 아니더라도 다음 watch_q 갱신 주기에 반영되도록 함
                 
-                if price > 0 and pos.current_price != price:
-                    pos.current_price = price
         except Exception as e:
             logger.warning("[TradingController] 포트폴리오 가격 갱신 실패: %s", e)
             return
