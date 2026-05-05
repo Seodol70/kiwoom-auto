@@ -23,7 +23,8 @@ class BreakoutStrategy(BaseStrategy):
     def __init__(self):
         super().__init__("BREAKOUT")
 
-    def evaluate(self, snap: StockSnapshot, cfg: SmartScannerConfig) -> Optional[ScanSignal]:
+    def evaluate(self, snap: StockSnapshot, cfg: SmartScannerConfig, 
+                 index_history: Optional[dict[str, list[float]]] = None) -> Optional[ScanSignal]:
         # 1. 기본 돌파 체크 (SignalEvaluator.check_breakout 로직)
         breakout_reason = self._check_breakout_core(snap, cfg)
         if not breakout_reason:
@@ -39,7 +40,7 @@ class BreakoutStrategy(BaseStrategy):
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
         
         # AI 피처 추출
-        ai_features = IndicatorService.get_ai_features(snap, config=cfg)
+        ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
 
         return ScanSignal(
             snap.code, snap.name, self.name, snap.current_price, reason,

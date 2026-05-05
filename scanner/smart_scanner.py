@@ -554,7 +554,9 @@ class SmartScanner(QObject):
                 logger.warning("[Strategy] 알 수 없는 전략명 스킵 — %s", strategy_name)
                 continue
 
-            sig = strat_obj.evaluate(snap, self.cfg)
+            # [NEW] AI 피처용 지수 히스토리 추출
+            idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
+            sig = strat_obj.evaluate(snap, self.cfg, index_history=idx_hist)
             if sig is not None:
                 sig.trend_level = int(getattr(snap, "trend_level", 0))
                 sig.trend_prev_level = int(getattr(snap, "trend_prev_level", 0))

@@ -22,7 +22,8 @@ class PullbackStrategy(BaseStrategy):
     def __init__(self):
         super().__init__("PULLBACK")
 
-    def evaluate(self, snap: StockSnapshot, cfg: SmartScannerConfig) -> Optional[ScanSignal]:
+    def evaluate(self, snap: StockSnapshot, cfg: SmartScannerConfig, 
+                 index_history: Optional[dict[str, list[float]]] = None) -> Optional[ScanSignal]:
         tlv = int(getattr(snap, "trend_level", 0))
         if tlv < 2: return None
 
@@ -49,7 +50,7 @@ class PullbackStrategy(BaseStrategy):
         reason = f"[PULLBACK] EMA20지지({dist:.2f}%) | RSI {rsi:.1f} | 추세Lv{tlv}"
         
         # AI 피처 추출
-        ai_features = IndicatorService.get_ai_features(snap, config=cfg)
+        ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
 
         return ScanSignal(
             snap.code, snap.name, self.name, snap.current_price, reason,

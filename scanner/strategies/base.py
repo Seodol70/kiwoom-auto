@@ -19,7 +19,8 @@ class BaseStrategy(ABC):
         self.name = name
 
     @abstractmethod
-    def evaluate(self, snap: StockSnapshot, cfg: SmartScannerConfig) -> Optional[ScanSignal]:
+    def evaluate(self, snap: StockSnapshot, cfg: SmartScannerConfig, 
+                 index_history: Optional[dict[str, list[float]]] = None) -> Optional[ScanSignal]:
         """
         종목 스냅샷을 분석하여 진입 신호(ScanSignal) 발생 여부를 결정한다.
         신호 조건 미충족 시 None을 반환한다.
