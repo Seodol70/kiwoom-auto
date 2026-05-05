@@ -23,7 +23,9 @@ class MLTrainer:
         self.feature_cols = [
             "f_rsi", "f_ema20_gap", "f_pct_b", "f_vol_surge", 
             "f_change_pct", "f_strength", "f_trend",
-            "f_price_mom", "f_intra_pos", "f_volatility", "f_ma_align", "f_rs_score"
+            "f_price_mom", "f_intra_pos", "f_volatility", "f_ma_align", "f_rs_score",
+            "f_vwap_dist", "f_mtf_15m_gap", "f_mtf_60m_gap",
+            "f_hoga_ratio", "f_candle_body", "f_candle_upper_tail", "f_candle_lower_tail"
         ]
 
     def load_data(self):

@@ -52,6 +52,7 @@ _DF_COLS = [
     "code", "name",
     "current_price", "open_price", "high_price", "low_price",
     "volume", "trade_amount", "prev_close", "change_pct",
+    "total_ask_qty", "total_bid_qty",
     "rank", "updated_at",
 ]
 
@@ -98,10 +99,9 @@ class SnapshotStore:
             st = self._states.get(code)
             return len(st.mins) if st else 0
 
-    _NUM_COLS = [
         "current_price", "open_price", "high_price", "low_price",
         "volume", "trade_amount", "prev_close", "change_pct", "rank",
-        "prev_volume", "vol_ratio",
+        "prev_volume", "vol_ratio", "total_ask_qty", "total_bid_qty",
     ]
 
     def bulk_update(self, rows: list[dict]) -> None:
@@ -310,7 +310,10 @@ class SnapshotStore:
             trade_amount  = st.trade_amount if st.trade_amount > 0 else safe_int_cell("trade_amount", 0),
             prev_close    = safe_int_cell("prev_close",    0),
             change_pct    = st.change_pct if st.change_pct != 0 else safe_float_cell("change_pct",  0.0),
+            total_ask_qty = st.total_ask_qty if st.total_ask_qty > 0 else safe_int_cell("total_ask_qty", 0),
+            total_bid_qty = st.total_bid_qty if st.total_bid_qty > 0 else safe_int_cell("total_bid_qty", 0),
             closes_1min   = closes_list,
+            opens_1min    = list(st.min_opens),
             highs_1min    = highs_list,
             lows_1min     = lows_list,
             volumes_1min  = vols_list,
@@ -339,6 +342,16 @@ class SnapshotStore:
         if strength > 0:
             with self._lock:
                 self._get_state(code).chejan_str = strength
+
+    def update_hoga(self, code: str, total_ask: int, total_bid: int) -> None:
+        """[NEW] 호가 잔량 갱신."""
+        with self._lock:
+            st = self._get_state(code)
+            st.total_ask_qty = total_ask
+            st.total_bid_qty = total_bid
+            if code in self._df.index:
+                self._df.at[code, "total_ask_qty"] = total_ask
+                self._df.at[code, "total_bid_qty"] = total_bid
 
     def update_sector(self, code: str, sector: str) -> None:
         """[NEW] 업종명 캐시 갱신 — handle_signal()에서 opt10001 응답 후 호출."""

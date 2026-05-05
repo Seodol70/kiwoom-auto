@@ -26,6 +26,10 @@ class InternalStockState:
     trade_amount: int = 0
     change_pct: float = 0.0
     
+    # 호가 잔량
+    total_ask_qty: int = 0
+    total_bid_qty: int = 0
+    
     # 분봉 (1분봉 OHLCV)
     mins: List[float] = field(default_factory=list)
     min_opens: List[float] = field(default_factory=list)
@@ -77,6 +81,10 @@ class StockSnapshot:
     volume: int
     trade_amount: int
     change_pct: float
+    
+    # 호가 잔량
+    total_ask_qty: int = 0
+    total_bid_qty: int = 0
 
     # 지표 (계산 결과)
     rsi: Optional[float] = None
@@ -96,6 +104,7 @@ class StockSnapshot:
 
     # 1분봉 데이터 (외부에서 저장)
     closes_1min: list[float] = field(default_factory=list)
+    opens_1min: list[float] = field(default_factory=list)
     highs_1min: list[float] = field(default_factory=list)
     lows_1min: list[float] = field(default_factory=list)
     volumes_1min: list[int] = field(default_factory=list)

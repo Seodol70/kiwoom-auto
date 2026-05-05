@@ -110,6 +110,13 @@ class DatabaseManager:
                         f_volatility REAL,
                         f_ma_align REAL,
                         f_rs_score REAL,
+                        f_vwap_dist REAL,
+                        f_mtf_15m_gap REAL,
+                        f_mtf_60m_gap REAL,
+                        f_hoga_ratio REAL,
+                        f_candle_body REAL,
+                        f_candle_upper_tail REAL,
+                        f_candle_lower_tail REAL,
                         is_traded INTEGER DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -123,7 +130,14 @@ class DatabaseManager:
                     ("f_intra_pos", "REAL"),
                     ("f_volatility", "REAL"),
                     ("f_ma_align", "REAL"),
-                    ("f_rs_score", "REAL")
+                    ("f_rs_score", "REAL"),
+                    ("f_vwap_dist", "REAL"),
+                    ("f_mtf_15m_gap", "REAL"),
+                    ("f_mtf_60m_gap", "REAL"),
+                    ("f_hoga_ratio", "REAL"),
+                    ("f_candle_body", "REAL"),
+                    ("f_candle_upper_tail", "REAL"),
+                    ("f_candle_lower_tail", "REAL")
                 ]
                 for col_name, col_type in new_cols:
                     if col_name not in existing_cols:

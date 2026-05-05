@@ -68,6 +68,23 @@ class IndicatorService:
         return float(np.mean(closes[-period:]))
 
     @staticmethod
+    def calc_vwap(prices: np.ndarray, volumes: np.ndarray) -> Optional[float]:
+        """당일 VWAP(거래량 가중 평균 가격) 산출"""
+        if len(prices) == 0 or len(prices) != len(volumes):
+            return None
+        
+        # Cumulative Sum(Price * Volume) / Cumulative Sum(Volume)
+        # 단기 매매에서는 당일 전체 데이터를 대상으로 함
+        p_v = prices * volumes
+        sum_pv = np.sum(p_v)
+        sum_v = np.sum(volumes)
+        
+        if sum_v <= 0:
+            return None
+            
+        return float(sum_pv / sum_v)
+
+    @staticmethod
     def calc_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> Optional[float]:
         """Wilder's Smoothing 방식의 ATR 고속 계산"""
         if not closes or len(closes) < period + 1: return None
@@ -290,6 +307,68 @@ class IndicatorService:
             # 12. 시장 지수 대비 강도 (Relative Strength)
             # snap.rs_score 활용 (Stock% - Index%)
             features["f_rs_score"] = np.clip(snap.rs_score / 5.0, -1.0, 1.0) # 5% 초과 달성 시 1.0
+
+            # 13. VWAP 대비 이격도
+            vols = np.array(snap.volumes_1min)
+            vwap = IndicatorService.calc_vwap(arr, vols)
+            if vwap and vwap > 0:
+                vwap_dist = (snap.current_price / vwap) - 1.0
+                features["f_vwap_dist"] = np.clip(vwap_dist * 20.0, -1.0, 1.0) # 5% 이격 시 1.0
+            else:
+                features["f_vwap_dist"] = 0.0
+
+            # 14. 다중 시간 프레임 (MTF) 분석 - AI 학습용
+            # 15분봉 EMA20 추정 (1분봉 300개 사용)
+            if len(arr) >= 200: # 최소 200개 이상일 때만 신뢰
+                ema_15m_20 = IndicatorService.calc_ema(arr, 300)
+                if ema_15m_20 and ema_15m_20 > 0:
+                    mtf_15m_gap = (snap.current_price / ema_15m_20) - 1.0
+                    features["f_mtf_15m_gap"] = np.clip(mtf_15m_gap * 10.0, -1.0, 1.0) # 10% 이격 시 1.0
+                else:
+                    features["f_mtf_15m_gap"] = 0.0
+            else:
+                features["f_mtf_15m_gap"] = 0.0
+
+            # 60분봉 EMA20 추정 (1분봉 1200개... 데이터 부족 시 가능한 최대치 사용)
+            # 여기서는 60분봉의 대략적 추세를 위해 1분봉 400개를 최대한 활용 (약 60분 EMA7에 해당)
+            ema_60m_trend = IndicatorService.calc_ema(arr, min(len(arr), 400))
+            if ema_60m_trend and ema_60m_trend > 0:
+                mtf_60m_gap = (snap.current_price / ema_60m_trend) - 1.0
+                features["f_mtf_60m_gap"] = np.clip(mtf_60m_gap * 5.0, -1.0, 1.0)
+            else:
+                features["f_mtf_60m_gap"] = 0.0
+
+            # 15. 호가 잔량 분석 (Bid-Ask Imbalance) - AI 학습용
+            total_ask = getattr(snap, "total_ask_qty", 0)
+            total_bid = getattr(snap, "total_bid_qty", 0)
+            if total_bid > 0:
+                hoga_ratio = total_ask / total_bid
+                # 보통 매도잔량이 많을 때 매수 에너지가 강함 (흡수)
+                features["f_hoga_ratio"] = np.clip(hoga_ratio / 3.0, 0.0, 1.0) 
+            else:
+                features["f_hoga_ratio"] = 0.0
+
+            # 16. 캔들 패턴 분석 (마지막 완성봉 기준)
+            c_list = snap.closes_1min
+            o_list = snap.opens_1min
+            if len(c_list) >= 1 and len(o_list) >= 1:
+                curr_c, curr_o = c_list[-1], o_list[-1]
+                curr_h = snap.highs_1min[-1] if snap.highs_1min else curr_c
+                curr_l = snap.lows_1min[-1] if snap.lows_1min else curr_c
+                
+                candle_range = curr_h - curr_l
+                if candle_range > 0:
+                    features["f_candle_body"] = (curr_c - curr_o) / candle_range
+                    features["f_candle_upper_tail"] = (curr_h - max(curr_o, curr_c)) / candle_range
+                    features["f_candle_lower_tail"] = (min(curr_o, curr_c) - curr_l) / candle_range
+                else:
+                    features["f_candle_body"] = 0.0
+                    features["f_candle_upper_tail"] = 0.0
+                    features["f_candle_lower_tail"] = 0.0
+            else:
+                features["f_candle_body"] = 0.0
+                features["f_candle_upper_tail"] = 0.0
+                features["f_candle_lower_tail"] = 0.0
 
         except Exception as e:
             logger.error(f"AI 피처 생성 실패: {snap.code}, {e}")

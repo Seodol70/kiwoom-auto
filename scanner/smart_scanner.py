@@ -151,7 +151,7 @@ from scanner.signal_evaluator import (
     check_ema20_filter, check_bullish_engulfing, check_bullish_pin_bar,
     check_breakout_gate, check_pre_surge, check_opening_surge,
     check_opening_scalp, check_eod_entry, check_jdm_entry,
-    check_pullback_entry
+    check_pullback_entry, check_vwap_filter
 )
 
 
@@ -603,8 +603,12 @@ class SmartScanner(QObject):
         if r_jdm is None:
             return None
 
+        # VWAP 필터
+        r_vwap = check_vwap_filter(snap)
+        if r_vwap is None:
+            return None
 
-        reason = " | ".join(r for r in [r_ema20, r_disp, r_jdm] if r)
+        reason = " | ".join(r for r in [r_ema20, r_disp, r_jdm, r_vwap] if r)
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
         
         # [NEW] AI 피처 추출
@@ -628,6 +632,11 @@ class SmartScanner(QObject):
         """PULLBACK_ENTRY 전략 평가 후 통과 시 ScanSignal을 반환한다."""
         r_pullback = check_pullback_entry(snap, self.cfg)
         if r_pullback is None:
+            return None
+            
+        # VWAP 필터
+        r_vwap = check_vwap_filter(snap)
+        if r_vwap is None:
             return None
             
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
@@ -704,18 +713,26 @@ class SmartScanner(QObject):
     def _on_receive_real_data(
         self, code: str, real_type: str, real_data: str
     ) -> None:
-        if real_type not in ("주식체결",):
+        if real_type not in ("주식체결", "주식호가잔량"):
             return
-
 
         def fid(n: int) -> str:
             return self._kiwoom._ocx.dynamicCall(
                 "GetCommRealData(QString, int)", [code, n]
             )
 
+        from kiwoom_api import safe_int, safe_float
 
+        # [NEW] 호가 잔량 처리
+        if real_type == "주식호가잔량":
+            total_ask = safe_int(fid(121)) # 매도총잔량
+            total_bid = safe_int(fid(125)) # 매수총잔량
+            if total_ask > 0 or total_bid > 0:
+                self.store.update_hoga(code, total_ask, total_bid)
+            return
+
+        # 주식체결 처리
         try:
-            from kiwoom_api import safe_int, safe_float
             price = safe_int(fid(10))
             vol   = safe_int(fid(13))
             # [FIX] FID 14는 "누적거래금액"이 아니라 "현재 틱의 거래금액"
@@ -1358,11 +1375,6 @@ class SmartScanner(QObject):
 
         # 다음 종목을 350ms 후 처리 (TR 간격 0.25s + 여유 100ms)
         QTimer.singleShot(350, lambda: self._load_candles_async(codes, idx + 1))
-
-
-    # _init_min_candles_for_top 제거됨 (2025-03 최적화)
-    # SetRealReg 실시간 틱이 SnapshotStore.update_price()에서
-    # 분봉을 자동 누적하므로 opt10080 TR 호출 불필요.
 
 
     # ── 수급 필터: opt10059 10분 주기 갱신 ────────────────────────────────────

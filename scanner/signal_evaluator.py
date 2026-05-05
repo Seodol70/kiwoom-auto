@@ -290,7 +290,7 @@ def check_volume_surge(
 
 def check_chejan_strength(
     snap: StockSnapshot,
-    min_strength: float = 120.0,
+    min_strength: float = 110.0,
 ) -> Optional[str]:
     """[NEW] 체결강도 min_strength% 이상 확인 (매수 수급 우위)."""
     if snap.chejan_strength < min_strength:
@@ -349,6 +349,30 @@ def check_ema20_filter(snap: StockSnapshot, period: int = 20) -> Optional[str]:
         )
         return None
     return f"EMA20상단(현재가={snap.current_price:,}/EMA20={ema20:,.0f})"
+
+
+def check_vwap_filter(snap: StockSnapshot) -> Optional[str]:
+    """VWAP 필터 — 현재가가 당일 VWAP 위에 있어야 진입 허용."""
+    closes = snap.closes_1min
+    vols = snap.volumes_1min
+    if not closes or not vols or len(closes) != len(vols):
+        return None
+        
+    from scanner.indicator_service import IndicatorService
+    vwap = IndicatorService.calc_vwap(np.array(closes), np.array(vols))
+    if vwap is None:
+        return None
+        
+    # [LEARNING_MODE] 공격적 데이터 수집을 위해 VWAP 아래 0.5%까지는 허용
+    vwap_margin = 0.995 
+    if snap.current_price < vwap * vwap_margin:
+        ScannerLogger.rejected(
+            snap.code, snap.name, "VWAP",
+            f"현재가 {snap.current_price:,} < VWAP {vwap:,.0f} (허용범위 미달) — 평균단가 하방",
+        )
+        return None
+        
+    return f"VWAP상단({snap.current_price:,}/{vwap:,.0f})"
 
 
 
@@ -487,8 +511,12 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: SmartScannerConfig) -> Optio
         )
         return None
 
+    # ⑦ VWAP 필터 — 평균단가 상단 확인
+    r_vwap = check_vwap_filter(snap)
+    if r_vwap is None:
+        return None
 
-    return f"[{_slot}] 체결강도 {snap.chejan_strength:.0f}% | 등락률 {_snap_chg:.1f}%"
+    return f"[{_slot}] 체결강도 {snap.chejan_strength:.0f}% | 등락률 {_snap_chg:.1f}% | {r_vwap}"
 
 
 

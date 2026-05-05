@@ -70,7 +70,7 @@ class PriorityWatchQueue:
                 code_list = ";".join(to_add)
                 self._kiwoom._ocx.dynamicCall(
                     "SetRealReg(QString, QString, QString, QString)",
-                    [self._screen, code_list, "10;11;12;13;14;16;17;18;20", "1"],  # [NEW] FID 20: 체결강도
+                    [self._screen, code_list, "10;11;12;13;14;16;17;18;20;121;125", "1"],  # FID 20: 체결강도, 121: 매도잔량, 125: 매수잔량
                 )
                 self._subscribed.update(to_add)
                 logger.debug("[PriorityWatchQueue] SetRealReg 배치 등록 %d종목", len(to_add))
@@ -79,7 +79,7 @@ class PriorityWatchQueue:
     def _sub(self, code: str) -> None:
         self._kiwoom._ocx.dynamicCall(
             "SetRealReg(QString, QString, QString, QString)",
-            [self._screen, code, "10;11;12;13;14;16;17;18;20", "1"],  # [NEW] FID 20: 체결강도
+            [self._screen, code, "10;11;12;13;14;16;17;18;20;121;125", "1"],
         )
         self._subscribed.add(code)
 
