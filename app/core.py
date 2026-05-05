@@ -14,6 +14,7 @@ from app.risk_manager import RiskManager
 from app.state import AppState
 from app.trading_controller import TradingController
 from analysis.health_monitor import HealthMonitor
+from infra.notification_manager import NotificationManager
 from trade_audit_logger import TradeAuditLogger
 from app.config_manager import config_manager as cfg
 
@@ -36,6 +37,9 @@ class ApplicationContext(QObject):
         self.audit = TradeAuditLogger(log_dir="logs")
         self.snap_store = SnapshotStore()
         
+        # ── NotificationManager (v3.0) ──
+        self.notif_mgr = NotificationManager()
+        
         # ── LoginManager ──
         self.login_mgr = LoginManager(self.kiwoom, parent=self)
         
@@ -43,7 +47,8 @@ class ApplicationContext(QObject):
         self.order_mgr = OrderManager(
             self.kiwoom,
             max_positions=cfg.get("max_positions", 5),
-            parent=self
+            parent=self,
+            notification_mgr=self.notif_mgr
         )
         self.order_mgr.set_state(self.state) # AppState 주입
         self.order_mgr.set_snapshot_store(self.snap_store)
@@ -67,7 +72,7 @@ class ApplicationContext(QObject):
             self.scan_cfg.display_top_n = wpm
             
         # ── SmartScanner ──
-        self.smart_scanner = SmartScanner(self.kiwoom, self.scan_cfg)
+        self.smart_scanner = SmartScanner(self.kiwoom, self.scan_cfg, notification_mgr=self.notif_mgr)
         self.smart_scanner.store = self.snap_store
         self.smart_scanner.app_context = self # [NEW] 지수 가속도 등 피처 계산을 위해 컨텍스트 주입
         
@@ -110,6 +115,7 @@ class ApplicationContext(QObject):
                 # TelegramBot 임포트는 지연
                 from telegram_bot import TelegramBot
                 self.tg_bot = TelegramBot(cfg.TELEGRAM["token"], cfg.TELEGRAM["chat_id"], parent=self)
+                self.notif_mgr.set_telegram_bot(self.tg_bot)
             except Exception as e:
                 logger.warning("[텔레그램] 봇 초기화 실패: %s", e)
         

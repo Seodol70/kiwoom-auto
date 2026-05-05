@@ -187,12 +187,14 @@ class OrderManager(QObject):
         max_order_amount: int  = 1_500_000,    # 1회 최대 주문 금액 (원)
         max_positions:   int   = 5,             # 최대 보유 종목 수
         parent: Optional[QObject] = None,
+        notification_mgr: Optional["NotificationManager"] = None,
     ) -> None:
         super().__init__(parent)
         self._kiwoom          = kiwoom
         self._account         = account
         self.max_order_amount = max_order_amount
         self.max_positions    = max_positions
+        self.notif_mgr        = notification_mgr
 
         # OrderExecutor 초기화 (Kiwoom SendOrder 전담)
         from order.order_executor import OrderExecutor
@@ -1554,6 +1556,18 @@ class OrderManager(QObject):
         }
         if avg_buy: payload["avg_buy_price"] = avg_buy
         if self.state: self.state.update_portfolio(self.cash, dict(self.positions))
+
+        # [v3.0] 통합 알림 발송
+        if self.notif_mgr:
+            side_nm = "매수체결" if order_type == OrderType.BUY else "매도체결"
+            res_icon = "💰" if (order_type == OrderType.SELL and realized > 0) else ("📉" if realized < 0 else "🔔")
+            pnl_str = f" (손익: {realized:+,}원)" if order_type == OrderType.SELL else ""
+            self.notif_mgr.info(
+                f"{res_icon} {side_nm}",
+                f"{name}({code}) {filled_qty}주 @ {filled_price:,}원{pnl_str}",
+                telegram=True, sound=True
+            )
+
         self.order_filled.emit(payload)
         
         side_nm = "매수" if order_type == OrderType.BUY else "매도"

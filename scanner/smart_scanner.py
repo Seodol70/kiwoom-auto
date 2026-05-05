@@ -179,10 +179,12 @@ class SmartScanner(QObject):
     signal_detected = pyqtSignal(object)  # ScanSignal 객체 전달
     price_updated = pyqtSignal(str, int, int)  # (code, price, trend_level) — 포지션 현재가 갱신
 
-    def __init__(self, kiwoom, cfg: Optional[SmartScannerConfig] = None) -> None:
+    def __init__(self, kiwoom, cfg: Optional[SmartScannerConfig] = None, 
+                 notification_mgr: Optional["NotificationManager"] = None) -> None:
         super().__init__()
         self._kiwoom = kiwoom
         self.cfg     = cfg or SmartScannerConfig()
+        self.notif_mgr = notification_mgr
 
 
         # ① DataFrame 캐시
@@ -206,6 +208,16 @@ class SmartScanner(QObject):
 
         # ③ 터미널 뷰
         self.display = ScannerDisplay(self.store, self.cfg)
+
+        # [NEW] 전략 모듈 로드 (v3.0)
+        from scanner.strategies.breakout import BreakoutStrategy
+        from scanner.strategies.jdm_entry import JdmStrategy
+        from scanner.strategies.pullback import PullbackStrategy
+        self.strategy_map = {
+            "BREAKOUT": BreakoutStrategy(),
+            "JDM_ENTRY": JdmStrategy(),
+            "PULLBACK": PullbackStrategy(),
+        }
 
 
         self._running     = False
@@ -529,149 +541,26 @@ class SmartScanner(QObject):
             self.store.update_trend_level(snap.code, trend_level)
 
 
+        # [v3.0] 모듈화된 전략 루프 적용
         enabled = set(getattr(self.cfg, "enabled_strategies", ("BREAKOUT", "JDM_ENTRY")) or ())
         order = tuple(getattr(self.cfg, "strategy_order", ("BREAKOUT", "JDM_ENTRY")) or ())
 
-
-        # strategy_order를 따르되 enabled에 없는 항목은 스킵.
-        # 모든 전략이 비활성/미설정이면 안전하게 종료.
-        for strategy in order:
-            if strategy not in enabled:
+        for strategy_name in order:
+            if strategy_name not in enabled:
                 continue
 
-
-            sig: Optional[ScanSignal] = None
-            if strategy == "BREAKOUT":
-                sig = self._build_breakout_signal(snap)
-            elif strategy == "JDM_ENTRY":
-                sig = self._build_jdm_signal(snap)
-            elif strategy == "PULLBACK":
-                sig = self._build_pullback_signal(snap)
-            else:
-                logger.debug("[Strategy] 알 수 없는 전략명 스킵 — %s", strategy)
+            strat_obj = self.strategy_map.get(strategy_name)
+            if not strat_obj:
+                logger.warning("[Strategy] 알 수 없는 전략명 스킵 — %s", strategy_name)
                 continue
 
-
+            sig = strat_obj.evaluate(snap, self.cfg)
             if sig is not None:
                 sig.trend_level = int(getattr(snap, "trend_level", 0))
                 sig.trend_prev_level = int(getattr(snap, "trend_prev_level", 0))
                 self._emit(sig)
-                # 같은 분 다중 전략 동시 진입 방지: 우선순위 첫 통과 전략만 발행
                 return
 
-
-    def _build_breakout_signal(self, snap: StockSnapshot) -> Optional[ScanSignal]:
-        """BREAKOUT 전략 평가 후 통과 시 ScanSignal을 반환한다."""
-        # trend_level에 따라 고점 필터 동적 조정 (2026-04-23)
-        # 상승 추세 종목은 고점에서 조금 하락해도 진입 허용, 약한 추세는 엄격하게
-        trend_level = int(getattr(snap, "trend_level", 0))
-        if trend_level >= 2:  # 상승 추세
-            pullback_threshold = 5.0   # 고점 대비 5% 하락까지만 차단
-        elif trend_level == 1:  # 중간 추세
-            pullback_threshold = 3.0   # 고점 대비 3% 하락까지만 차단
-        else:  # trend_level == 0 (약한 추세)
-            pullback_threshold = self.cfg.breakout_pullback_from_high_pct  # 기본값 2.5%
-
-
-        r_breakout = check_breakout(
-            snap,
-            breakout_ratio=self.cfg.breakout_ratio,
-            volume_mult=self.cfg.breakout_volume_mult,
-            pullback_from_high_pct=pullback_threshold,
-            min_rising_bars=self.cfg.breakout_min_rising_bars,
-        )
-        if not r_breakout:
-            return None
-
-
-        r_gate = check_breakout_gate(snap, self.cfg)
-        if not r_gate:
-            return None
-
-
-        reason = " | ".join(r for r in [r_breakout, r_gate] if r)
-        candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
-        
-        # [NEW] AI 피처 추출 (지수 가속도, 호가 유동성 등 20종)
-        idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
-        ai_features = IndicatorService.get_ai_features(snap, index_history=idx_hist, config=self.cfg)
-        
-        return ScanSignal(
-            snap.code, snap.name, "BREAKOUT", snap.current_price, reason,
-            entry_candle_low=candle_low,
-            change_pct=float(getattr(snap, "change_pct", 0) or 0),
-            is_warmup="[WARMUP]" in reason,
-            values=ai_features
-        )
-
-
-    def _build_jdm_signal(self, snap: StockSnapshot) -> Optional[ScanSignal]:
-        """JDM_ENTRY 전략 평가 후 통과 시 ScanSignal을 반환한다."""
-        # EMA20 필터 — 현재가가 20분 EMA 위에 있어야 진입 (추세 상승 확인)
-        r_ema20 = check_ema20_filter(snap)
-        if r_ema20 is None:
-            return None
-
-
-        # MA20 이격도 — 데이터 부족 시 bypass(None은 조인에서 제외)
-        r_disp = check_disparity_from_ma(snap, max_pct=self.cfg.max_disparity_pct)
-
-
-        # JDM 통합 게이트
-        r_jdm = check_jdm_entry(snap, self.cfg)
-        if r_jdm is None:
-            return None
-
-        # VWAP 필터
-        r_vwap = check_vwap_filter(snap)
-        if r_vwap is None:
-            return None
-
-        reason = " | ".join(r for r in [r_ema20, r_disp, r_jdm, r_vwap] if r)
-        candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
-        
-        # [NEW] AI 피처 추출
-        idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
-        ai_features = IndicatorService.get_ai_features(snap, index_history=idx_hist, config=self.cfg)
-        
-        # 일봉 맥락 — TP 상향 여부 판단
-        from scanner.indicator_service import IndicatorService
-        _gdc = IndicatorService.get_daily_context
-        _dctx = _gdc(snap.daily_closes, snap.current_price,
-                     float(getattr(self.cfg, "daily_near_high_threshold_pct", 3.0)))
-        return ScanSignal(
-            snap.code, snap.name, "JDM_ENTRY", snap.current_price, reason,
-            entry_candle_low=candle_low,
-            near_daily_high=_dctx["near_high"],
-            daily_ma20=_dctx["daily_ma20"],
-            change_pct=float(getattr(snap, "change_pct", 0) or 0),
-            is_warmup="[WARMUP]" in reason,
-            values=ai_features
-        )
-
-    def _build_pullback_signal(self, snap: StockSnapshot) -> Optional[ScanSignal]:
-        """PULLBACK_ENTRY 전략 평가 후 통과 시 ScanSignal을 반환한다."""
-        r_pullback = check_pullback_entry(snap, self.cfg)
-        if r_pullback is None:
-            return None
-            
-        # VWAP 필터
-        r_vwap = check_vwap_filter(snap)
-        if r_vwap is None:
-            return None
-            
-        candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
-        
-        # [NEW] AI 피처 추출
-        idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
-        ai_features = IndicatorService.get_ai_features(snap, index_history=idx_hist, config=self.cfg)
-        
-        return ScanSignal(
-            snap.code, snap.name, "PULLBACK", snap.current_price, r_pullback,
-            entry_candle_low=candle_low,
-            change_pct=float(getattr(snap, "change_pct", 0) or 0),
-            values=ai_features
-        )
 
 
     # -----------------------------------------------------------------------
@@ -715,9 +604,13 @@ class SmartScanner(QObject):
         ScannerLogger.signal(sig)
         logger.warning("🚨 [3단계] %s(%s) [%s] %s", sig.name, sig.code,
                        sig.signal_type, sig.reason)
-        # ③ 터미널 알림
-        self.display.alert(sig)
-
+        # [v3.0] 신호 발견 알림 (v3.0)
+        if self.notif_mgr:
+            self.notif_mgr.info(
+                f"🚨 {sig.signal_type} 발생",
+                f"{sig.name}({sig.code}) {sig.price:,}원 | {sig.reason}",
+                telegram=True, sound=True
+            )
 
         # ④ 시그널 발행 (주문 엔진/UI 전송)
         self.signal_detected.emit(sig)
