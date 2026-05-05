@@ -79,7 +79,7 @@ COLUMNS: list[str] = [
     "realized_pnl",             # 실현손익 (원, 수수료·세금 차감 후)
     "holding_minutes",          # 보유 시간 (분) = 매도체결 - 매수체결
     "final_status",             # SIGNAL_ONLY / ORDERED / BOUGHT / SELL_DECIDED
-                                # SELL_ORDERED / PARTIAL / COMPLETED
+    "is_warmup",                # 장 초반 지표 워밍업 구간 발생 여부 (1/0)
 ]
 
 
@@ -195,6 +195,7 @@ class TradeAuditLogger:
                 "signal_reason":            getattr(sig, "reason", ""),
                 "trade_amount_at_signal":   getattr(snap, "trade_amount", ""),
                 "final_status":             "SIGNAL_ONLY",
+                "is_warmup":                1 if getattr(sig, "is_warmup", False) else 0,
             })
             # feature_engineer에서 추출된 특성들 업데이트
             row.update(features)

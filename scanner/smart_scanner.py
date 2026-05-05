@@ -586,6 +586,7 @@ class SmartScanner(QObject):
             snap.code, snap.name, "BREAKOUT", snap.current_price, reason,
             entry_candle_low=candle_low,
             change_pct=float(getattr(snap, "change_pct", 0) or 0),
+            is_warmup="[WARMUP]" in reason,
             values=ai_features
         )
 
@@ -630,6 +631,7 @@ class SmartScanner(QObject):
             near_daily_high=_dctx["near_high"],
             daily_ma20=_dctx["daily_ma20"],
             change_pct=float(getattr(snap, "change_pct", 0) or 0),
+            is_warmup="[WARMUP]" in reason,
             values=ai_features
         )
 

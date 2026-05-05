@@ -83,6 +83,7 @@ class DatabaseManager:
                         realized_pnl INTEGER,
                         holding_minutes REAL,
                         final_status TEXT,
+                        is_warmup INTEGER DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -118,6 +119,7 @@ class DatabaseManager:
                         f_candle_upper_tail REAL,
                         f_candle_lower_tail REAL,
                         is_traded INTEGER DEFAULT 0,
+                        is_warmup INTEGER DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
@@ -137,7 +139,8 @@ class DatabaseManager:
                     ("f_hoga_ratio", "REAL"),
                     ("f_candle_body", "REAL"),
                     ("f_candle_upper_tail", "REAL"),
-                    ("f_candle_lower_tail", "REAL")
+                    ("f_candle_lower_tail", "REAL"),
+                    ("is_warmup", "INTEGER")
                 ]
                 for col_name, col_type in new_cols:
                     if col_name not in existing_cols:

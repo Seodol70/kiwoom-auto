@@ -156,6 +156,7 @@ class ScanSignal:
     signal_type: str  # "breakout", "jdm_entry", "opening_surge", ...
     reason: str  # 신호 발생 사유 (필터 통과 이유)
     price: int  # 신호 발생 시 가격
+    is_warmup: bool = False  # [NEW] 워밍업 구간 발생 여부
 
     # 추가 메타 데이터
     values: dict = field(default_factory=dict)  # RSI, EMA 등 추가 정보

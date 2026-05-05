@@ -1190,6 +1190,11 @@ def check_jdm_entry(
              return None
 
 
+        # [Aggressive] 장 초반(OPENING)에는 이격도 기준 50% 완화 (빠른 진입)
+        if _slot == "OPENING" or _is_warmup:
+            _eff_ma_spread *= 0.5
+            logger.debug("[%s] 공격적 이격도 적용: %.2f%%", snap.name, _eff_ma_spread)
+
         if spread_pct < _eff_ma_spread:
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM",
@@ -1207,13 +1212,13 @@ def check_jdm_entry(
 
 
     # ── [NEW] 지표 워밍업 체크 (Warm-up) ──────────────────────────────────────────
+    # [Aggressive Mode] 캔들이 부족해도 차단하지 않고 태깅만 하여 공격적으로 데이터 수집
     warmup_reason = check_indicator_warmup(snap, 15)
+    _is_warmup = False
     if warmup_reason:
-        ScannerLogger.near_miss(
-            snap.code, snap.name, "WARMUP",
-            reason=f"[{_slot}] 지표 워밍업 부족 ({len(snap.closes_1min)}분봉) — 장 초반 지표 신뢰도 낮음",
-        )
-        return None
+        _is_warmup = True
+        logger.debug("[%s] 지표 워밍업 부족 (%d분봉) — 공격적 데이터 수집 모드 가동", snap.name, len(snap.closes_1min))
+        # 차단(return None) 대신 태그만 남기고 통과
 
 
     # ── 거래량 및 체결강도 체크 (MA 평가 후 진행) ────────────────────────────────────
@@ -1283,6 +1288,11 @@ def check_jdm_entry(
     if _trend_snap_lv >= _candle_skip_lv:
         _ema_disp_max       = float(getattr(cfg, "ema_disp_max_pct_trend",       7.0))
         _price_ema_disp_max = float(getattr(cfg, "price_ema_disp_max_pct_trend", 6.0))
+    
+    # [Aggressive] 워밍업 구간: 이격 상한 1.5배 확대
+    if _is_warmup:
+        _ema_disp_max *= 1.5
+        _price_ema_disp_max *= 1.5
     if len(closes) >= _ema_l_period:
         ema_s = calc_ema(closes, _ema_s_period)
         ema_l = calc_ema(closes, _ema_l_period)
@@ -1326,6 +1336,11 @@ def check_jdm_entry(
             if _slot == "OPENING" and _trend_snap_lv >= 3:
                 _eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_opening_trend3", 83.0))
 
+        # [Aggressive] 워밍업 구간 또는 강력 추세 시 RSI 상한 파격 완화 (최대 88)
+        if _is_warmup:
+            _eff_rsi_high = 88.0
+            logger.debug("[%s] 워밍업 공격적 RSI 상한 적용: %.1f", snap.name, _eff_rsi_high)
+
 
         rsi_ok = _eff_rsi_min <= rsi < _eff_rsi_high
         if not rsi_ok:
@@ -1347,13 +1362,23 @@ def check_jdm_entry(
         else:
             r_engulf = check_bullish_engulfing(snap)
             r_pinbar = check_bullish_pin_bar(snap)
-            if r_engulf is None and r_pinbar is None:
+            
+            # [Aggressive] 워밍업 구간: 양봉 돌파만으로도 인정
+            if _is_warmup and r_engulf is None and r_pinbar is None:
+                if snap.current_price > snap.open_price and snap.current_price >= snap.high_prev:
+                    candle_reason = "AGGRESSIVE_BREAKOUT"
+                    logger.debug("[%s] 워밍업 양봉 돌파 인정", snap.name)
+                else:
+                    ScannerLogger.rejected(snap.code, snap.name, "JDM_CANDLE", "워밍업 양봉 돌파 미충족")
+                    return None
+            elif r_engulf is None and r_pinbar is None:
                 ScannerLogger.rejected(
                     snap.code, snap.name, "JDM_CANDLE",
                     f"캔들 패턴 미충족 (상승장악형·강세핀바 불성립, trend_lv={_trend_snap_lv} < {_candle_skip_lv})",
                 )
                 return None
-            candle_reason = r_engulf or r_pinbar
+            else:
+                candle_reason = r_engulf or r_pinbar
     else:
         candle_reason = "LITE(캔들패턴스킵)"
 
@@ -1416,7 +1441,8 @@ def check_jdm_entry(
     mode_tag = "JDM_LITE" if _lite_mode else "JDM"
     # 신고가 근처 정보를 reason에 포함 (ScanSignal 필드는 _build_jdm_signal에서 채움)
     _near_tag = " | 📈신고가근처(TP↑)" if _daily_ctx["near_high"] else ""
-    reason = f"[{_slot}][{mode_tag}] {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} | {candle_reason}{_near_tag}"
+    _warm_tag = " | [WARMUP]" if _is_warmup else ""
+    reason = f"[{_slot}][{mode_tag}]{_warm_tag} {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} | {candle_reason}{_near_tag}"
     ScannerLogger.passed(snap.code, snap.name, mode_tag, reason)
     return reason
 
