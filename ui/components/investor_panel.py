@@ -238,6 +238,10 @@ class ScanStatusBar(QWidget):
         QApplication.processEvents(_QEL.ExcludeUserInputEvents)
 
 
+    def set_status(self, status: str) -> None:
+        """단순 상태 텍스트 업데이트"""
+        self._lbl_phase.setText(status)
+
     def reset(self) -> None:
         self._lbl_phase.setText("대기 중")
         self._bar.setRange(0, 100)

@@ -42,7 +42,11 @@ class ChartPanel(QWidget):
         self._lbl_code.setObjectName("panel_title")
         chart_lay.addWidget(self._lbl_code)
 
-
+        # [NEW] pyqtgraph 전역 설정 (한글 폰트 깨짐 방지 및 안티앨리어싱)
+        pg.setConfigOptions(antialias=True)
+        # GraphicsLayoutWidget 생성 전 전역 폰트 설정 시도
+        _font = QFont("Malgun Gothic", 9)
+        
         self._gw = pg.GraphicsLayoutWidget()
         chart_lay.addWidget(self._gw)
 
@@ -51,6 +55,8 @@ class ChartPanel(QWidget):
         self._price_plot = self._gw.addPlot(row=0, col=0)
         self._price_plot.showGrid(x=True, y=True, alpha=0.15)
         self._price_plot.getAxis("left").setWidth(70)
+        self._price_plot.getAxis("left").setTickFont(_font)
+        self._price_plot.getAxis("bottom").setTickFont(_font)
         self._price_plot.getAxis("bottom").setStyle(showValues=False)
 
 
@@ -89,15 +95,15 @@ class ChartPanel(QWidget):
 
         # 범례
         leg = self._price_plot.addLegend(offset=(10, 10))
-        leg.addItem(self._price_line, "현재가")
-        leg.addItem(self._ma7_line,  "MA7")
-        leg.addItem(self._ma15_line, "MA15")
+        # Legend item text 폰트는 스타일 옵션이나 레이블 직접 조작 필요 (일단 기본 유지)
 
 
         # 거래량 플롯 (하단 30%)
         self._volume_plot = self._gw.addPlot(row=1, col=0)
         self._volume_plot.showGrid(x=False, y=True, alpha=0.15)
         self._volume_plot.getAxis("left").setWidth(70)
+        self._volume_plot.getAxis("left").setTickFont(_font)
+        self._volume_plot.getAxis("bottom").setTickFont(_font)
         self._volume_plot.setLabel("bottom", "분봉 (분)")
         self._volume_plot.setXLink(self._price_plot)
         self._vol_bars = pg.BarGraphItem(x=[], height=[], width=0.7, pen=None)

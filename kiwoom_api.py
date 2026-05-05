@@ -338,11 +338,13 @@ class KiwoomManager(KiwoomProtocol):
         prev_next = 0
         page = 0
         while len(all_rows) < max_rows:
-            self._set_input("시장구분", "0")
-            self._set_input("정렬구분", "1")
+            self._set_input("시장구분", "000")  # 000=전체, 001=코스피, 101=코스닥
+            self._set_input("정렬구분", "1")    # 1=거래대금
             self._set_input("관리종목포함", "0")
             self._set_input("신용구분", "0")
-            self._comm_rq("opt10030", "거래대금상위", "9000", prev_next=prev_next)
+            ok = self._comm_rq("opt10030", "거래대금상위", "9000", prev_next=prev_next)
+            if not ok:
+                break
             chunk = self._tr_data.get("rows", [])
             page += 1
             if not chunk:
@@ -358,6 +360,18 @@ class KiwoomManager(KiwoomProtocol):
             if self._tr_prev_next != "2":
                 break
             prev_next = 2
+        return all_rows[:max_rows]
+
+    def fetch_opt10032_top_volume(self, max_rows: int = 200) -> list[dict]:
+        """
+        opt10032 전일거래량상위. (opt10030 공백 시 fallback 용)
+        """
+        all_rows: list[dict] = []
+        self._set_input("시장구분", "000")
+        self._set_input("관리종목포함", "0")
+        ok = self._comm_rq("opt10032", "전일거래량상위", "9001")
+        if ok:
+            all_rows = self._tr_data.get("rows", [])
         return all_rows[:max_rows]
 
     # -----------------------------------------------------------------------
@@ -667,12 +681,18 @@ class KiwoomManager(KiwoomProtocol):
         prev_rows  = [r for r in rows if not str(r.get("time", "")).startswith(today_str)]
 
         if not today_rows:
-            logger.warning("[opt20001] 오늘 분봉 없음 - code=%s (rows=%d)", index_code, len(rows))
-            return None
+            logger.info("[opt20001] 오늘 데이터 없음 - 최근 데이터(%s) 사용 (code=%s)", 
+                        rows[0].get("time", "?"), index_code)
+            # 오늘 데이터가 없으면(공휴일) 전체 rows 중 가장 최신 데이터 사용
+            target_row = rows[0]
+            base_row   = rows[1] if len(rows) > 1 else target_row
+        else:
+            target_row = today_rows[0]
+            base_row   = prev_rows[0] if prev_rows else target_row
 
         # 최신 분봉 close = 현재가, 전일 가장 최근 close = 기준가
-        current_raw = today_rows[0].get("close", 0)
-        base_raw    = prev_rows[0].get("close", 0) if prev_rows else 0
+        current_raw = target_row.get("close", 0)
+        base_raw    = base_row.get("close", 0)
 
         current = abs(safe_float(current_raw))
         base    = abs(safe_float(base_raw))
@@ -986,9 +1006,9 @@ class KiwoomManager(KiwoomProtocol):
         elif rq_name == "holdings":
             self._tr_data = {"rows": self._parse_holdings_rows(tr_code, rq_name)}
 
-        elif rq_name == "거래대금상위":
+        elif rq_name in ("거래대금상위", "전일거래량상위"):
             rows = self._parse_top_volume_rows(tr_code, rq_name)
-            logger.debug("[opt10030] 파싱 결과: %d행, prev_next=%s", len(rows), self._tr_prev_next)
+            logger.debug("[%s] 파싱 결과: %d행, prev_next=%s", rq_name, len(rows), self._tr_prev_next)
             self._tr_data = {"rows": rows}
 
         else:

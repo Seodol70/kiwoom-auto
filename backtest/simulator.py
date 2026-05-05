@@ -42,18 +42,16 @@ def generate_stock_data(days: int = 500, start_price: float = 50_000) -> pd.Data
 
 def golden_cross_strategy(closes: list[float], idx: int) -> str:
     """MA5 > MA20 골든크로스 매수 / 데드크로스 매도"""
-    if idx < 20:
-        return "HOLD"
+    from scanner.indicator_service import IndicatorService
+    if idx < 20: return "HOLD"
     window = closes[: idx + 1]
-    ma5  = sum(window[-5:])  / 5
-    ma20 = sum(window[-20:]) / 20
-    prev_ma5  = sum(window[-6:-1]) / 5
-    prev_ma20 = sum(window[-21:-1]) / 20
-
-    if prev_ma5 <= prev_ma20 and ma5 > ma20:
-        return "BUY"
-    if prev_ma5 >= prev_ma20 and ma5 < ma20:
-        return "SELL"
+    ma5 = IndicatorService.calc_ma(window, 5)
+    ma20 = IndicatorService.calc_ma(window, 20)
+    prev_ma5 = IndicatorService.calc_ma(window[:-1], 5)
+    prev_ma20 = IndicatorService.calc_ma(window[:-1], 20)
+    if any(v is None for v in [ma5, ma20, prev_ma5, prev_ma20]): return "HOLD"
+    if prev_ma5 <= prev_ma20 and ma5 > ma20: return "BUY"
+    if prev_ma5 >= prev_ma20 and ma5 < ma20: return "SELL"
     return "HOLD"
 
 

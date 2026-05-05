@@ -48,7 +48,14 @@ class SignalManager:
         
         # 컨트롤러 피드백
         self.tc.signal_rejected.connect(lambda msg: self.win.append_log(f"❌ [진입거절] {msg}"))
-        self.tc.log_message.connect(self.win.append_log)
+        # 일반 시스템 메시지는 오른쪽 패널로
+        self.tc.log_message.connect(self.win.log_panel.append_syslog)
+        
+        # [NEW] 로그 핸들러 시그널 연결 (SysLogQtHandler -> LogPanel)
+        if hasattr(self.win, "_sys_handler"):
+            self.win._sys_handler.log_entry.connect(self.win.log_panel.append_syslog)
+        if hasattr(self.win, "_scanner_handler"):
+            self.win._scanner_handler.log_entry.connect(self.win.log_panel.append_scanner)
         
         # 포트폴리오 업데이트 — 이제 AppState.portfolio_updated 시그널로 일원화됨
         self.tc.scan_status_updated.connect(self.win._on_scan_status_updated)
@@ -107,7 +114,7 @@ class SignalManager:
             rm.daily_loss_cut.connect(lambda: self.win.append_log("🔴 [리스크] 당일 손익 락 발동 (매수 차단)"))
             rm.daily_loss_cut.connect(lambda: self.win.header.set_risk_status("DANGER", "LOSS CUT"))
             # [Step 3] AppState에 리스크 락 상태 반영
-            rm.daily_loss_cut.connect(lambda: setattr(self.state, "risk_locked", True))
+            rm.daily_loss_cut.connect(lambda: setattr(self.state, "loss_cut_locked", True))
             
             rm.daily_profit_locked.connect(self.win._on_profit_locked)
             rm.daily_profit_locked.connect(lambda: self.win.header.set_risk_status("WARNING", "PROFIT LOCK"))
@@ -125,7 +132,9 @@ class SignalManager:
             # [Step 2] 콜백 대신 pyqtSignal 연결 방식으로 전환
             ss.signal_detected.connect(self.tc.handle_signal)
             ss.signal_detected.connect(self.win._on_scan_signal)
-            logger.info("[SignalManager] SmartScanner 시그널 연결 완료 (tc.handle_signal & win._on_scan_signal)")
+            # [Phase 3] UI 하이라이트 효과 연결
+            ss.signal_detected.connect(self.win.scanner_panel.add_signal)
+            logger.info("[SignalManager] SmartScanner 시그널 연결 완료 (tc.handle_signal & win._on_scan_signal & flash)")
 
     def _bind_context_updates(self):
         """중앙 상태 관리자와 UI 동기화"""
@@ -137,6 +146,7 @@ class SignalManager:
         
         # AppState 포트폴리오 변경 시 UI 패널 갱신
         self.state.portfolio_updated.connect(self.win._on_portfolio_refresh)
+        self.state.pnl_updated.connect(self.win.header.set_pnl)
         
         # 컨트롤러-상태 직접 연결
         self.tc.market_data_updated.connect(self.state.update_market_data)
@@ -157,4 +167,10 @@ class SignalManager:
         wd.connection_lost.connect(self.win._on_connection_lost)
         wd.connection_recovered.connect(self.win._on_connection_recovered)
         wd.reconnect_failed.connect(self.win._on_reconnect_failed)
-        logger.info("[SignalManager] ConnectionWatchdog 시그널 연결 완료")
+        
+        # [Phase 3] HealthMonitor 상태 LED 연결
+        hm = getattr(self.win, "_health_monitor", None)
+        if hm:
+            hm.status_changed.connect(self.win.header.set_health_status)
+            
+        logger.info("[SignalManager] Watchdog & HealthMonitor 시그널 연결 완료")

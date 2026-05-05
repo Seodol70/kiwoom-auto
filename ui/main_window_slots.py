@@ -42,14 +42,14 @@ class MainWindowSlots:
         """로그인 성공 처리 및 시스템 가동"""
         _RISK2 = cfg.RISK
         self.header.set_connected(account, mode)
-        self.log_panel.append(f"로그인 성공 — {mode} / 계좌: {account}")
+        self.append_log(f"로그인 성공 — {mode} / 계좌: {account}")
 
         # 재연결(reconnect_silent) 시 중복 시작 방지
         if getattr(self, "_already_started", False):
             if hasattr(self._kiwoom, "_account"): self._kiwoom._account = account
             if hasattr(self.order_mgr, "_account"): self.order_mgr._account = account
             self._port_worker.sync()
-            self.log_panel.append(f"[재연결] 계좌 재설정 완료 — {mode} / {account}")
+            self.append_log(f"[재연결] 계좌 재설정 완료 — {mode} / {account}")
             return
 
         self._already_started = True
@@ -59,11 +59,18 @@ class MainWindowSlots:
         _wu = float(_RISK2.get("sl_tp_warmup_sec", 45.0))
         self._sl_tp_warmup_end = _time.monotonic() + max(0.0, _wu)
         if _wu > 0:
-            self.log_panel.append(f"[리스크] 로그인 후 {_wu:.0f}초간 자동 손절·익절 보류 (잔고·시세 안정화)")
+            self.append_log(f"[리스크] 로그인 후 {_wu:.0f}초간 자동 손절·익절 보류 (잔고·시세 안정화)")
         
         if self._tg:
             self._tg.send(f"🚀 프로그램 시작됨\n계좌: {account}\n모드: {mode}")
         self.start_after_login()
+
+    @pyqtSlot(dict)
+    def _on_order_sent(self, d: dict) -> None:
+        """주문 전송 완료 로그"""
+        line = f"📤 [주문전송] {d.get('side', '주문')} — {d['name']}({d['code']}) {d['qty']}주"
+        self.append_log(line)
+        if self._tg: self._tg.send(line)
 
     @pyqtSlot(dict)
     def _on_order_filled(self, d: dict) -> None:
@@ -76,7 +83,7 @@ class MainWindowSlots:
         else:
             line = f"✅ {d['side']} — {d['name']}({d['code']}) {d['filled_qty']}주 @{d['filled_price']:,}원"
             
-        self.log_panel.append(line)
+        self.append_log(line)
         if self._tg: self._tg.send(line)
         
         self._on_portfolio_refresh({
@@ -89,19 +96,19 @@ class MainWindowSlots:
     def _on_feedback_done(self, result) -> None:
         """피드백 완료 콜백 — UI 갱신 및 로그 출력"""
         pnl_str  = f"{result.total_realized:+,.0f}원"
-        self.log_panel.append(f"📊 [피드백] {result.total_trades}건 분석 완료 | 손익 {pnl_str}")
+        self.append_log(f"📊 [피드백] {result.total_trades}건 분석 완료 | 손익 {pnl_str}")
         
         if result.profitable:
-            self.log_panel.append("  └─ 수익 당일 — 파라미터 유지")
+            self.append_log("  └─ 수익 당일 — 파라미터 유지")
         elif result.adjustments:
             for adj in result.adjustments:
                 arrow = "▲" if adj.new_val > adj.old_val else "▼"
-                self.log_panel.append(f"  └─ {adj.param}: {adj.old_val} {arrow} {adj.new_val} ({adj.reason})")
+                self.append_log(f"  └─ {adj.param}: {adj.old_val} {arrow} {adj.new_val} ({adj.reason})")
         
         for reason in result.skipped_reasons:
-            self.log_panel.append(f"  └─ [보류] {reason}")
+            self.append_log(f"  └─ [보류] {reason}")
         if result.report_path:
-            self.log_panel.append(f"  └─ 리포트: {result.report_path}")
+            self.append_log(f"  └─ 리포트: {result.report_path}")
 
         _tg = getattr(self, "_tg", None)
         if _tg:
@@ -116,7 +123,7 @@ class MainWindowSlots:
         if enabled: self._market_crash_off = False
         
         state = "시작" if enabled else "정지"
-        self.log_panel.append(f"{'🟢' if enabled else '🔴'} 자동매매 {state}")
+        self.append_log(f"{'🟢' if enabled else '🔴'} 자동매매 {state}")
         logger.info("[자동매매] 상태 변경: %s", state)
 
     @pyqtSlot(bool)
@@ -127,7 +134,7 @@ class MainWindowSlots:
         
         state = "ON" if enabled else "OFF"
         icon  = "🌙" if enabled else "☀️"
-        self.log_panel.append(f"{icon} 야간보유 모드 {state}")
+        self.append_log(f"{icon} 야간보유 모드 {state}")
         logger.info("[overnight_mode] %s", state)
 
     @pyqtSlot()
@@ -162,6 +169,19 @@ class MainWindowSlots:
         self.append_log("💰 [수익완료] 목표 수익 달성 — 신규 매수 제한")
 
     @pyqtSlot()
+    def _run_feedback_loop(self) -> None:
+        """피드백 엔진 실행 (QThread)"""
+        from app.feedback_worker import FeedbackWorker
+        self.append_log("📊 [피드백] 장 마감 분석 시작...")
+        self._fb_thread = QThread(self)
+        worker = FeedbackWorker()
+        worker.moveToThread(self._fb_thread)
+        self._fb_thread.started.connect(worker.run)
+        worker.finished.connect(self._on_feedback_done)
+        worker.finished.connect(self._fb_thread.quit)
+        self._fb_thread.start()
+
+    @pyqtSlot()
     def _on_day_reset(self) -> None:
         """장 시작 시 당일 상태 초기화"""
         self._already_started = False
@@ -185,7 +205,7 @@ class MainWindowSlots:
         msgs = getattr(self, "_health_relax_msgs", [])
         while msgs:
             m = msgs.pop(0)
-            self.log_panel.append(f"🔧 [가뭄완화] 파라미터 자동 완화: {m}")
+            self.append_log(f"🔧 [가뭄완화] 파라미터 자동 완화: {m}")
 
     @pyqtSlot(str, str, int)
     def _on_manual_buy(self, code: str, name: str, price: int) -> None:
@@ -198,13 +218,103 @@ class MainWindowSlots:
     def _on_portfolio_refresh(self, data: dict) -> None:
         """포트폴리오 UI 일괄 갱신 (Slot)"""
         cash = data.get("cash", 0)
-        positions = data.get("positions", {})
         self.header.update_cash(cash)
-        self.portfolio_panel.update_data(cash, positions)
+        self.portfolio_panel.refresh(data)
 
     @pyqtSlot(object)
     def _on_scan_signal(self, sig) -> None:
         """스캐너 신호 수신 (Slot)"""
         self.scanner_panel.add_signal(sig)
-        self.log_panel.append(f"🚨 [{sig.signal_type}] {sig.name}({sig.code}) 포착: {sig.reason}")
+        self.append_log(f"🚨 [{sig.signal_type}] {sig.name}({sig.code}) 포착: {sig.reason}")
         self._today_watch[sig.code] = sig
+
+    @pyqtSlot(str)
+    def _on_scan_status_updated(self, status: str) -> None:
+        """스캔 상태 텍스트 갱신"""
+        self.scan_status.set_status(status)
+
+    @pyqtSlot()
+    def _on_auto_trade_started(self) -> None:
+        """첫 신호 포착 등으로 자동매매가 실제 개시됨"""
+        self.append_log("🚀 [엔진] 첫 신호 포착 — 실시간 자동매매 감시를 시작합니다.")
+
+    @pyqtSlot()
+    def _on_reload_config(self) -> None:
+        """설정 파일 재로드"""
+        cfg.load()
+        self.append_log("⚙ [설정] adaptive_params.json 및 전역 설정을 재로드했습니다.")
+
+    @pyqtSlot(str)
+    def _on_manual_sell(self, code: str) -> None:
+        """수동 매도 요청"""
+        pos = self.order_mgr.positions.get(code)
+        if pos:
+            self.trading_controller.force_exit(code, "사용자 수동매도")
+            self.append_log(f"📤 [수동매도] {pos.name}({code}) 시장가 청산 주문 전송")
+
+    @pyqtSlot(str)
+    def _on_code_selected(self, code: str) -> None:
+        """종목 선택 시 차트 표시"""
+        if not code: return
+        
+        # 1. 캔들 데이터 조회 (최근 100개, 1분봉)
+        candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=100)
+        if not candles:
+            # 공휴일/장전 등 데이터가 없으면 일봉이라도 시도
+            candles = self._kiwoom.get_daily_candles(code, count=40)
+            
+        closes = [c['close'] for c in candles]
+        volumes = [c['volume'] for c in candles]
+        
+        # 2. 종목명 및 포지션 정보
+        name = self._kiwoom._ocx.dynamicCall("GetMasterCodeName(QString)", [code])
+        position = self.order_mgr.positions.get(code)
+        
+        # 3. 전략 파라미터 (트레일가, 손절%)
+        sl_pct = float(getattr(self._scan_cfg, "jdm_stop_loss_pct", -1.5))
+        trail_price = 0
+        if position and hasattr(position, "trail_stop_price"):
+            trail_price = position.trail_stop_price
+            
+        # 4. 차트 업데이트
+        self.chart_panel.update_chart(
+            closes=closes,
+            volumes=volumes,
+            code=code,
+            name=name,
+            position=position,
+            trail_price=trail_price,
+            sl_pct=sl_pct
+        )
+        logger.info("[차트] 종목 선택됨: %s(%s) - %d캔들 로드", name, code, len(closes))
+
+    @pyqtSlot()
+    def _on_market_opened(self) -> None:
+        """장 시작 처리"""
+        self._opened_today = True
+        self.append_log("🔔 [장시작] 정규장이 시작되었습니다. 감시를 강화합니다.")
+
+    @pyqtSlot()
+    def _on_market_closing(self) -> None:
+        """장 마감 임박 처리"""
+        self._closed_today = True
+        self.append_log("⌛ [장마감] 장 종료가 임박했습니다. 미체결 정리 및 당일청산을 준비합니다.")
+
+    @pyqtSlot()
+    def _on_feedback_triggered(self) -> None:
+        """피드백 실행 (MarketScheduler에서 호출)"""
+        self._run_feedback_loop()
+
+    @pyqtSlot(float, float, float, float, bool)
+    def _on_market_data_updated(self, kp_cur, kp_chg, kd_cur, kd_chg, is_crash) -> None:
+        """시장 지수 UI 갱신"""
+        self.header.set_index(kp_cur, kp_chg, kd_cur, kd_chg, is_crash)
+        if is_crash and not self._market_crash_off:
+            self.append_log("⚠ [지수급락] 시장 지수 급락 감지 — 신규 매수 일시 제한")
+
+    @pyqtSlot()
+    def _on_tg_status_requested(self) -> None:
+        """텔레그램 상태 보고"""
+        if not self._tg: return
+        msg = f"📊 현재 상태\n당일손익: {self.order_mgr.daily_realized_pnl:,}원\n보유종목: {len(self.order_mgr.positions)}개\n자동매매: {'ON' if self.state.auto_trading else 'OFF'}"
+        self._tg.send(msg)

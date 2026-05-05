@@ -11,6 +11,7 @@ from scanner.smart_scanner import SmartScanner, SmartScannerConfig, SnapshotStor
 from scanner.news_analyzer import NewsAnalyzer
 from app.market_scheduler import MarketScheduler
 from app.risk_manager import RiskManager
+from app.state import AppState
 from app.trading_controller import TradingController
 from analysis.health_monitor import HealthMonitor
 from trade_audit_logger import TradeAuditLogger
@@ -28,6 +29,9 @@ class ApplicationContext(QObject):
         super().__init__(parent)
         self.kiwoom = kiwoom
         
+        # ── 전역 상태 관리자 (Single Source of Truth) ──
+        self.state = AppState()
+        
         # 기본 스토어 및 로거
         self.audit = TradeAuditLogger(log_dir="logs")
         self.snap_store = SnapshotStore()
@@ -41,6 +45,7 @@ class ApplicationContext(QObject):
             max_positions=cfg.get("max_positions", 5),
             parent=self
         )
+        self.order_mgr.set_state(self.state) # AppState 주입
         self.order_mgr._audit = self.audit
         self.kiwoom._on_order_msg_cb = self.order_mgr.on_order_msg
         
@@ -79,7 +84,7 @@ class ApplicationContext(QObject):
 
         # ── Application Layer ──
         self.market_scheduler = MarketScheduler(self)
-        self.risk_manager = RiskManager(self.order_mgr, self.scan_cfg, self)
+        self.risk_manager = RiskManager(self.order_mgr, self.scan_cfg, self, app_state=self.state)
         self.trading_controller = TradingController(
             self.kiwoom, self.order_mgr, self.scan_cfg, self.risk_manager,
             smart_scanner=self.smart_scanner,

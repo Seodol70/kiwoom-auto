@@ -89,6 +89,8 @@ class TradingController(QObject):
         self._market_crash_off = False
         self._kospi_chg_pct = 0.0
         self._kosdaq_chg_pct = 0.0
+        self._kospi_cur = 0.0
+        self._kosdaq_cur = 0.0
 
         self._strategy = JangDongMinStrategy(
             self._order_mgr, self._risk_mgr, self._scan_cfg, self._snap_store
@@ -425,9 +427,10 @@ class TradingController(QObject):
             # HealthMonitor ACK
             if self._health_monitor:
                 self._health_monitor.ack()
-
+            
+            top_codes = []
             if self._smart_scanner:
-                self._smart_scanner.run_periodic_scan(on_progress=None)
+                top_codes = self._smart_scanner.run_periodic_scan(on_progress=None)
 
             if self._health_monitor:
                 self._health_monitor.ack()
@@ -438,7 +441,8 @@ class TradingController(QObject):
 
             # SnapshotStore 메모리 정리 (감시 목록 + 보유 포지션 외 제거)
             if self._snap_store and self._smart_scanner:
-                watch_codes = set(getattr(self._smart_scanner.watch_q, "subscribed", set()))
+                # watch_q.subscribed 대신 방금 스캔된 top_codes를 우선 사용
+                watch_codes = set(top_codes) if top_codes else set(getattr(self._smart_scanner.watch_q, "subscribed", set()))
                 pos_codes = set(self._order_mgr.positions.keys())
                 removed = self._snap_store.cleanup_stale_data(watch_codes | pos_codes)
                 if removed:
@@ -472,24 +476,22 @@ class TradingController(QObject):
             QTimer.singleShot(5_000, self.check_market_crash)
             return
 
-        # 1. 지수 조회 (코스피, 코스닥) — 하나라도 실패하면 캐시 재사용
+        # 1. 지수 조회 (코스피, 코스닥)
         kp = self._kiwoom.get_index_info("001")
         kd = self._kiwoom.get_index_info("101")
 
-        # 둘 다 실패 시만 스킵, 하나는 성공하면 진행
-        if not kp and not kd:
-            logger.warning("[check_market_crash] 지수 정보 전부 조회 실패 (KP=%s, KD=%s)", kp is not None, kd is not None)
-            return
+        # 조회 실패 시 캐시된 값 유지
+        if kp:
+            self._kospi_cur = kp['current']
+            self._kospi_chg_pct = kp['change_pct']
+        else:
+            logger.warning("[check_market_crash] KOSPI 조회 실패 — 기존값 유지 (%.2f)", self._kospi_cur)
 
-        if not kp:
-            logger.warning("[check_market_crash] KOSPI 조회 실패 — 캐시값 사용 (KOSDAQ만 갱신)")
-            kp = {"index_code": "001", "current": 0, "base": 0, "change_pct": self._kospi_chg_pct}
-        if not kd:
-            logger.warning("[check_market_crash] KOSDAQ 조회 실패 — 캐시값 사용 (KOSPI만 갱신)")
-            kd = {"index_code": "101", "current": 0, "base": 0, "change_pct": self._kosdaq_chg_pct}
-
-        self._kospi_chg_pct = kp['change_pct']
-        self._kosdaq_chg_pct = kd['change_pct']
+        if kd:
+            self._kosdaq_cur = kd['current']
+            self._kosdaq_chg_pct = kd['change_pct']
+        else:
+            logger.warning("[check_market_crash] KOSDAQ 조회 실패 — 기존값 유지 (%.2f)", self._kosdaq_cur)
         
         # [NEW] RS 필터 및 지표 계산을 위해 Config에 지수 정보 동기화
         if self._scan_cfg:
@@ -510,12 +512,13 @@ class TradingController(QObject):
             self.log_message.emit(f"🔴 [지수급락] 코스피 {self._kospi_chg_pct}% / 코스닥 {self._kosdaq_chg_pct}% — 자동매매 긴급 정지")
         
         # UI 업데이트 신호 발생 (KOSPI 현재/%, KOSDAQ 현재/%, 급락여부)
+        # 실패하더라도 0.0 또는 기존값을 보냄으로써 UI가 갱신되도록 함
         self.market_data_updated.emit(
-            kp['current'], kp['change_pct'],
-            kd['current'], kd['change_pct'],
+            self._kospi_cur, self._kospi_chg_pct,
+            self._kosdaq_cur, self._kosdaq_chg_pct,
             is_crash
         )
-        logger.info("[check_market_crash] market_data_updated 시그널 발행 완료 (is_crash=%s)", is_crash)
+        logger.debug("[check_market_crash] market_data_updated 시그널 발행 완료 (is_crash=%s)", is_crash)
 
     def check_overnight_gap(self) -> None:
         """EOD 포지션 익일 갭 확인"""

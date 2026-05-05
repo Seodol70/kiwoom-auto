@@ -57,4 +57,10 @@ if __name__ == "__main__":
     logging.info("[시스템] 설정 관리자 준비 완료 (LiveReload 활성)")
 
     kiwoom = KiwoomManager()
-    launch(kiwoom)
+    win = launch(kiwoom)
+    
+    # 로그인 프로세스 시작 (UI가 완전히 뜬 후 0.5초 뒤)
+    from PyQt5.QtCore import QTimer
+    QTimer.singleShot(500, lambda: win.app_context.login_mgr.show_and_login())
+    
+    sys.exit(_app.exec_())

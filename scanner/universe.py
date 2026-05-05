@@ -47,8 +47,8 @@ class UniverseManager:
             if saved_date is None or saved_date >= today:
                 return
             
-            # 4일 이상 지난 데이터는 무시 (주말/연휴 대응)
-            if (today - saved_date).days > 4:
+            # 10일 이상 지난 데이터는 무시 (긴 연휴/공휴일 대응)
+            if (today - saved_date).days > 10:
                 if not skip_log:
                     logger.warning("[Universe] 전일 거래량 캐시가 너무 오래됨 (%d일 전)", (today - saved_date).days)
                 return

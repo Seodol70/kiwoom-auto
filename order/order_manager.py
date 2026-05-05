@@ -139,10 +139,6 @@ class Position:
         """평균단가×수량 − 현재가×수량 (매입금액 − 평가금액, UI 손익 열)."""
         return self.avg_price * self.qty - self.current_price * self.qty
 
-    @property
-    def pnl_pct(self) -> float:
-        """손절·익절·표시용 순수 등락률 — price_change_pct_vs_avg 와 동일."""
-        return self.price_change_pct_vs_avg
 
 
 # ---------------------------------------------------------------------------
@@ -251,11 +247,18 @@ class OrderManager(QObject):
         self._account = account
         if self._executor:
             self._executor.set_account(account)
+        # [NEW] Kiwoom API 객체 내부 계좌도 강제 업데이트
+        if hasattr(self._kiwoom, "_account"):
+            self._kiwoom._account = account
         logger.info("[OrderManager] 계좌번호 설정 완료: %s", account)
 
     def set_state(self, state):
         """AppState 주입 (MainWindow에서 호출)"""
         self.state = state
+        # [Phase 1] 세션에서 복구된 손익이 있다면 동기화
+        if state.daily_realized_pnl != 0:
+            self.daily_realized_pnl = int(state.daily_realized_pnl)
+            logger.info("[OrderManager] AppState 세션 손익 복구: %s원", f"{self.daily_realized_pnl:,}")
         logger.info("[OrderManager] AppState 주입 완료")
 
     def set_health_monitor(self, monitor):
@@ -875,6 +878,9 @@ class OrderManager(QObject):
             int(x.get("realized", 0)) for x in self._today_fill_log if x.get("side") == "sell"
         )
         self.daily_realized_pnl = self._broker_realized_base + extra
+        # [Phase 1] AppState 동기화
+        if self.state:
+            self.state.daily_realized_pnl = float(self.daily_realized_pnl)
 
     def _sync_daily_realized_from_broker(self) -> None:
         """당일 실현손익 기준값을 세션 시작 시 1회만 초기화한다.

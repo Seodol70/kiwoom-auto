@@ -633,9 +633,10 @@ class PortfolioWorker(QObject):
     log_message  = pyqtSignal(str)
 
 
-    def __init__(self, order_manager, parent=None) -> None:
+    def __init__(self, order_manager, trading_controller=None, parent=None) -> None:
         super().__init__(parent)
         self._om = order_manager
+        self._tc = trading_controller
         self._balance_result: dict = {}  # Step 1 결과 임시 저장
 
 
@@ -643,11 +644,9 @@ class PortfolioWorker(QObject):
     def sync(self) -> None:
         """Step 1: balance TR만 실행 → 350ms 후 Step 2 (holdings) 실행."""
         _kw = getattr(self._om, "_kiwoom", None)
-        _mw = self.parent()
         
         # _tr_busy 또는 _scan_in_progress 중이면 3초 뒤 재시도
-        tc = getattr(_mw, 'trading_controller', None)
-        scan_busy = tc and getattr(tc, '_scan_in_progress', False)
+        scan_busy = self._tc and getattr(self._tc, '_scan_in_progress', False)
         
         if (_kw and getattr(_kw, "_tr_busy", False)) or scan_busy:
             QTimer.singleShot(3000, self.sync)

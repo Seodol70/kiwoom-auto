@@ -44,8 +44,8 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self._log_queue: list[str] = []
         self._today_watch: dict[str, Any] = {}
 
-        # 중앙 상태 관리자
-        self.state = AppState()
+        # 중앙 상태 관리자 (초기화 전)
+        self.state = None
 
         # [Step 1] UI 초기화 (MainWindowUI Mixin)
         self._init_window_settings()
@@ -66,6 +66,7 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         """핵심 모듈 초기화 및 서비스 시작"""
         from app.core import ApplicationContext
         self.app_context = ApplicationContext(self._kiwoom, parent=self)
+        self.state = self.app_context.state # 컨텍스트에서 상태 인스턴스 획득
         
         # 의존성 바인딩
         self.login_mgr = self.app_context.login_mgr
@@ -79,7 +80,7 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self.risk_manager = self.app_context.risk_manager
         self.trading_controller = self.app_context.trading_controller
         
-        # 상태 주입
+        # 상태 주입 (이미 AppContext에서 일부 수행했으나 명시적 동기화)
         self.trading_controller._ctx = self.state
         self.order_mgr.set_state(self.state)
         self.order_mgr.set_health_monitor(self._health_monitor)
@@ -121,15 +122,12 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self._feedback_timer.start(60_000)
 
     def _setup_background_workers(self) -> None:
-        """배경 스레드 워커 설정"""
-        # 1. 잔고 동기화 워커
-        self._port_thread = QThread(self)
-        self._port_worker = PortfolioWorker(self._kiwoom, self.order_mgr)
-        self._port_worker.moveToThread(self._port_thread)
-        self._port_thread.started.connect(self._port_worker.run)
-        self._port_thread.start()
-
-        # 2. 스캐너 워커 (레거시 지원용으로 유지 가능, SmartScanner와 병행)
+        """배경 워커 설정"""
+        # 1. 잔고 동기화 워커 (메인 스레드 유지 - Kiwoom OCX 스레드 규칙 준수)
+        # 별도 QThread로 이동하지 않음 (이동 시 get_balance 등에서 프리징/크래시 발생)
+        self._port_worker = PortfolioWorker(self.order_mgr, self.trading_controller)
+        
+        # 2. 스캐너 워커 (CPU 위주 작업이므로 별도 스레드 유지 가능)
         self._scan_thread = QThread(self)
         self._scan_worker = ScannerWorker(self._snap_store, self._scan_cfg, self.order_mgr)
         self._scan_worker.moveToThread(self._scan_thread)

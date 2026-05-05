@@ -57,8 +57,16 @@ class HeaderBar(QWidget):
         self._lbl_title.setMinimumWidth(80)  # 너비 축소
 
         self._lbl_account = self._make("🏠 계좌: —")
+        
+        # [NEW] 헬스 인디케이터 (LED)
+        self._lbl_health_led = QLabel()
+        self._lbl_health_led.setFixedSize(12, 12)
+        self._lbl_health_led.setStyleSheet("background-color: #585b70; border-radius: 6px;") # 초기 회색
+        self._lbl_health_led.setToolTip("시스템 상태 확인 중...")
+
         self._lbl_conn    = self._make("🔌 미연결")
         self._lbl_conn.setObjectName("conn_off")
+        self._lbl_cash    = self._make("💵 예수금: —")
         self._lbl_pnl     = self._make("💰 실현손익: —")
         
         # ── 지수 & 리스크 상태 ──────────────────────────────────────────
@@ -155,8 +163,11 @@ class HeaderBar(QWidget):
         lay.addStretch()
         
         lay.addWidget(self._lbl_account)
+        lay.addWidget(self._lbl_health_led)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_conn)
+        lay.addWidget(self._divider())
+        lay.addWidget(self._lbl_cash)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_pnl)
         lay.addWidget(self._divider())
@@ -259,6 +270,19 @@ class HeaderBar(QWidget):
         """사이징 모드 표시 업데이트"""
         self._lbl_sizing.setText(f"⚖️ SIZING: {mode}")
 
+    def set_health_status(self, status: str, msg: str = "") -> None:
+        """시스템 헬스 상태 LED 업데이트 (green, yellow, red)"""
+        colors = {
+            "green": "#a6e3a1",  # 정상
+            "yellow": "#f9e2af", # 지연
+            "red": "#f38ba8",    # 중단/위험
+            "gray": "#585b70"    # 초기화전
+        }
+        color = colors.get(status.lower(), "#585b70")
+        self._lbl_health_led.setStyleSheet(f"background-color: {color}; border-radius: 6px; border: 1px solid #11111b;")
+        if msg:
+            self._lbl_health_led.setToolTip(f"시스템 상태: {msg}")
+
     def set_connected(self, account: str, mode: str) -> None:
         self._lbl_account.setText(f"🏠 계좌: {account}")
         self._lbl_conn.setText("🔌 연결됨")
@@ -277,6 +301,12 @@ class HeaderBar(QWidget):
         self._btn_switch_real.style().unpolish(self._btn_switch_real)
         self._btn_switch_real.style().polish(self._btn_switch_real)
         self._btn_switch_real.setVisible(True)
+
+    def update_cash(self, cash: int) -> None:
+        """가용 예수금 업데이트"""
+        self._lbl_cash.setText(f"💵 예수금: {cash:,}원")
+        # 강조 색상 (청록색)
+        self._lbl_cash.setStyleSheet("color: #94e2d5; font-weight: bold;")
 
 
     def set_pnl(self, pnl: int) -> None:

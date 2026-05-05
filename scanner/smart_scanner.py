@@ -752,13 +752,12 @@ class SmartScanner(QObject):
 
 
     def _fetch_all_codes(self) -> list[str]:
-        codes = []
-        for m in self.cfg.markets:
-            raw = self._kiwoom._ocx.dynamicCall(
-                "GetCodeListByMarket(QString)", [m]
-            )
-            codes.extend(c for c in raw.strip().split(";") if c)
-        return codes
+        """전 종목 코드를 수집한다 (코스피 + 코스닥)."""
+        all_codes = []
+        for mkt in ["0", "10"]:
+            raw = self._kiwoom._ocx.dynamicCall("GetCodeListByMarket(QString)", [mkt])
+            all_codes.extend([c for c in raw.split(";") if c])
+        return all_codes
 
 
     def _fetch_top_trade_amount(self, count: int) -> list[dict]:
@@ -842,6 +841,11 @@ class SmartScanner(QObject):
                 try:
                     if hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
                         rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
+                        
+                        # [NEW] opt10030 응답이 없으면(공휴일/장전) opt10032(전일거래대금상위) 시도
+                        if not rows and hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
+                            logger.info("[opt10030] 오늘 데이터 없음 -> opt10032(전일거래대금상위) 폴백 시도")
+                            rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
                     else:
                         rows = self._tr_q.call(self._do_fetch_opt10030)
                         rows = rows[:target]
@@ -869,14 +873,8 @@ class SmartScanner(QObject):
             logger.info("[opt10030] 조회 실패 — 이전 캐시 %d종목 재사용", len(self._last_volume_rows))
             return self._last_volume_rows[:target]
 
-        logger.warning("[opt10030] 캐시 없음 — fallback 5대장 대체")
-        return [
-            {"code": "005930", "name": "삼성전자", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
-            {"code": "000660", "name": "SK하이닉스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
-            {"code": "207940", "name": "삼성바이오로직스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
-            {"code": "005380", "name": "현대차", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
-            {"code": "373220", "name": "LG에너지솔루션", "current_price": 0, "trade_amount": 0, "change_pct": 0.0},
-        ]
+        logger.warning("[opt10030] 모든 시도 실패 (캐시 없음) -> 상위 폴백 로직으로 위임")
+        return []
 
     def _log_store_health(self) -> None:
         """SnapshotStore 상태를 주기적으로 로깅한다."""
@@ -940,7 +938,7 @@ class SmartScanner(QObject):
         logger.info("[주기 스캔] 완료 — 신호 판단은 실시간 워커(_evaluate)에 위임")
         logger.info("=" * 60)
         _prog("감시종목 갱신", len(top_codes), len(top_codes), "데이터 갱신 완료")
-        return []
+        return top_codes
 
     def _check_scan_prerequisites(self) -> bool:
         """스캔을 시작할 수 있는 상태인지 확인한다."""
@@ -972,13 +970,42 @@ class SmartScanner(QObject):
         rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, on_progress=prog_cb)
         
         if not rows:
-            logger.warning("[주기 스캔] opt10030 조회 실패 — fallback 5대장 대체")
+            # [NEW] TR 실패 시(공휴일/장전) 전일 거래량 캐시 기반 전 종목 폴백
+            logger.warning("[주기 스캔] TR 조회 실패 -> 전일 거래량 캐시 기반 유니버스 생성 시도")
+            all_codes = self._fetch_all_codes()
+            if all_codes:
+                fallback_rows = []
+                for code in all_codes:
+                    pv = self.universe_mgr._prev_volumes.get(code, 0)
+                    if pv > 0:
+                        fallback_rows.append({
+                            "code": code,
+                            "name": self._kiwoom._ocx.dynamicCall("GetMasterCodeName(QString)", [code]),
+                            "current_price": 0,
+                            "trade_amount": pv * 1000, # 대략적인 거래대금 추정 (거래량 기반)
+                            "volume": pv,
+                            "change_pct": 0.0,
+                            "prev_close": 0
+                        })
+                
+                if fallback_rows:
+                    # 거래대금(추정) 순 정렬
+                    fallback_rows.sort(key=lambda x: x["trade_amount"], reverse=True)
+                    logger.info("[주기 스캔] 전일 캐시 기반 %d종목 유니버스 생성 완료", len(fallback_rows))
+                    return fallback_rows[:self.cfg.collect_raw_top_n]
+
+            logger.warning("[주기 스캔] opt10030/10032/전일캐시 모두 실패 — fallback 10대장 대체")
             return [
                 {"code": "005930", "name": "삼성전자", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
                 {"code": "000660", "name": "SK하이닉스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
                 {"code": "207940", "name": "삼성바이오로직스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
                 {"code": "005380", "name": "현대차", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
                 {"code": "373220", "name": "LG에너지솔루션", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "000270", "name": "기아", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "068270", "name": "셀트리온", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "005490", "name": "POSCO홀딩스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "035420", "name": "NAVER", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
+                {"code": "006400", "name": "삼성SDI", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
             ]
         return rows
 
@@ -1009,9 +1036,8 @@ class SmartScanner(QObject):
 
     def _refresh_realtime_watch(self, top_codes: list[str]) -> None:
         """실시간 틱 구독 목록을 갱신한다."""
-        if self._universe_paused: return
         reg_codes = top_codes[:self.cfg.realtime_sub_max]
-        QTimer.singleShot(0, lambda: self.watch_q.refresh(reg_codes))
+        self.watch_q.refresh(reg_codes)
 
     def _ensure_candle_data(self, top_codes: list[str]) -> None:
         """부족한 분봉 데이터를 비동기적으로 로딩하도록 예약한다."""
