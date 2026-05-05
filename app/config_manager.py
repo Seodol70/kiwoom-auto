@@ -100,16 +100,17 @@ class ConfigManager:
 
     def get(self, key: str, default: Any = None) -> Any:
         """설정값을 가져온다. (대소문자 구분 없음)"""
-        # 1. 요청된 키 그대로 검색
-        val = self._config_data.get(key)
-        if val is not None:
-            return val
-        
-        # 2. 대문자로 변환해서 검색 (config.py 호환)
-        val = self._config_data.get(key.upper())
-        if val is not None:
-            return val
-            
+        with self._load_lock:
+            # 1. 요청된 키 그대로 검색
+            val = self._config_data.get(key)
+            if val is not None:
+                return val
+
+            # 2. 대문자로 변환해서 검색 (config.py 호환)
+            val = self._config_data.get(key.upper())
+            if val is not None:
+                return val
+
         return default
 
     def set_runtime(self, key: str, value: Any):
@@ -119,13 +120,14 @@ class ConfigManager:
 
     # 프로퍼티 방식으로 접근 지원
     def __getattr__(self, name: str) -> Any:
-        if name in self._config_data:
-            return self._config_data[name]
-        
-        upper_name = name.upper()
-        if upper_name in self._config_data:
-            return self._config_data[upper_name]
-            
+        with self._load_lock:
+            if name in self._config_data:
+                return self._config_data[name]
+
+            upper_name = name.upper()
+            if upper_name in self._config_data:
+                return self._config_data[upper_name]
+
         raise AttributeError(f"'ConfigManager' object has no attribute '{name}'")
 
 # 전역 인스턴스 생성
@@ -133,7 +135,12 @@ config_manager = ConfigManager()
 
 
 def reload_adaptive(scan_cfg) -> str:
-    """adaptive_params.json을 다시 읽어 scan_cfg를 in-place 갱신한다.
+    """adaptive_params.json 및 config.py를 읽어 scan_cfg를 in-place 갱신한다.
+
+    설정 동기화 전략: config.py가 단일 진실 소스(SSOT)
+    - config.py RISK/STRATEGY의 값이 SmartScannerConfig를 주입한다.
+    - params/adaptive_params.json은 feedback engine 조정값으로 선택적 override만 수행한다.
+    - SmartScannerConfig 기본값은 config.py와 일치하도록 유지된다.
 
     ScannerWorker와 SmartScanner가 scan_cfg를 직접 참조하므로
     객체 교체가 아닌 속성 복사로 갱신해야 공유 참조가 유지된다.
@@ -145,7 +152,8 @@ def reload_adaptive(scan_cfg) -> str:
 
         new_cfg = SmartScannerConfig.from_adaptive("params/adaptive_params.json")
 
-        new_cfg.max_change_pct      = float(_RISK.get("max_change_pct", 15.0))
+        # config.py를 단일 진실 소스로 하여 SmartScannerConfig에 주입
+        new_cfg.max_change_pct      = float(_RISK.get("max_change_pct", 22.0))
         new_cfg.signal_cooldown_sec = float(_RISK.get("signal_cooldown_sec", 45.0))
         new_cfg.index_block_pct     = float(_RISK.get("market_index_block_pct", -1.5))
 
@@ -160,11 +168,8 @@ def reload_adaptive(scan_cfg) -> str:
             new_cfg.realtime_sub_max = wpm
             new_cfg.display_top_n    = wpm
 
-        for field_name, new_val in vars(new_cfg).items():
-            try:
-                setattr(scan_cfg, field_name, new_val)
-            except Exception:
-                pass
+        # scan_cfg를 새 설정으로 스레드 안전하게 갱신 (apply_from이 내부 lock 사용)
+        scan_cfg.apply_from(new_cfg)
 
         logger.info("[AdaptiveReload] params/adaptive_params.json 리로드 완료")
         return "⚙️ [적응형파라미터] 어제 피드백 조정값 적용됨"

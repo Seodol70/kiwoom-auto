@@ -60,6 +60,9 @@ class TradingController(QObject):
     auto_trade_started = pyqtSignal()
     """첫 감시 신호 발생으로 자동매매가 자동 시작될 때 발행"""
 
+    market_crash_detected = pyqtSignal(float, float)
+    """지수 급락 감지 (코스피 %, 코스닥 %)"""
+
 
     def __init__(
         self,
@@ -552,11 +555,9 @@ class TradingController(QObject):
         crash_limit = -2.0
         is_crash = (self._kospi_chg_pct <= crash_limit or self._kosdaq_chg_pct <= crash_limit)
 
-        # 3. 상태 업데이트 및 신규 진입 차단 설정
+        # 3. 급락 감지 신호 발행 (상태 변경은 슬롯에서 처리)
         if is_crash and not self._market_crash_off:
-            self._market_crash_off = True
-            self._auto_trading = False
-            self.log_message.emit(f"🔴 [지수급락] 코스피 {self._kospi_chg_pct}% / 코스닥 {self._kosdaq_chg_pct}% — 자동매매 긴급 정지")
+            self.market_crash_detected.emit(self._kospi_chg_pct, self._kosdaq_chg_pct)
         
         # UI 업데이트 신호 발생 (KOSPI 현재/%, KOSDAQ 현재/%, 급락여부)
         # 실패하더라도 0.0 또는 기존값을 보냄으로써 UI가 갱신되도록 함
@@ -566,6 +567,13 @@ class TradingController(QObject):
             is_crash
         )
         logger.debug("[check_market_crash] market_data_updated 시그널 발행 완료 (is_crash=%s)", is_crash)
+
+    @pyqtSlot(float, float)
+    def _on_market_crash_detected(self, kospi_pct: float, kosdaq_pct: float) -> None:
+        """지수 급락 신호 수신 — 자동매매 긴급 정지"""
+        self._market_crash_off = True
+        self._auto_trading = False
+        self.log_message.emit(f"🔴 [지수급락] 코스피 {kospi_pct}% / 코스닥 {kosdaq_pct}% — 자동매매 긴급 정지")
 
     def check_overnight_gap(self) -> None:
         """EOD 포지션 익일 갭 확인"""

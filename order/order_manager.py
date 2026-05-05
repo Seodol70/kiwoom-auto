@@ -741,6 +741,20 @@ class OrderManager(QObject):
 
         self.buy(code, name, qty, price=0)  # 시장가 매수
 
+    @pyqtSlot(str, int, int)
+    def _on_price_updated(self, code: str, price: int, trend_level: int) -> None:
+        """SmartScanner 실시간 가격 갱신 신호 처리 (손절/익절 정확도 개선)."""
+        if price <= 0:
+            return
+        # position_repo 를 통해 포지션 현재가 갱신
+        if hasattr(self, "position_repo"):
+            self.position_repo.update_price(code, price)
+        # 폴백: position_repo 없을 경우 직접 갱신
+        if code in self.positions:
+            self.positions[code].current_price = price
+        # 추세 레벨 갱신
+        self.update_position_trend(code, trend_level)
+
     def update_position_trend(self, code: str, trend_level: int) -> None:
         """보유 포지션의 추세 레벨을 갱신한다."""
         pos = self.positions.get(code)

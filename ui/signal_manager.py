@@ -63,6 +63,9 @@ class SignalManager:
         # 첫 신호 자동매매 시작 — TC에서 판단, UI만 반응
         self.tc.auto_trade_started.connect(self.win._on_auto_trade_started)
 
+        # 지수 급락 감지 신호 연결 (상태 변경)
+        self.tc.market_crash_detected.connect(self.tc._on_market_crash_detected)
+
     def _bind_ui_interactions(self):
         """사용자 조작(버튼 클릭, 값 변경 등) 관련 시그널"""
         # 헤더 바 컨트롤
@@ -134,7 +137,9 @@ class SignalManager:
             ss.signal_detected.connect(self.win._on_scan_signal)
             # [Phase 3] UI 하이라이트 효과 연결
             ss.signal_detected.connect(self.win.scanner_panel.add_signal)
-            logger.info("[SignalManager] SmartScanner 시그널 연결 완료 (tc.handle_signal & win._on_scan_signal & flash)")
+            # [Phase D-3] 포지션 현재가 갱신 신호 연결 (OrderManager에게 전달)
+            ss.price_updated.connect(self.om._on_price_updated)
+            logger.info("[SignalManager] SmartScanner 시그널 연결 완료 (signal_detected & price_updated)")
 
     def _bind_context_updates(self):
         """중앙 상태 관리자와 UI 동기화"""

@@ -1,11 +1,12 @@
 """
-IndicatorService — 기술지표 계산 단일 진입점
+IndicatorService — 기술지표 계산 고속화 및 AI 피처 생성
 """
 
 from __future__ import annotations
 import logging
 import numpy as np
-from typing import Optional, Any, TYPE_CHECKING
+import pandas as pd
+from typing import Optional, Any, TYPE_CHECKING, Dict
 
 if TYPE_CHECKING:
     from scanner.models import StockSnapshot
@@ -14,27 +15,33 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 class IndicatorService:
-    """기술지표 계산 서비스 — 모든 지표 계산을 여기서 담당"""
+    """기술지표 계산 서비스 — 모든 지표 계산을 고속화하여 담당"""
 
     @staticmethod
-    def calc_rsi(closes: list[float], period: int = 14) -> Optional[float]:
-        """Wilder's Smoothing(SMMA) 방식의 RSI 계산"""
-        if not closes or len(closes) < period + 1:
+    def calc_rsi(closes: list[float] | np.ndarray, period: int = 14) -> Optional[float]:
+        """Wilder's Smoothing 방식의 RSI 고속 계산"""
+        if closes is None or len(closes) < period + 1:
             return None
         try:
-            arr = np.array(closes, dtype=np.float64)
+            if isinstance(closes, list):
+                arr = np.array(closes, dtype=np.float64)
+            else:
+                arr = closes.astype(np.float64)
+                
             deltas = np.diff(arr)
             gains = np.where(deltas > 0, deltas, 0.0)
             losses = np.where(deltas < 0, -deltas, 0.0)
 
-            # 첫 번째 평균값은 단순 산술평균(SMA)으로 시작
-            avg_gain = np.mean(gains[:period])
-            avg_loss = np.mean(losses[:period])
+            if len(gains) < period:
+                return None
 
-            # 이후 값들은 Wilder's Smoothing 적용 (가중치 1/period)
-            for i in range(period, len(gains)):
-                avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-                avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            # Wilder's Smoothing (alpha = 1/period)
+            # pandas ewm(alpha=1/period, adjust=False) 사용
+            s_gains = pd.Series(gains)
+            s_losses = pd.Series(losses)
+            
+            avg_gain = s_gains.ewm(alpha=1.0/period, adjust=False).mean().iloc[-1]
+            avg_loss = s_losses.ewm(alpha=1.0/period, adjust=False).mean().iloc[-1]
 
             if avg_loss == 0: return 100.0
             rs = avg_gain / avg_loss
@@ -43,50 +50,48 @@ class IndicatorService:
             return None
 
     @staticmethod
-    def calc_ema(closes: list[float], period: int) -> Optional[float]:
-        if not closes or len(closes) < period:
+    def calc_ema(closes: list[float] | np.ndarray, period: int) -> Optional[float]:
+        """고속 EMA 계산"""
+        if closes is None or len(closes) < period:
             return None
         try:
-            arr = np.array(closes, dtype=np.float64)
-            k = 2.0 / (period + 1)
-            ema = float(arr[:period].mean())
-            for price in arr[period:]:
-                ema = float(price) * k + ema * (1.0 - k)
-            return ema
+            s = pd.Series(closes)
+            return float(s.ewm(span=period, adjust=False).mean().iloc[-1])
         except Exception:
             return None
 
     @staticmethod
-    def calc_ma(closes: list[float], period: int) -> Optional[float]:
-        if not closes or len(closes) < period:
+    def calc_ma(closes: list[float] | np.ndarray, period: int) -> Optional[float]:
+        """고속 MA 계산"""
+        if closes is None or len(closes) < period:
             return None
         return float(np.mean(closes[-period:]))
 
     @staticmethod
     def calc_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> Optional[float]:
-        """Wilder's Smoothing 방식의 ATR 계산"""
+        """Wilder's Smoothing 방식의 ATR 고속 계산"""
         if not closes or len(closes) < period + 1: return None
         try:
-            tr_values = []
-            for i in range(1, len(closes)):
-                tr = max(highs[i] - lows[i], 
-                         abs(highs[i] - closes[i-1]), 
-                         abs(lows[i] - closes[i-1]))
-                tr_values.append(tr)
+            h = np.array(highs)
+            l = np.array(lows)
+            c = np.array(closes)
             
-            # 첫 ATR은 SMA
-            atr = np.mean(tr_values[:period])
+            tr1 = h[1:] - l[1:]
+            tr2 = np.abs(h[1:] - c[:-1])
+            tr3 = np.abs(l[1:] - c[:-1])
             
-            # 이후는 Wilder's Smoothing
-            for i in range(period, len(tr_values)):
-                atr = (atr * (period - 1) + tr_values[i]) / period
+            tr = np.maximum.reduce([tr1, tr2, tr3])
+            
+            # Wilder's Smoothing
+            s_tr = pd.Series(tr)
+            atr = s_tr.ewm(alpha=1.0/period, adjust=False).mean().iloc[-1]
             
             return float(atr)
         except Exception:
             return None
 
     @staticmethod
-    def calc_bollinger_bands(closes: list[float], period: int = 20, std_mult: float = 2.0) -> Optional[dict[str, float]]:
+    def calc_bollinger_bands(closes: list[float] | np.ndarray, period: int = 20, std_mult: float = 2.0) -> Optional[dict[str, float]]:
         if len(closes) < period: return None
         try:
             arr = np.array(closes[-period:], dtype=np.float64)
@@ -102,7 +107,7 @@ class IndicatorService:
 
     @staticmethod
     def get_trend_status(closes: list[float], highs: list[float], lows: list[float], volumes: list[int], **kwargs) -> int:
-        """추세 강도 판정 (0~3)"""
+        """추세 강도 판정 (0~3) 최적화"""
         ema_period = kwargs.get("ema_period", 20)
         atr_period = kwargs.get("atr_period", 14)
         
@@ -147,9 +152,7 @@ class IndicatorService:
         current_price: float,
         near_high_threshold_pct: float = 3.0,
     ) -> dict:
-        """
-        일봉 데이터 기반 매매 맥락 정보를 반환한다. (jang_dong_min.py 로직 복구)
-        """
+        """일봉 데이터 기반 매매 맥락 정보 반환"""
         result = {
             "above_ma20": True, "near_high": False, 
             "daily_ma20": 0.0, "high_25d": 0.0,
@@ -160,34 +163,35 @@ class IndicatorService:
         if len(daily_closes) < 20 or current_price <= 0:
             return result
 
+        arr = np.array(daily_closes)
         # 최근 20일 이동평균
-        daily_ma20 = sum(daily_closes[-20:]) / 20
-        result["daily_ma20"] = daily_ma20
+        daily_ma20 = np.mean(arr[-20:])
+        result["daily_ma20"] = float(daily_ma20)
         result["above_ma20"] = current_price >= daily_ma20
 
-        # MA20 기울기 (최근 3거래일 전 대비)
-        if len(daily_closes) >= 23:
-            ma20_prev = sum(daily_closes[-23:-3]) / 20
+        # MA20 기울기
+        if len(arr) >= 23:
+            ma20_prev = np.mean(arr[-23:-3])
             result["ma20_slope_up"] = daily_ma20 > ma20_prev
 
         # MA60
-        if len(daily_closes) >= 60:
-            daily_ma60 = sum(daily_closes[-60:]) / 60
-            result["daily_ma60"] = daily_ma60
+        if len(arr) >= 60:
+            daily_ma60 = np.mean(arr[-60:])
+            result["daily_ma60"] = float(daily_ma60)
             result["above_ma60"] = current_price >= daily_ma60
 
-        # 25일 신고가 근처 판정
-        n = min(25, len(daily_closes))
-        high_25d = max(daily_closes[-n:])
-        result["high_25d"] = high_25d
+        # 25일 신고가
+        n = min(25, len(arr))
+        high_25d = np.max(arr[-n:])
+        result["high_25d"] = float(high_25d)
         if high_25d > 0:
             result["near_high"] = current_price >= high_25d * (1.0 - near_high_threshold_pct / 100.0)
 
         return result
 
     @staticmethod
-    def get_technical_summary(snap: StockSnapshot, cfg: SmartScannerConfig) -> dict[str, Any]:
-        """종목의 모든 기술적 상태를 한 번에 계산하여 반환"""
+    def get_technical_summary(snap: 'StockSnapshot', cfg: 'SmartScannerConfig') -> dict[str, Any]:
+        """종목의 모든 기술적 상태를 통합 반환"""
         closes = snap.closes_1min
         summary = {
             "rsi": IndicatorService.calc_rsi(closes, 14),
@@ -199,3 +203,61 @@ class IndicatorService:
         bb = IndicatorService.calc_bollinger_bands(closes, 20)
         if bb: summary["bb"] = bb
         return summary
+
+    @staticmethod
+    def get_ai_features(snap: 'StockSnapshot') -> Dict[str, float]:
+        """
+        AI 학습용 정규화된 피처 벡터 생성.
+        모든 값은 가능한 0~1 또는 -1~1 사이로 정규화되도록 함.
+        """
+        features = {}
+        closes = snap.closes_1min
+        if not closes or len(closes) < 20:
+            return {}
+
+        try:
+            # 1. RSI (0~100 -> 0~1)
+            rsi = IndicatorService.calc_rsi(closes, 14)
+            features["f_rsi"] = (rsi / 100.0) if rsi is not None else 0.5
+            
+            # 2. 이평선 이격도 (현재가/EMA20 - 1.0)
+            ema20 = IndicatorService.calc_ema(closes, 20)
+            if ema20 and ema20 > 0:
+                # -0.1 ~ 0.1 범위를 주로 가짐 -> 클리핑 후 매핑
+                gap = (snap.current_price / ema20) - 1.0
+                features["f_ema20_gap"] = np.clip(gap * 5.0, -1.0, 1.0) # 5배 증폭하여 변별력 확보
+            else:
+                features["f_ema20_gap"] = 0.0
+                
+            # 3. 볼린저 밴드 위치 (Percent B: (Price - Lower)/(Upper - Lower))
+            bb = IndicatorService.calc_bollinger_bands(closes, 20)
+            if bb and (bb["upper"] - bb["lower"]) > 0:
+                pct_b = (snap.current_price - bb["lower"]) / (bb["upper"] - bb["lower"])
+                features["f_pct_b"] = np.clip(pct_b, 0.0, 1.0)
+            else:
+                features["f_pct_b"] = 0.5
+
+            # 4. 거래량 Surge (최근 1분 거래량 / 최근 20분 평균 거래량)
+            vols = snap.volumes_1min
+            if len(vols) >= 20:
+                avg_vol = np.mean(vols[-20:-1])
+                if avg_vol > 0:
+                    features["f_vol_surge"] = min(vols[-1] / avg_vol, 10.0) / 10.0 # 10배 상한
+                else:
+                    features["f_vol_surge"] = 0.0
+            else:
+                features["f_vol_surge"] = 0.0
+
+            # 5. 등락률 (당일 등락률 / 30% 상한)
+            features["f_change_pct"] = np.clip(snap.change_pct / 30.0, -1.0, 1.0)
+            
+            # 6. 체결강도 (0~500 -> 0~1)
+            features["f_strength"] = np.clip(snap.chejan_strength / 500.0, 0.0, 1.0)
+            
+            # 7. 추세 단계 (0~3 -> 0~1)
+            features["f_trend"] = snap.trend_level / 3.0
+
+        except Exception as e:
+            logger.error(f"AI 피처 생성 실패: {snap.code}, {e}")
+            
+        return features

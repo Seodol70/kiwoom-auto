@@ -47,6 +47,7 @@ from scanner.universe import (
 )
 from scanner.snapshot_store import SnapshotStore
 from scanner.indicator_service import IndicatorService
+from infra.db_manager import DatabaseManager
 from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 from rich.console import Console
 from rich.live import Live
@@ -176,6 +177,7 @@ class SmartScanner(QObject):
 
     # ── Qt 시그널 ──────────────────────────────────────────────────────────
     signal_detected = pyqtSignal(object)  # ScanSignal 객체 전달
+    price_updated = pyqtSignal(str, int, int)  # (code, price, trend_level) — 포지션 현재가 갱신
 
     def __init__(self, kiwoom, cfg: Optional[SmartScannerConfig] = None) -> None:
         super().__init__()
@@ -572,10 +574,15 @@ class SmartScanner(QObject):
 
         reason = " | ".join(r for r in [r_breakout, r_gate] if r)
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+        
+        # [NEW] AI 피처 추출
+        ai_features = IndicatorService.get_ai_features(snap)
+        
         return ScanSignal(
             snap.code, snap.name, "BREAKOUT", snap.current_price, reason,
             entry_candle_low=candle_low,
             change_pct=float(getattr(snap, "change_pct", 0) or 0),
+            values=ai_features
         )
 
 
@@ -599,6 +606,10 @@ class SmartScanner(QObject):
 
         reason = " | ".join(r for r in [r_ema20, r_disp, r_jdm] if r)
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+        
+        # [NEW] AI 피처 추출
+        ai_features = IndicatorService.get_ai_features(snap)
+        
         # 일봉 맥락 — TP 상향 여부 판단
         from scanner.indicator_service import IndicatorService
         _gdc = IndicatorService.get_daily_context
@@ -610,6 +621,7 @@ class SmartScanner(QObject):
             near_daily_high=_dctx["near_high"],
             daily_ma20=_dctx["daily_ma20"],
             change_pct=float(getattr(snap, "change_pct", 0) or 0),
+            values=ai_features
         )
 
     def _build_pullback_signal(self, snap: StockSnapshot) -> Optional[ScanSignal]:
@@ -619,10 +631,15 @@ class SmartScanner(QObject):
             return None
             
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+        
+        # [NEW] AI 피처 추출
+        ai_features = IndicatorService.get_ai_features(snap)
+        
         return ScanSignal(
             snap.code, snap.name, "PULLBACK", snap.current_price, r_pullback,
             entry_candle_low=candle_low,
             change_pct=float(getattr(snap, "change_pct", 0) or 0),
+            values=ai_features
         )
 
 
@@ -645,6 +662,23 @@ class SmartScanner(QObject):
             return
         self._last_signal_ts[key] = now_ts
 
+        # [NEW] SQLite DB에 신호 및 AI 피처 저장
+        try:
+            db_data = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "code": sig.code,
+                "name": sig.name,
+                "signal_type": sig.signal_type,
+                "price": int(sig.price),
+                "reason": sig.reason
+            }
+            # AI 피처가 있으면 업데이트
+            if sig.values:
+                db_data.update(sig.values)
+                
+            DatabaseManager().insert_signal(db_data)
+        except Exception as e:
+            logger.error("[SmartScanner] DB 신호 저장 실패: %s", e)
 
         # ② 파일 로그
         ScannerLogger.signal(sig)
@@ -719,14 +753,10 @@ class SmartScanner(QObject):
                 self.store.update_chejan_strength(code, strength)
 
 
-            # [NEW] 포지션 종목 현재가 실시간 반영 (손절/익절 정확도 개선) [Phase 1] position_repo 경유로 변경
-            if self._order_mgr and hasattr(self._order_mgr, "position_repo") and price > 0:
-                self._order_mgr.position_repo.update_price(code, price)
-            elif self._order_mgr and code in self._order_mgr.positions and price > 0:
-                # 폴백 (position_repo 없을 경우 — 호환성)
-                self._order_mgr.positions[code].current_price = price
-            if self._order_mgr and code in self._order_mgr.positions and snap_now is not None and hasattr(self._order_mgr, "update_position_trend"):
-                self._order_mgr.update_position_trend(code, int(getattr(snap_now, "trend_level", 0)))
+            # [NEW] 포지션 종목 현재가 실시간 반영 (손절/익절 정확도 개선) — Qt Signal로 OrderManager에 전달
+            if price > 0 and snap_now is not None:
+                trend_level = int(getattr(snap_now, "trend_level", 0))
+                self.price_updated.emit(code, price, trend_level)
 
 
             # watch_q.refresh — SetRealReg/Remove를 매 틱 호출하면 API 과부하

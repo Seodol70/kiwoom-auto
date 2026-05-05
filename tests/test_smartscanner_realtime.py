@@ -341,7 +341,7 @@ class TestSmartScannerRealtimeCallback:
         assert snap.chejan_strength == 150.0
 
     def test_position_repo_primary_path(self):
-        """position_repo 경로로 포지션 current_price 업데이트"""
+        """price_updated 신호 발출 검증"""
         scanner = make_scanner(make_fid_map(price=15000))
         seed_store(scanner.store, code="005930")
 
@@ -351,15 +351,17 @@ class TestSmartScannerRealtimeCallback:
                        avg_price=14000, current_price=14000)
         scanner._order_mgr.positions["005930"] = pos
 
+        # 신호 발출 기록
+        emitted = []
+        scanner.price_updated.connect(lambda code, price, trend: emitted.append((code, price, trend)))
+
         scanner._on_receive_real_data("005930", "주식체결", "")
 
-        # position_repo.call_log에 기록되어야 함
-        assert ("005930", 15000) in scanner._order_mgr.position_repo.call_log
-        # position.current_price 갱신
-        assert pos.current_price == 15000
+        # price_updated 신호가 발출되어야 함
+        assert any(code == "005930" and price == 15000 for code, price, _ in emitted)
 
     def test_position_fallback_path(self):
-        """position_repo 없을 때 fallback: positions[code].current_price 직접 할당"""
+        """price_updated 신호 발출 (position_repo 없을 때도 신호는 발출)"""
         scanner = make_scanner(make_fid_map(price=15000))
         seed_store(scanner.store, code="005930")
 
@@ -374,10 +376,14 @@ class TestSmartScannerRealtimeCallback:
                        avg_price=14000, current_price=14000)
         scanner._order_mgr.positions["005930"] = pos
 
+        # 신호 발출 기록
+        emitted = []
+        scanner.price_updated.connect(lambda code, price, trend: emitted.append((code, price, trend)))
+
         scanner._on_receive_real_data("005930", "주식체결", "")
 
-        # fallback으로 직접 할당
-        assert pos.current_price == 15000
+        # price_updated 신호가 발출되어야 함 (OrderManager에서 처리할 책임)
+        assert any(code == "005930" and price == 15000 for code, price, _ in emitted)
 
 
 # ========== Level 3: Realtime Thread Safety (3개) ==========

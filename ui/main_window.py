@@ -33,14 +33,9 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self._kiwoom = kiwoom
 
         # 상태 및 플래그 초기화
-        self._sl_tp_warmup_end: float = 0.0
         self._scan_in_progress: bool = False
         self._liquidate_in_progress: bool = False
-        self._market_crash_off: bool = False
         self._already_started: bool = False
-        self._opened_today: bool = False
-        self._closed_today: bool = False
-        self._feedback_done_today: bool = False
         self._log_queue: list[str] = []
         self._today_watch: dict[str, Any] = {}
 
@@ -114,11 +109,8 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         # 2. 스캐너 주기적 스캔 (60초)
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.timeout.connect(self.trading_controller.run_periodic_scan)
-        
-        # 3. 장 종료 후 분석 (15:35)
-        self._feedback_timer = QTimer(self)
-        self._feedback_timer.timeout.connect(self._check_market_close_feedback)
-        self._feedback_timer.start(60_000)
+
+        # 3. 장 종료 후 분석은 MarketScheduler의 feedback_triggered 신호로 처리됨
 
     def _setup_background_workers(self) -> None:
         """배경 워커 설정"""
@@ -147,15 +139,6 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         # 초기 스캔 즉시 실행
         QTimer.singleShot(1000, self.trading_controller.run_periodic_scan)
         self.append_log("🚀 [시스템] 로그인 후 자동 동기화 및 스캔 시작")
-
-    def _check_market_close_feedback(self) -> None:
-        """15:35분 장 마감 피드백 실행 여부 확인"""
-        if self._feedback_done_today: return
-        now = datetime.now()
-        if now.hour == 15 and now.minute >= 35:
-            self._feedback_done_today = True
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(0, self._run_feedback_loop)
 
     def _run_feedback_loop(self) -> None:
         """피드백 엔진 실행 (QThread)"""

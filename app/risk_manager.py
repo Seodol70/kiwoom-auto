@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
@@ -47,6 +48,9 @@ class RiskManager(QObject):
         self._cooling_off_until = None
         self._manual_unlock_active = False
 
+        # 로그인 후 손절·익절 보류 기간
+        self._sl_tp_warmup_end: float = 0.0
+
         # 상태 복원 확인 로그
         if self._state:
             logger.info("[RiskManager] AppState 연동 완료 (ProfitLock=%s, LossCut=%s)",
@@ -59,6 +63,17 @@ class RiskManager(QObject):
     def update_config(self, scan_cfg: SmartScannerConfig) -> None:
         """설정 객체 참조를 갱신한다."""
         self._scan_cfg = scan_cfg
+
+    def start_warmup(self, duration_sec: float) -> None:
+        """로그인 후 손절·익절 보류 기간을 시작한다 (잔고·시세 안정화용)."""
+        self._sl_tp_warmup_end = time.monotonic() + max(0.0, duration_sec)
+        if duration_sec > 0:
+            logger.info("[RiskManager] SL/TP 손절익절 보류 시작 (%d초)", int(duration_sec))
+
+    @property
+    def is_sl_tp_warmup_active(self) -> bool:
+        """손절·익절 보류 기간 중인지 확인."""
+        return time.monotonic() < self._sl_tp_warmup_end
 
     # ─── 공개 인터페이스 ──────────────────────────────────────────────
 

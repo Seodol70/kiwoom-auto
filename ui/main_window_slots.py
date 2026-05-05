@@ -5,7 +5,6 @@ MainWindowSlots Mixin - 이벤트 처리 및 시그널 대응 전담
 
 from __future__ import annotations
 import logging
-import time as _time
 from datetime import datetime, date as _date
 from PyQt5.QtCore import pyqtSlot, QMetaObject, Qt as _Qt
 from PyQt5.QtWidgets import QMessageBox, QDialog
@@ -55,9 +54,10 @@ class MainWindowSlots:
         self._already_started = True
         self._today_watch.clear()
         self._news_analyzer.reset_daily()
-        
+
+        # 손절·익절 보류 기간 시작 (RiskManager에서 관리)
         _wu = float(_RISK2.get("sl_tp_warmup_sec", 45.0))
-        self._sl_tp_warmup_end = _time.monotonic() + max(0.0, _wu)
+        self.risk_manager.start_warmup(_wu)
         if _wu > 0:
             self.append_log(f"[리스크] 로그인 후 {_wu:.0f}초간 자동 손절·익절 보류 (잔고·시세 안정화)")
         
@@ -120,8 +120,7 @@ class MainWindowSlots:
     def _on_auto_trade_toggle(self, enabled: bool) -> None:
         """자동매매 토글 처리"""
         self.state.auto_trading = enabled
-        if enabled: self._market_crash_off = False
-        
+
         state = "시작" if enabled else "정지"
         self.append_log(f"{'🟢' if enabled else '🔴'} 자동매매 {state}")
         logger.info("[자동매매] 상태 변경: %s", state)
@@ -169,25 +168,9 @@ class MainWindowSlots:
         self.append_log("💰 [수익완료] 목표 수익 달성 — 신규 매수 제한")
 
     @pyqtSlot()
-    def _run_feedback_loop(self) -> None:
-        """피드백 엔진 실행 (QThread)"""
-        from app.feedback_worker import FeedbackWorker
-        self.append_log("📊 [피드백] 장 마감 분석 시작...")
-        self._fb_thread = QThread(self)
-        worker = FeedbackWorker()
-        worker.moveToThread(self._fb_thread)
-        self._fb_thread.started.connect(worker.run)
-        worker.finished.connect(self._on_feedback_done)
-        worker.finished.connect(self._fb_thread.quit)
-        self._fb_thread.start()
-
-    @pyqtSlot()
     def _on_day_reset(self) -> None:
         """장 시작 시 당일 상태 초기화"""
         self._already_started = False
-        self._opened_today = False
-        self._closed_today = False
-        self._feedback_done_today = False
         self._today_watch.clear()
         self.risk_manager.reset()
         self.append_log("🌅 [일일 리셋] 당일 매매 상태를 초기화했습니다.")
@@ -275,13 +258,11 @@ class MainWindowSlots:
     @pyqtSlot()
     def _on_market_opened(self) -> None:
         """장 시작 처리"""
-        self._opened_today = True
         self.append_log("🔔 [장시작] 정규장이 시작되었습니다. 감시를 강화합니다.")
 
     @pyqtSlot()
     def _on_market_closing(self) -> None:
         """장 마감 임박 처리"""
-        self._closed_today = True
         self.append_log("⌛ [장마감] 장 종료가 임박했습니다. 미체결 정리 및 당일청산을 준비합니다.")
 
     @pyqtSlot()
@@ -293,8 +274,6 @@ class MainWindowSlots:
     def _on_market_data_updated(self, kp_cur, kp_chg, kd_cur, kd_chg, is_crash) -> None:
         """시장 지수 UI 갱신"""
         self.header.set_index(kp_cur, kp_chg, kd_cur, kd_chg, is_crash)
-        if is_crash and not self._market_crash_off:
-            self.append_log("⚠ [지수급락] 시장 지수 급락 감지 — 신규 매수 일시 제한")
 
     @pyqtSlot()
     def _on_tg_status_requested(self) -> None:

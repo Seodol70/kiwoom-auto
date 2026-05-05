@@ -88,9 +88,33 @@ class DatabaseManager:
                     )
                 """)
                 
-                # 2. 인덱스 생성
+                # 2. signals 테이블 (AI 학습용 모든 신호 저장)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS signals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT,
+                        code TEXT,
+                        name TEXT,
+                        signal_type TEXT,
+                        price INTEGER,
+                        reason TEXT,
+                        f_rsi REAL,
+                        f_ema20_gap REAL,
+                        f_pct_b REAL,
+                        f_vol_surge REAL,
+                        f_change_pct REAL,
+                        f_strength REAL,
+                        f_trend REAL,
+                        is_traded INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # 3. 인덱스 생성
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_code ON trades(code)")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_date ON trades(trade_date)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_code ON signals(code)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_signals_type ON signals(signal_type)")
                 
                 conn.commit()
             logger.info("[DatabaseManager] DB 초기화 완료: %s", self.db_path)
@@ -121,6 +145,23 @@ class DatabaseManager:
                 conn.commit()
         except Exception as e:
             logger.error("[DatabaseManager] upsert_trade 실패 (key=%s): %s", trade_key, e)
+
+    def insert_signal(self, data: dict):
+        """AI 학습용 신호 데이터 저장"""
+        from contextlib import closing
+        try:
+            # 기본 필드와 AI 피처 분리 처리
+            columns = list(data.keys())
+            placeholders = ", ".join(["?" for _ in columns])
+            
+            query = f"INSERT INTO signals ({', '.join(columns)}) VALUES ({placeholders})"
+            params = [data[col] for col in columns]
+            
+            with closing(self._get_connection()) as conn:
+                conn.execute(query, params)
+                conn.commit()
+        except Exception as e:
+            logger.error("[DatabaseManager] insert_signal 실패: %s", e)
 
     def get_summary_stats(self):
         """기본 통계 산출"""

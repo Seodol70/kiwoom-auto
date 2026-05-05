@@ -110,24 +110,32 @@ class ScannerLogger:
 
     @staticmethod
     def _write_csv(filename: str, code: str, name: str, reason: str, values: dict) -> None:
-        """CSV 파일 기록 (선택 사항).
-
-        Args:
-            filename: CSV 파일명
-            code: 종목 코드
-            name: 종목명
-            reason: 사유
-            values: 추가 값
-        """
+        """CSV 파일 기록 (DictWriter를 사용하여 컬럼 순서 보장)."""
         log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
         csv_path = log_dir / filename
 
+        # AI 학습을 위한 기본 필드 정의
+        base_fields = ["timestamp", "code", "name", "reason"]
+        # values에 있는 키들을 추가 필드로 사용 (동적으로 확장하되, 기존 파일이 있으면 헤더 무시)
+        feature_fields = sorted(list(values.keys()))
+        fieldnames = base_fields + feature_fields
+
+        file_exists = csv_path.exists()
+
         try:
             with open(csv_path, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                row = [datetime.now().isoformat(), code, name, reason]
-                row.extend(values.values())
+                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+                if not file_exists:
+                    writer.writeheader()
+                
+                row = {
+                    "timestamp": datetime.now().isoformat(),
+                    "code": code,
+                    "name": name,
+                    "reason": reason
+                }
+                row.update(values)
                 writer.writerow(row)
         except Exception as e:
             scan_log.error(f"CSV 기록 실패: {filename}, {e}")
