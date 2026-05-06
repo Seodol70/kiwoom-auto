@@ -232,6 +232,9 @@ class SnapshotStore:
                 st.low_price = low_price
             if open_price > 0:
                 st.open_price = open_price
+            elif st.open_price == 0 and st.current_price > 0:
+                # [FIX] 시가가 없으면 현재가로 임시 세팅 (거래 시작 전까지)
+                st.open_price = st.current_price
 
             # FID 12가 0/None이면 prev_close로 직접 역산 — 기존 값은 보호
             if change_pct is not None and change_pct != 0.0:
