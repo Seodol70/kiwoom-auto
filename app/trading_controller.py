@@ -102,10 +102,28 @@ class TradingController(QObject):
     def force_update_stock(self, code: str) -> None:
         """특정 종목의 정보를 즉시 강제 갱신한다 (사용자 클릭 시)."""
         if not code: return
-        
+
         logger.info("[강제갱신] %s 정보 요청 중...", code)
-        info = self._kiwoom.get_stock_info(code)
-        
+
+        # [NEW] SetRealReg 캐시 우선 사용 (최신 실시간 데이터)
+        snap = self._snap_store.get_snapshot(code)
+        if snap and snap.current_price > 0:
+            logger.info("[강제갱신] %s SetRealReg 캐시 사용 (현재가: %d원)", code, snap.current_price)
+            info = {
+                "name": snap.name,
+                "current_price": snap.current_price,
+                "open": snap.open_price,
+                "high": snap.high_price,
+                "low": snap.low_price,
+                "volume": snap.volume,
+                "trade_amount": snap.trade_amount,
+                "change_pct": snap.change_pct,
+                "prev_close": snap.prev_close,
+            }
+        else:
+            # Fallback: opt10001 조회
+            info = self._kiwoom.get_stock_info(code)
+
         if info and info.get("current_price", 0) > 0:
             # 1. SnapshotStore 갱신
             self._snap_store.update_price(
