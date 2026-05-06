@@ -126,6 +126,9 @@ class ApplicationContext(QObject):
         # 실시간 가격 업데이트를 OrderManager에 전달 (손절/익절 실시간 감시용)
         self.smart_scanner.price_updated.connect(self.order_mgr._on_price_updated)
         
+        # [NEW] 실시간 지수 업데이트를 TradingController에 전달 (상시 급락 감시용)
+        self.smart_scanner.index_updated.connect(self.trading_controller.on_realtime_index_updated)
+        
         # [초기화] 설정 파일에 계좌번호가 명시되어 있으면 미리 세팅 (다이얼로그 스킵용)
         _conf_acc = cfg.ACCOUNT.get("number", "")
         if _conf_acc:

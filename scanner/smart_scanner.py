@@ -48,6 +48,7 @@ from scanner.universe import (
 from scanner.snapshot_store import SnapshotStore
 from scanner.indicator_service import IndicatorService
 from infra.db_manager import DatabaseManager
+from kiwoom_api import safe_int, safe_float
 from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 from rich.console import Console
 from rich.live import Live
@@ -177,7 +178,8 @@ class SmartScanner(QObject):
 
     # ── Qt 시그널 ──────────────────────────────────────────────────────────
     signal_detected = pyqtSignal(object)  # ScanSignal 객체 전달
-    price_updated = pyqtSignal(str, int, int)  # (code, price, trend_level) — 포지션 현재가 갱신
+    price_updated = pyqtSignal(str, int, float, int)  # (code, price, pct, trend_level) — 포지션 현재가 갱신
+    index_updated = pyqtSignal(str, float, float) # [NEW] (idx_name, price, pct) — 실시간 지수 갱신
 
     def __init__(self, kiwoom, cfg: Optional[SmartScannerConfig] = None, 
                  notification_mgr: Optional["NotificationManager"] = None) -> None:
@@ -256,6 +258,8 @@ class SmartScanner(QObject):
 
         # 캔들 마감 게이팅: 분이 바뀔 때만 _evaluate() 실행 (틱 기반 고점 진입 방지)
         self._eval_min: dict[str, int] = {}
+        self._last_real_tick_time: float = time.monotonic()  # [NEW] 실시간 데이터 하트비트
+
         # WATCH 모드 예비 종목 갱신 주기 (스코어링 기반)
         self._last_reserve_refresh: float = 0.0
         self._RESERVE_INTERVAL: float = 10.0   # 10초마다 예비 top-2 재선정
@@ -394,6 +398,31 @@ class SmartScanner(QObject):
 
 
         rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n)
+        
+        # [NEW] 가격 보강 로직 (opt10030 실패 시 또는 가격이 0일 때 opt10001 연동)
+        # 1. TR 실패로 인한 폴백 데이터거나, 2. 종목의 현재가가 0인 경우 강제 보정
+        is_fallback = getattr(self, "_last_volume_updated", 0) < time.monotonic() - 300.0
+        
+        target_indices = []
+        for i, r in enumerate(rows):
+            if is_fallback and i < 30: # 폴백 시 상위 30종목 강제 보정
+                target_indices.append(i)
+            elif safe_int(r.get("current_price")) <= 0: # 가격이 0이면 무조건 보정
+                target_indices.append(i)
+        
+        if target_indices:
+            logger.info("  ⚠ 데이터 보강 필요 (%d종목) -> opt10001 연동 시작", len(target_indices))
+            for idx in target_indices[:50]: # 최대 50종목으로 제한 (TR 과부하 방지)
+                r = rows[idx]
+                code = r.get("code")
+                if not code: continue
+                info = self._tr_q.call(self._kiwoom.get_stock_info, code)
+                if info:
+                    r["current_price"] = info.get("current_price", r.get("current_price"))
+                    r["change_pct"] = info.get("change_pct", r.get("change_pct"))
+                    r["trade_amount"] = info.get("trade_amount", r.get("trade_amount"))
+                    r["prev_close"] = info.get("base_price", r.get("prev_close"))
+
         rows, _ = self.universe_mgr.filter_equity_rows(rows)
         mc = self.cfg.max_change_pct
         _n0 = len(rows)
@@ -415,8 +444,19 @@ class SmartScanner(QObject):
         # ① DataFrame 에 일괄 적재
         self.top_mgr.clear()
         self.store.bulk_update(rows)
-
-
+        
+        # [NEW] TR 소모 없는 최종 기준가 복구 (0원 방어막)
+        # opt10030 차단(-200) 상태에서도 로컬 OCX 메모리를 통해 기준가 복구 시도
+        with self.store._lock:
+            for code in self.store._data.keys():
+                st = self.store._get_state(code)
+                if st.prev_close <= 0:
+                    recovered = self._kiwoom.get_current_price(code)
+                    if recovered > 0:
+                        st.prev_close = recovered
+                        if st.current_price > 0:
+                            st.change_pct = round((st.current_price - recovered) / recovered * 100, 2)
+                            
         for idx, row in enumerate(rows, 1):
             self.top_mgr.update(row["code"], row["trade_amount"])
             change_pct = row.get("change_pct", 0)
@@ -507,11 +547,12 @@ class SmartScanner(QObject):
             return
 
 
-        # ① 캔들 마감 게이팅 — 분이 바뀔 때만 평가 (틱 기반 고점 진입 방지)
-        cur_min = datetime.now().minute
-        if self._eval_min.get(snap.code, -1) == cur_min:
-            return
-        self._eval_min[snap.code] = cur_min
+        # ① 캔들 마감 게이팅 (exploration_mode 시에는 매 틱 판단하여 정밀 데이터 확보)
+        if not getattr(self.cfg, "exploration_mode", False):
+            cur_min = datetime.now().minute
+            if self._eval_min.get(snap.code, -1) == cur_min:
+                return
+            self._eval_min[snap.code] = cur_min
 
 
         # ② 등락률 상한
@@ -562,6 +603,12 @@ class SmartScanner(QObject):
                 sig.trend_prev_level = int(getattr(snap, "trend_prev_level", 0))
                 self._emit(sig)
                 return
+        
+        # [NEW] 탈락 사유 로깅 (전략 조건 미달)
+        if not getattr(self.cfg, "exploration_mode", False):
+            # 탐색 모드가 아닐 때만 너무 잦은 로그 방지용으로 필터링
+            from scanner.scanner_logger import ScannerLogger as _SL
+            _SL.rejected(snap.code, snap.name, "STRATEGY", "모든 전략 조건 미달 (탈락)")
 
 
 
@@ -630,6 +677,29 @@ class SmartScanner(QObject):
     def _on_receive_real_data(
         self, code: str, real_type: str, real_data: str
     ) -> None:
+        # 1. 하트비트 갱신
+        self._last_real_tick_time = time.monotonic()
+        
+        # [FIX] real_type 한글 깨짐 강제 보정 (더 공격적으로)
+        try:
+            if real_type:
+                # 이미 한글(유니코드 0xAC00 이상)이 포함되어 있다면 스킵
+                if not any(ord(c) > 0x8800 for c in real_type):
+                    # latin-1으로 인코딩 후 cp949로 재해석 시도
+                    real_type = real_type.encode('latin-1').decode('cp949')
+        except Exception:
+            pass
+
+        # [진단] 실시간 틱 수신 확인 (5초 주기)
+        if self._last_real_tick_time - getattr(self, "_last_real_diag", 0) > 5.0:
+            self._last_real_diag = self._last_real_tick_time
+            logger.info("[실시간진단] 틱 수신 중 — 코드: %s, 타입: %s", code, real_type)
+
+        # 2. 지수 데이터 처리 (TR 차단 대비 상시 감시)
+        if real_type == "업종지수":
+            self._handle_index_realtime(code)
+            return
+
         if real_type not in ("주식체결", "주식호가잔량"):
             return
 
@@ -637,8 +707,6 @@ class SmartScanner(QObject):
             return self._kiwoom._ocx.dynamicCall(
                 "GetCommRealData(QString, int)", [code, n]
             )
-
-        from kiwoom_api import safe_int, safe_float
 
         # [NEW] 호가 잔량 처리
         if real_type == "주식호가잔량":
@@ -650,30 +718,112 @@ class SmartScanner(QObject):
 
         # 주식체결 처리
         try:
-            price    = safe_int(fid(10))
-            cum_vol  = safe_int(fid(15))  # [FIX] FID 15: 당일거래량 (누적)
-            cum_amt  = safe_int(fid(13))  # [FIX] FID 13: 누적거래대금 (단위: 천원)
-            high     = safe_int(fid(17))
-            low      = safe_int(fid(18))
-            open_    = safe_int(fid(16))
-            pct      = safe_float(fid(12))
-            strength_raw = safe_float(fid(20))    # [NEW] FID 20: 체결강도
+            price      = safe_int(fid(10))
+            change_amt = safe_float(fid(11))  # 전일대비 금액
+            pct        = safe_float(fid(12))  # 등락률 (%)
             
+            # [진단] 실시간 데이터 값 확인 (개발용 - DEBUG)
+            if self._last_real_tick_time - getattr(self, "_last_field_diag", 0) > 60.0: # 주기를 60초로 상향
+                self._last_field_diag = self._last_real_tick_time
+                logger.debug("[데이터확인] %s | 현재가=%d | 전일대비=%.1f | 등락률(FID12)=%.2f%%", 
+                            code, price, change_amt, pct)
+
+            cum_vol    = safe_int(fid(15))  # FID 15: 당일거래량 (누적)
+            cum_amt    = safe_int(fid(13))  # FID 13: 누적거래대금 (단위: 천원)
+            high       = safe_int(fid(17))
+            low        = safe_int(fid(18))
+            open_      = safe_int(fid(16))
+            strength_raw = safe_float(fid(20))    # FID 20: 체결강도
+
+            # [진단] 등락률 관련 FID 원시값 기록 (첫 틱만, INFO 레벨)
+            if not getattr(self, "_fid_diag_logged", None):
+                self._fid_diag_logged = set()
+            if code not in self._fid_diag_logged:
+                self._fid_diag_logged.add(code)
+            # [EXTREME DEBUG] 60초에 한 번만 로그 출력 (로그 폭발 방지)
+            now_ts = time.monotonic()
+            last_log = getattr(self, "_last_diag_log", {})
+            if now_ts - last_log.get(code, 0) > 60.0:
+                logger.debug(
+                    "[틱수신/진단] %s | 현재가=%d | 등락률(FID12)=%r | 전일대비(FID11)=%r",
+                    code, price, fid(12), fid(11)
+                )
+                last_log[code] = now_ts
+                self._last_diag_log = last_log
+
             # FID 20 정규화 (10000 이상이면 100으로 나눔)
             strength = strength_raw / 100.0 if strength_raw >= 10000.0 else strength_raw
 
             if price <= 0:
                 return   # 유효하지 않은 체결 데이터
 
+            # [NEW] AI 학습용 틱 로그 저장 (비동기 처리 권장하나 여기서는 간단히 필터링 후 저장)
+            if real_type == "주식체결":
+                # 감시 중인 종목만 저장하여 I/O 부하 최소화
+                if code in self.watch_q.subscribed:
+                    self._log_tick_to_csv(code, price, int(fid(14)), cum_vol, pct)
+
+            # 등락률·기준가 계산
+            # FID 11(전일대비 금액)은 실시간으로 항상 제공되며 부호가 정확함
+            if change_amt != 0.0 and price > 0:
+                prev_close = price - int(change_amt)
+            else:
+                # FID 11도 없는 경우 — 기존 snapshot의 prev_close 재사용
+                st_temp = self.store.get_snapshot(code)
+                prev_close = st_temp.prev_close if st_temp else 0
+            
+            # [FINAL FALLBACK] 여전히 기준가가 0이라면 OCX 강제 동원 (2단계)
+            if prev_close <= 0:
+                prev_close = self._kiwoom.get_current_price(code)
+            if prev_close <= 0:
+                prev_close = self._kiwoom.get_master_price(code)
+            
+            # [ULTIMATE FALLBACK] 정말로 0이라면... 현재가를 기준가로 임시 세팅
+            if prev_close <= 0 and price > 0:
+                prev_close = price
+            
+            if prev_close > 0 and (pct == 0.0 or abs(pct) < 0.001):
+                # 기준가는 있는데 등락률이 0이면 직접 계산 (FID 12 지연 대응)
+                pct = round((price - prev_close) / prev_close * 100, 2)
+
+            # [FIX] 지능형 거래대금 단위 보정: 오차 최소화(Nearest Match) 방식 채택
+            # 현재가 * 누적거래량(est_amt)과 비교하여 천원/백만 단위 중 더 가까운 쪽 선택
+            raw_cum_amt = safe_int(fid(13))
+            est_amt = price * cum_vol
+            
+            # [진단 로그] 주요 종목 정밀 추적
+            if code in ("005930", "076610", "086520"):
+                logger.info("[단위진단] %s | raw=%d | est=%d | p=%d | v=%d", 
+                            code, raw_cum_amt, est_amt, price, cum_vol)
+
+            if raw_cum_amt > 0:
+                cand_1k = raw_cum_amt * 1_000
+                cand_1m = raw_cum_amt * 1_000_000
+                
+                diff_1k = abs(est_amt - cand_1k)
+                diff_1m = abs(est_amt - cand_1m)
+                
+                # 오차가 더 적은 단위를 선택
+                real_trade_amt = cand_1m if diff_1m < diff_1k else cand_1k
+            else:
+                real_trade_amt = 0
+
+            # [FINAL RECOVERY] 기준가가 여전히 0이면 마스터 정보에서 가져옴
+            if prev_close <= 0:
+                prev_close = abs(self._kiwoom.get_master_last_price(code))
+                if prev_close > 0:
+                    logger.warning("[SmartScanner] %s 기준가 마스터 복구 성공: %d", code, prev_close)
+            
             # ① DataFrame 및 상태 갱신
             # 누적 거래량(cum_vol)과 누적 거래대금(cum_amt)을 직접 전달하여 VWAP 정밀도 확보
             self.store.update_price(
                 code=code, current_price=price, high_price=high,
                 low_price=low, open_price=open_, volume=cum_vol,
-                trade_amount=cum_amt,
+                trade_amount=real_trade_amt,
                 change_pct=pct,
                 cum_vol=cum_vol,
-                cum_amt=cum_amt,
+                cum_amt=raw_cum_amt, # 원본 저장
+                prev_close=prev_close,
             )
             snap_now = self.store.get_snapshot(code)
             amt = int(snap_now.trade_amount) if snap_now else 0
@@ -689,7 +839,10 @@ class SmartScanner(QObject):
             # [NEW] 포지션 종목 현재가 실시간 반영 (손절/익절 정확도 개선) — Qt Signal로 OrderManager에 전달
             if price > 0 and snap_now is not None:
                 trend_level = int(getattr(snap_now, "trend_level", 0))
-                self.price_updated.emit(code, price, trend_level)
+                self.price_updated.emit(code, price, float(snap_now.change_pct), trend_level)
+                
+                # ② 실시간 신호 판단 (데이터 정합성 보장 후 실행)
+                self._evaluate(snap_now)
 
 
             # watch_q.refresh — SetRealReg/Remove를 매 틱 호출하면 API 과부하
@@ -705,8 +858,75 @@ class SmartScanner(QObject):
 
 
     def _handle_index_realtime(self, idx_code: str) -> None:
-        """지수 로직 비활성화 — 장초반 TR 부하 제거"""
-        return
+        """실시간 지수 데이터 처리 및 TradingController 전파"""
+        try:
+            def fid(n: int) -> str:
+                return self._kiwoom._ocx.dynamicCall(
+                    "GetCommRealData(QString, int)", [idx_code, n]
+                )
+            
+            cur_price = safe_float(fid(10)) # 현재가
+            chg_pct = safe_float(fid(12))   # 등락률
+            
+            if cur_price == 0: return
+            
+            # 지수 종류 결정
+            idx_name = "KOSPI" if idx_code == "001" else "KOSDAQ"
+            
+            # SmartScanner 상태 업데이트
+            if idx_name == "KOSPI":
+                self._kospi_cur = cur_price
+                self._kospi_chg_pct = chg_pct
+            else:
+                self._kosdaq_cur = cur_price
+                self._kosdaq_chg_pct = chg_pct
+            
+            # [NEW] TradingController 연동을 위한 시그널 발행
+            self.index_updated.emit(idx_name, cur_price, chg_pct)
+                
+            # 지수 정보 동기화 (RS 필터용)
+            if self.cfg:
+                if idx_name == "KOSPI": self.cfg.kospi_chg_pct = chg_pct
+                else: self.cfg.kosdaq_chg_pct = chg_pct
+
+        except Exception as e:
+            logger.debug("[_handle_index_realtime] 오류: %s", e)
+
+    def _subscribe_market_indices(self) -> None:
+        """코스피/코스닥 지수 실시간 구독 등록"""
+        try:
+            # 업종지수: 001(코스피), 101(코스닥)
+            for code in ["001", "101"]:
+                self._kiwoom._ocx.dynamicCall(
+                    "SetRealReg(QString, QString, QString, QString)",
+                    ["9001", code, "10;11;12", "1"]
+                )
+            logger.info("[SmartScanner] 실시간 지수 구독 완료 (KOSPI, KOSDAQ)")
+        except Exception as e:
+            logger.warning("[SmartScanner] 지수 구독 실패: %s", e)
+
+    def _log_tick_to_csv(self, code: str, price: float, vol: int, cum_vol: int, pct: float) -> None:
+        """AI 학습용 틱 데이터를 CSV에 기록 (비동기 파일 I/O 권장)"""
+        try:
+            import os
+            import csv
+            log_dir = os.path.join(self.cfg.log_dir, "ticks")
+            os.makedirs(log_dir, exist_ok=True)
+            
+            day = datetime.now().strftime("%Y%m%d")
+            filename = os.path.join(log_dir, f"ticks_{day}.csv")
+            
+            file_exists = os.path.isfile(filename)
+            with open(filename, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["timestamp", "code", "price", "volume", "cum_volume", "change_pct"])
+                
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                writer.writerow([ts, code, price, vol, cum_vol, pct])
+        except Exception as e:
+            # 틱 로깅 실패는 시스템 중단 사유가 아니므로 디버그 로그만
+            pass
 
 
     # -----------------------------------------------------------------------
@@ -803,12 +1023,19 @@ class SmartScanner(QObject):
             for attempt in range(retry):
                 try:
                     if hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
-                        rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
+                        # TR 차단 상태 확인 (KiwoomManager 레벨의 차단 여부 체크)
+                        if getattr(self._kiwoom, "is_tr_banned", lambda x: False)("opt10030"):
+                            logger.warning("[opt10030] 현재 차단 상태(Ban)입니다. 조회를 건너뜁니다.")
+                            rows = []
+                        else:
+                            rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
                         
                         # [NEW] opt10030 응답이 없으면(공휴일/장전) opt10032(전일거래대금상위) 시도
-                        if not rows and hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
-                            logger.info("[opt10030] 오늘 데이터 없음 -> opt10032(전일거래대금상위) 폴백 시도")
-                            rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
+                        # 단, 차단 상태가 아닐 때만 시도하여 연쇄 차단 방지
+                        if not rows and not getattr(self._kiwoom, "is_tr_banned", lambda x: False)("opt10030"):
+                            if hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
+                                logger.info("[opt10030] 데이터 없음 -> opt10032(전일거래대금상위) 폴백 시도")
+                                rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
                     else:
                         rows = self._tr_q.call(self._do_fetch_opt10030)
                         rows = rows[:target]
@@ -871,8 +1098,15 @@ class SmartScanner(QObject):
             return []
 
         logger.info("=" * 60)
-        logger.info("[주기 스캔] 시작 — %s", datetime.now().strftime("%H:%M:%S"))
+        # ① 하트비트 체크 (60초 이상 무소식 시 경고)
+        silence = time.monotonic() - self._last_real_tick_time
+        if silence > 60.0:
+            logger.warning("  ⚠ 실시간 데이터 침묵 중 (%.1f초간 수신 없음) — 구독 상태 확인 필요", silence)
+
+        logger.info("▶ [2단계] 주기 스캔 시작 (Interval %.0fs)", self.cfg.scan_interval)
         self._log_store_health()
+        # [NEW] 실시간 지수 구독 시작
+        self._subscribe_market_indices()
 
         # 2. 거래대금 상위 데이터 확보
         _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "데이터 수집 중...")
@@ -966,14 +1200,43 @@ class SmartScanner(QObject):
                             # 변환 실패 시 원본 사용
                             name = raw_name or ""
 
+                        # [FIX] prev_close를 0이 아닌 마스터 정보(전일종가)에서 가져옴
+                        master_p = abs(self._kiwoom.get_master_last_price(code))
+                        
+                        # [NEW] 우선순위 기반 가격 복원
+                        # 1. SnapshotStore에 이미 있는 현재가 (실시간/개별TR 업데이트 반영)
+                        # 2. 1분봉 캐시 파일의 마지막 종가
+                        # 3. 마스터 가격 (전일 종가)
+                        
+                        snap = self.store.get_snapshot(code)
+                        cur_p = snap.current_price if snap and snap.current_price > 0 else 0
+                        chg_pct = 0.0
+                        
+                        # [NEW] 캐시 데이터 우선순위 강화
+                        # 스토어에 가격이 없거나, 있어도 전일종가(마스터)와 같다면 캐시에서 오늘 최종가 로드 시도
+                        if cur_p == 0 or cur_p == master_p:
+                            cnt = self.store.load_1min_for_code(code)
+                            if cnt > 0:
+                                st = self.store.get_internal_state(code)
+                                if st.mins:
+                                    cur_p = int(st.mins[-1])
+                        
+                        # 여전히 0이면 마스터 가격 사용
+                        if cur_p == 0:
+                            cur_p = master_p
+                            
+                        # 등락률 계산
+                        if master_p > 0:
+                            chg_pct = round((cur_p - master_p) / master_p * 100, 2)
+                        
                         fallback_rows.append({
                             "code": code,
                             "name": name.strip(),
-                            "current_price": 0,
+                            "current_price": cur_p,
                             "trade_amount": pv * 1000,
                             "volume": pv,
-                            "change_pct": 0.0,
-                            "prev_close": 0
+                            "change_pct": chg_pct,
+                            "prev_close": master_p,
                         })
                 
                 if fallback_rows:
@@ -982,19 +1245,8 @@ class SmartScanner(QObject):
                     logger.info("[주기 스캔] 전일 캐시 기반 %d종목 유니버스 생성 완료", len(fallback_rows))
                     return fallback_rows[:self.cfg.collect_raw_top_n]
 
-            logger.warning("[주기 스캔] opt10030/10032/전일캐시 모두 실패 — fallback 10대장 대체")
-            return [
-                {"code": "005930", "name": "삼성전자", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "000660", "name": "SK하이닉스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "207940", "name": "삼성바이오로직스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "005380", "name": "현대차", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "373220", "name": "LG에너지솔루션", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "000270", "name": "기아", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "068270", "name": "셀트리온", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "005490", "name": "POSCO홀딩스", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "035420", "name": "NAVER", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-                {"code": "006400", "name": "삼성SDI", "current_price": 0, "trade_amount": 0, "change_pct": 0.0, "volume": 0, "prev_close": 0},
-            ]
+            logger.warning("[주기 스캔] opt10030/10032/전일캐시 모두 실패 — 빈 유니버스 반환")
+            return []
         return rows
 
     def _filter_and_score_universe(self, rows: list[dict]) -> list[dict]:
@@ -1025,16 +1277,25 @@ class SmartScanner(QObject):
     def _refresh_realtime_watch(self, top_codes: list[str]) -> None:
         """실시간 틱 구독 목록을 갱신한다. (보유 종목 포함)"""
         # 1. 감시 리스트 구성: 상위 종목 + 현재 보유 종목 (관리용)
-        held_codes = list(self._order_mgr.positions.keys()) if self._order_mgr else []
-        
+        held_codes = []
+        if self._order_mgr and hasattr(self._order_mgr, "positions"):
+            held_codes = [c for c in self._order_mgr.positions.keys() if c]
+            
+        # [NEW] 만약 상위 종목이 없다면(TR 차단 등), 보유 종목이라도 무조건 감시
+        if not top_codes and not held_codes:
+            # 최후의 보루: 삼성전자 강제 추가 (데이터 흐름 확인용)
+            top_codes = ["005930"]
+            
         # 보유 종목은 항상 최상단 우선순위로 등록 (실시간 가격 갱신 보장)
-        # set을 사용하여 중복 제거 후 리스트화
         combined = list(dict.fromkeys(held_codes + top_codes))
         
         # Kiwoom SetRealReg 최대 갯수(약 100개) 제한 고려
-        reg_codes = combined[:self.cfg.realtime_sub_max]
+        reg_codes = combined[:getattr(self.cfg, "realtime_sub_max", 100)]
         
-        self.watch_q.refresh(reg_codes)
+        if self.watch_q:
+            logger.info("[실시간] 구독 갱신 시도: %d종목 (보유=%d, 상위=%d)", 
+                        len(reg_codes), len(held_codes), len(top_codes))
+            self.watch_q.refresh(reg_codes)
 
     def register_code_realtime(self, code: str) -> None:
         """단일 종목 실시간 시세 등록 (보유 종목 진입 시 즉시 호출)"""

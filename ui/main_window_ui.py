@@ -119,3 +119,6 @@ class MainWindowUI:
         # System Log
         self._sys_handler = SysLogQtHandler(self.log_panel)
         logging.getLogger().addHandler(self._sys_handler)
+
+        # [NEW] 스캐너 워커 로그 전파 차단 (중복 출력 방지)
+        logging.getLogger("scanner.worker").propagate = False

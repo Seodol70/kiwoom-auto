@@ -153,7 +153,9 @@ class MainWindowSlots:
         """사용자 수동 개입으로 일일 손익 락을 해제한다 (RiskManager 연동)."""
         self.risk_manager.unlock_entry_manual()
         self.header.set_risk_status("SAFE")
-        self.append_log("🔓 [수동해제] 일일 손익 락 해제 완료 — 금일 자동 재락 일시 중단")
+        if hasattr(self, "_kiwoom"):
+            self._kiwoom.reset_tr_bans()
+        self.append_log("🔓 [수동해제] 일일 손익 락 및 TR 차단 해제 완료")
 
     @pyqtSlot()
     def _on_loss_cut(self) -> None:
@@ -235,8 +237,10 @@ class MainWindowSlots:
         from app.config_manager import config_manager as cfg, reload_adaptive
         cfg.reload()
         msg = reload_adaptive(self._scan_cfg)
+        if hasattr(self, "_kiwoom"):
+            self._kiwoom.reset_tr_bans()
         self.append_log(f"⚙ [설정] {msg}")
-        self.append_log("✅ [설정] 전역 및 적응형 설정을 재로드했습니다.")
+        self.append_log("✅ [설정] 전역 설정 및 TR 차단을 초기화했습니다.")
 
     @pyqtSlot(str)
     def _on_manual_sell(self, code: str) -> None:
@@ -248,8 +252,11 @@ class MainWindowSlots:
 
     @pyqtSlot(str)
     def _on_code_selected(self, code: str) -> None:
-        """종목 선택 시 차트 표시"""
+        """종목 선택 시 차트 표시 및 데이터 강제 갱신"""
         if not code: return
+
+        # [NEW] 데이터가 이상할 경우를 대비해 즉시 강제 갱신 트리거
+        self.trading_controller.force_update_stock(code)
 
         # TradingController에서 차트 데이터 조회
         data = self.trading_controller.get_chart_data(code)

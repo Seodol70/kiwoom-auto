@@ -35,9 +35,23 @@ class NotificationManager:
         """
         통합 알림 실행.
         """
+        # [NEW] 한글 깨짐 방어막 (latin-1 -> cp949)
+        def fix_text(t: str) -> str:
+            if not t: return t
+            try:
+                # 깨진 한글 패턴 감지 (ASCII 범위를 벗어나는 문자열 중 cp949로 해석 가능한 경우)
+                if any(ord(c) > 255 for c in t):
+                    # 이미 유니코드일 수 있으나, 깨진 상태일 수 있으므로 latin-1로 밀어내고 다시 decode
+                    return t.encode('latin-1').decode('cp949')
+            except Exception:
+                pass
+            return t
+
+        title   = fix_text(title)
+        message = fix_text(message)
         full_msg = f"[{level}] {title} — {message}"
         
-        # 1. 로깅 (이미 각 컴포넌트에서 하고 있을 수 있으므로 알림 전용 로거 사용)
+        # 1. 로깅
         logger.info(full_msg)
 
         # 2. 텔레그램 전송

@@ -51,7 +51,7 @@ def _build_scan_logger(log_dir: str = "logs") -> logging.Logger:
     os.makedirs(log_dir, exist_ok=True)
     logger = logging.getLogger("scanner.audit")
     logger.setLevel(logging.DEBUG)
-    logger.propagate = False
+    logger.propagate = True
 
     handler = _WinSafeRotatingFileHandler(
         filename=os.path.join(log_dir, "scanner.log"),
@@ -68,6 +68,7 @@ def _build_scan_logger(log_dir: str = "logs") -> logging.Logger:
 
 
 scan_log = _build_scan_logger()
+scan_log.info("--- ScannerLogger Initialized (Session Start: %s) ---", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
 # CSV 컬럼 정의
 _CSV_BASE_FIELDS = ["timestamp", "code", "name", "reason"]
@@ -171,22 +172,25 @@ class ScannerLogger:
     @staticmethod
     def passed(code: str, name: str, filter_name: str, detail: str = "", values: dict = None) -> None:
         """선정된 신호 기록."""
-        reason = f"[{filter_name}] {detail}" if detail else filter_name
-        scan_log.info("✅ [통과] %s(%s) %s", code, name, reason)
-        ScannerLogger._buffer_csv("scanner_passed.csv", code, name, reason, values or {})
-
+        reason = detail if detail else filter_name
+        # Handler 형식: "PASS/FAIL\tcode\tname\tstep\treason"
+        scan_log.info("PASS\t%s\t%s\t%s\t%s", code, name, filter_name, reason)
+        ScannerLogger._buffer_csv("scanner_passed.csv", code, name, f"[{filter_name}] {reason}", values or {})
+    
     @staticmethod
     def rejected(code: str, name: str, filter_name: str, detail: str = "") -> None:
         """탈락 신호 기록."""
-        reason = f"[{filter_name}] {detail}" if detail else filter_name
-        scan_log.debug("❌ [탈락] %s(%s) %s", code, name, reason)
-        ScannerLogger._buffer_csv("scanner_rejected.csv", code, name, reason, {})
+        reason = detail if detail else filter_name
+        # Handler 형식: "PASS/FAIL\tcode\tname\tstep\treason"
+        scan_log.debug("FAIL\t%s\t%s\t%s\t%s", code, name, filter_name, reason)
+        ScannerLogger._buffer_csv("scanner_rejected.csv", code, name, f"[{filter_name}] {reason}", {})
 
     @staticmethod
     def signal(sig) -> None:
         """최종 신호 기록."""
         reason = f"[{sig.signal_type}] {sig.reason}"
-        scan_log.warning("🚨 [신호] %s(%s) %s", sig.code, sig.name, reason)
+        # Handler 형식: "PASS/FAIL\tcode\tname\tstep\treason" (신호는 PASS 취급)
+        scan_log.warning("PASS\t%s\t%s\tSIGNAL\t%s", sig.code, sig.name, reason)
         ScannerLogger._buffer_csv("scanner_signal.csv", sig.code, sig.name, reason, sig.values or {})
 
     @staticmethod

@@ -98,6 +98,39 @@ class TradingController(QObject):
         self._strategy = JangDongMinStrategy(
             self._order_mgr, self._risk_mgr, self._scan_cfg, self._snap_store
         )
+
+    def force_update_stock(self, code: str) -> None:
+        """특정 종목의 정보를 즉시 강제 갱신한다 (사용자 클릭 시)."""
+        if not code: return
+        
+        logger.info("[강제갱신] %s 정보 요청 중...", code)
+        info = self._kiwoom.get_stock_info(code)
+        
+        if info and info.get("current_price", 0) > 0:
+            # 1. SnapshotStore 갱신
+            self._snap_store.update_price(
+                code=code,
+                current_price=info["current_price"],
+                open_price=info.get("open", 0),
+                high_price=info.get("high", 0),
+                low_price=info.get("low", 0),
+                volume=info.get("volume", 0),
+                trade_amount=info.get("trade_amount", 0),
+                change_pct=info.get("change_pct", 0.0),
+                prev_close=info.get("prev_close", 0)
+            )
+            
+            # 2. InternalState (고속 캐시) 동기화
+            st = self._snap_store.get_internal_state(code)
+            if st:
+                st.current_price = info["current_price"]
+                st.prev_close = info.get("prev_close", 0)
+                st.change_pct = info.get("change_pct", 0.0)
+                st.trade_amount = info.get("trade_amount", 0)
+            
+            self.log_message.emit(f"✅ [{info['name']}] 데이터 강제 갱신 완료 (현재가: {info['current_price']:,}원)")
+        else:
+            self.log_message.emit(f"❌ [{code}] 데이터 강제 갱신 실패 (네트워크 또는 마켓 확인)")
         
         # [AI] 신호 필터 초기화
         from app.ai_filter import AIFilter
@@ -385,7 +418,7 @@ class TradingController(QObject):
         if _is_opening:
             return ExitContext(
                 sl_pct=float(
-                    getattr(self._scan_cfg, "stop_loss_pct_opening", self._scan_cfg.stop_loss_pct)
+                    getattr(self._scan_cfg, "stop_loss_pct_opening", self._scan_cfg.jdm_stop_loss_pct)
                 ),
                 trail_activation=self._scan_cfg.trail_activation_pct,
                 trail_tier1=self._scan_cfg.trail_pct_tier1,
@@ -398,7 +431,7 @@ class TradingController(QObject):
         elif _is_midday:
             return ExitContext(
                 sl_pct=float(
-                    getattr(self._scan_cfg, "stop_loss_pct_midday", self._scan_cfg.stop_loss_pct)
+                    getattr(self._scan_cfg, "stop_loss_pct_midday", self._scan_cfg.jdm_stop_loss_pct)
                 ),
                 trail_activation=float(
                     getattr(
@@ -428,7 +461,7 @@ class TradingController(QObject):
             )
         else:
             return ExitContext(
-                sl_pct=self._scan_cfg.stop_loss_pct,
+                sl_pct=getattr(self._scan_cfg, "jdm_stop_loss_pct", -1.2),
                 trail_activation=self._scan_cfg.trail_activation_pct,
                 trail_tier1=self._scan_cfg.trail_pct_tier1,
                 trail_tier2=self._scan_cfg.trail_pct_tier2,
@@ -511,14 +544,26 @@ class TradingController(QObject):
         finally:
             self._scan_in_progress = False
 
+    @pyqtSlot(str, float, float)
+    def on_realtime_index_updated(self, idx_name: str, price: float, pct: float) -> None:
+        """[NEW] SmartScanner로부터 실시간 지수 수신 (상시 감시)"""
+        if idx_name == "KOSPI":
+            self._kospi_cur = price
+            self._kospi_chg_pct = pct
+        else:
+            self._kosdaq_cur = price
+            self._kosdaq_chg_pct = pct
+        
+        # 급락 여부 즉시 판단
+        self._evaluate_market_crash()
+
     @pyqtSlot()
     def check_market_crash(self) -> None:
-        """지수 급락 감지 및 신규 진입 차단 (60초마다)"""
+        """지수 급락 감지 및 신규 진입 차단 (60초마다 폴링)"""
         # 장 시작 전(08:30 이전)에는 지수 데이터 미제공 — 스킵
         from datetime import datetime, time as _time
         now_t = datetime.now().time()
         if now_t < _time(8, 30):
-            logger.debug("[check_market_crash] 장 전 (%s) — 지수 조회 스킵", now_t.strftime("%H:%M"))
             return
 
         if getattr(self._kiwoom, '_tr_busy', False):
@@ -530,47 +575,41 @@ class TradingController(QObject):
         kp = self._kiwoom.get_index_info("001")
         kd = self._kiwoom.get_index_info("101")
 
-        # 조회 실패 시 캐시된 값 유지
         if kp:
             self._kospi_cur = kp['current']
             self._kospi_chg_pct = kp['change_pct']
-        else:
-            logger.warning("[check_market_crash] KOSPI 조회 실패 — 기존값 유지 (%.2f)", self._kospi_cur)
-
         if kd:
             self._kosdaq_cur = kd['current']
             self._kosdaq_chg_pct = kd['change_pct']
-        else:
-            logger.warning("[check_market_crash] KOSDAQ 조회 실패 — 기존값 유지 (%.2f)", self._kosdaq_cur)
         
-        # [NEW] RS 필터 및 지표 계산을 위해 Config에 지수 정보 동기화
+        # 급락 여부 판단 및 UI 갱신
+        self._evaluate_market_crash()
+
+    def _evaluate_market_crash(self) -> None:
+        """지수 데이터를 기반으로 급락 여부를 판단하고 상태를 갱신한다."""
         if self._scan_cfg:
             self._scan_cfg.kospi_chg_pct = self._kospi_chg_pct
             self._scan_cfg.kosdaq_chg_pct = self._kosdaq_chg_pct
 
-        logger.info("[지수업데이트] KOSPI: %.2f(%.2f%%) / KOSDAQ: %.2f(%.2f%%)", 
-                    kp['current'], kp['change_pct'], kd['current'], kd['change_pct'])
-
-        # 2. 급락 여부 판단 (index_block_pct -1.5%보다 더 심한 -2.0% 기준)
+        # 급락 여부 판단 (기준: -2.0%)
         crash_limit = -2.0
         is_crash = (self._kospi_chg_pct <= crash_limit or self._kosdaq_chg_pct <= crash_limit)
 
-        # 3. 급락 감지 신호 발행 (상태 변경은 슬롯에서 처리)
+        # 급락 감지 시 신호 발행 (이미 중지된 상태면 중복 발행 방지)
         if is_crash and not self._market_crash_off:
             self.market_crash_detected.emit(self._kospi_chg_pct, self._kosdaq_chg_pct)
         
-        # UI 업데이트 신호 발생 (KOSPI 현재/%, KOSDAQ 현재/%, 급락여부)
-        # 실패하더라도 0.0 또는 기존값을 보냄으로써 UI가 갱신되도록 함
+        # UI 업데이트 신호 발생
         self.market_data_updated.emit(
             self._kospi_cur, self._kospi_chg_pct,
             self._kosdaq_cur, self._kosdaq_chg_pct,
             is_crash
         )
-        logger.debug("[check_market_crash] market_data_updated 시그널 발행 완료 (is_crash=%s)", is_crash)
 
     @pyqtSlot(float, float)
     def _on_market_crash_detected(self, kospi_pct: float, kosdaq_pct: float) -> None:
         """지수 급락 신호 수신 — 자동매매 긴급 정지"""
+        if self._market_crash_off: return # 중복 처리 방지
         self._market_crash_off = True
         self._auto_trading = False
         self.log_message.emit(f"🔴 [지수급락] 코스피 {kospi_pct}% / 코스닥 {kosdaq_pct}% — 자동매매 긴급 정지")

@@ -126,9 +126,8 @@ class SnapshotStore:
                 curr = float(row.get("current_price") or 0)
                 if curr > 0 and cp != 0:
                     row["prev_close"] = int(curr / (1.0 + cp / 100.0))
-                    logger.debug("[복구] %s: change_pct=%.2f%% curr=%d → prev_close=%d (역산)",
-                                 row.get("code"), cp, curr, row["prev_close"])
                 elif curr > 0 and cp == 0:
+                    row["prev_close"] = curr
                     row["prev_close"] = curr
                     logger.debug("[복구] %s: change_pct=0%% → prev_close=%d (동일)",
                                  row.get("code"), curr)
@@ -175,9 +174,22 @@ class SnapshotStore:
                 except Exception as e:
                     logger.warning("[SnapshotStore] %s 시세 캐시 업데이트 오류: %s", code, e)
 
-                st.change_pct    = float(new_df.at[code, "change_pct"])    if "change_pct"    in new_df.columns else 0.0
-                st.trade_amount  = int(new_df.at[code, "trade_amount"])    if "trade_amount"  in new_df.columns else 0
-                st.prev_close    = int(new_df.at[code, "prev_close"])      if "prev_close"    in new_df.columns else st.prev_close
+                new_cp = float(new_df.at[code, "change_pct"]) if "change_pct" in new_df.columns else 0.0
+                if new_cp != 0:
+                    st.change_pct = new_cp
+                elif st.change_pct == 0:
+                    st.change_pct = 0.0
+                # 거래대금 및 기준가 보호
+                new_amt = int(new_df.at[code, "trade_amount"]) if "trade_amount" in new_df.columns else 0
+                if new_amt != 0:
+                    st.trade_amount = new_amt
+                
+                new_prev = int(new_df.at[code, "prev_close"]) if "prev_close" in new_df.columns else 0
+                if new_prev != 0:
+                    st.prev_close = new_prev
+                elif st.prev_close == 0 and st.current_price > 0 and st.change_pct != 0:
+                    # 기준가도 없고 가격/등락률만 있다면 역산 시도
+                    st.prev_close = int(st.current_price / (1 + st.change_pct / 100))
                 
                 # [NEW] 초기 누적 데이터 설정 (VWAP 보정용)
                 if st.cumulative_volume == 0: st.cumulative_volume = st.volume
@@ -187,7 +199,7 @@ class SnapshotStore:
         logger.debug("[SnapshotStore.bulk_update] 적재 완료 — df 행수=%d", len(self._df))
 
     _TICK_COLS = ["current_price", "high_price", "low_price",
-                  "open_price", "volume", "trade_amount", "change_pct"]
+                  "open_price", "volume", "trade_amount", "change_pct", "prev_close"]
 
     def update_price(
         self,
@@ -201,17 +213,31 @@ class SnapshotStore:
         change_pct:   float = None,
         cum_vol:      int = 0,
         cum_amt:      int = 0,
+        prev_close:   int = 0,
     ) -> None:
         """실시간 체결 한 틱을 해당 종목 상태에 반영한다."""
         with self._lock:
             st = self._get_state(code)
             
+            # [NEW] 기준가 업데이트 (TR 차단 시 fallback 데이터 반영)
+            if prev_close > 0:
+                st.prev_close = prev_close
+
             # 1. 시세 업데이트 (0원 방어)
             if current_price > 0:
                 st.current_price = current_price
-            
-            if change_pct is not None:
+            if high_price > 0:
+                st.high_price = high_price
+            if low_price > 0:
+                st.low_price = low_price
+            if open_price > 0:
+                st.open_price = open_price
+
+            # FID 12가 0/None이면 prev_close로 직접 역산 — 기존 값은 보호
+            if change_pct is not None and change_pct != 0.0:
                 st.change_pct = change_pct
+            elif st.prev_close > 0 and st.current_price > 0:
+                st.change_pct = round((st.current_price - st.prev_close) / st.prev_close * 100, 2)
             
             # [NEW] 틱 거래량(차분) 계산: 누적 데이터가 들어오면 이전 누적치와 비교
             tick_vol = 0
@@ -233,6 +259,17 @@ class SnapshotStore:
             
             st.updated_at = datetime.now()
 
+            # [FIX] DataFrame 동기화 (UI 및 스캐너 연동) — 0값으로 기존 데이터 덮어쓰기 방지
+            if not self._df.empty and code in self._df.index:
+                _PRICE_COLS = {"current_price", "high_price", "low_price", "open_price", "prev_close"}
+                for col in self._TICK_COLS:
+                    val = getattr(st, col, None)
+                    if val is None:
+                        continue
+                    if col in _PRICE_COLS and val == 0:
+                        continue
+                    self._df.at[code, col] = val
+
             # [NEW] 체결강도 히스토리 업데이트
             if hasattr(st, "chejan_str") and st.chejan_str > 0:
                 st.chejan_history.append(st.chejan_str)
@@ -245,17 +282,25 @@ class SnapshotStore:
                 st.tick_ts_vol.popleft()
 
             # 3. [Phase 3] 분봉 프로세서 위임 (순수 틱 거래량 사용)
-            completed = self._processor.process_tick(code, float(current_price), tick_vol)
-            if completed:
+            completed_list = self._processor.process_tick(code, float(st.current_price), st.volume)
+            for completed in completed_list:
                 def _append_limit(lst, val, limit=120):
                     lst.append(val)
                     if len(lst) > limit: lst.pop(0)
+                
+                _append_limit(st.mins,      float(completed.close))
+                _append_limit(st.min_opens, float(completed.open))
+                _append_limit(st.min_highs, float(completed.high))
+                _append_limit(st.min_lows,  float(completed.low))
+                _append_limit(st.min_vols,  int(completed.volume))
+                
+                logger.debug("[%s] 분봉 완성: %d, C=%.0f, V=%d", 
+                             code, completed.time_key, completed.close, completed.volume)
 
-                _append_limit(st.mins,      completed.close)
-                _append_limit(st.min_opens, completed.open)
-                _append_limit(st.min_highs, completed.high)
-                _append_limit(st.min_lows,  completed.low)
-                _append_limit(st.min_vols,  completed.volume)
+    def get_internal_state(self, code: str) -> Optional[InternalStockState]:
+        """고속 캐시(InternalStockState)를 직접 반환한다. (가장 최신 데이터)"""
+        with self._lock:
+            return self._states.get(code)
 
     def get_snapshot(self, code: str) -> Optional[StockSnapshot]:
         """단일 종목 스냅샷을 반환한다 (API 호출 없음). 락 범위 최소화 버전."""
@@ -602,12 +647,14 @@ class SnapshotStore:
     def _sync_df_prices(self) -> None:
         """고속 캐시(InternalStockState)에 저장된 시세를 DataFrame에 일괄 반영한다."""
         if not self._states: return
+        
         # 주의: 락(lock) 안에서 호출되어야 함
         for code, st in self._states.items():
             if code in self._df.index:
                 self._df.at[code, "current_price"] = st.current_price
                 self._df.at[code, "volume"]        = st.volume
-                self._df.at[code, "change_pct"]    = st.change_pct
+                if st.change_pct != 0:
+                    self._df.at[code, "change_pct"] = st.change_pct
                 self._df.at[code, "trade_amount"]  = st.trade_amount
 
     def top_by_trade_amount(self, n: int = 20) -> pd.DataFrame:
@@ -636,6 +683,10 @@ class SnapshotStore:
                 if not ranked.empty:
                     return ranked.nsmallest(n, "rank").copy()
             return df.head(n).copy()
+
+    def get_top_traded_df(self, n: int = 110) -> pd.DataFrame:
+        """ScannerWorker 등에서 사용하는 거래대금 상위 n종목 획득 래퍼."""
+        return self.top_by_trade_amount(n=n)
 
     def cleanup_stale_data(self, active_codes: set[str]) -> int:
         """active_codes에 없는 종목 데이터를 메모리에서 제거한다."""

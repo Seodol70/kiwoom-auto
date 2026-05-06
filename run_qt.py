@@ -11,7 +11,10 @@ import os
 
 # Windows 터미널 한글 깨짐 방지 (UTF-8 설정)
 if sys.platform == "win32":
+    import io
     os.system("chcp 65001 > nul")
+    sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8')
 
 # 프로젝트 루트를 path에 추가 (하위 모듈의 절대 경로 임포트 보장)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))

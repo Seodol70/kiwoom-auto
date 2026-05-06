@@ -113,17 +113,25 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         # 3. 장 종료 후 분석은 MarketScheduler의 feedback_triggered 신호로 처리됨
 
     def _setup_background_workers(self) -> None:
-        """배경 워커 설정"""
-        # 1. 잔고 동기화 워커 (메인 스레드 유지 - Kiwoom OCX 스레드 규칙 준수)
-        # 별도 QThread로 이동하지 않음 (이동 시 get_balance 등에서 프리징/크래시 발생)
+        """백그라운드 워커 설정 및 시작"""
+        logger.info("[MainWindow] 워커 설정 시작...")
+        # 1. 포트폴리오 워커 (UI 스레드 - Kiwoom OCX 싱글 스레드 제약 때문)
         self._port_worker = PortfolioWorker(self.order_mgr, self.trading_controller)
         
-        # 2. 스캐너 워커 (CPU 위주 작업이므로 별도 스레드 유지 가능)
+        # 2. 스캐너 워커 (별도 스레드)
+        logger.info("[MainWindow] ScannerWorker 스레드 생성 중...")
         self._scan_thread = QThread(self)
         self._scan_worker = ScannerWorker(self._snap_store, self._scan_cfg, self.order_mgr)
         self._scan_worker.moveToThread(self._scan_thread)
         self._scan_thread.started.connect(self._scan_worker.run)
         self._scan_thread.start()
+
+        # [RETRY] started 시그널 유실 대비: 스레드가 살아있는데 안 돌면 강제 시작 (시그널 방식)
+        from PyQt5.QtCore import QMetaObject, Qt
+        print("DEBUG: Calling ScannerWorker.run() via invokeMethod...")
+        QMetaObject.invokeMethod(self._scan_worker, "run", Qt.QueuedConnection)
+        
+        logger.info("[MainWindow] ScannerWorker 스레드 시작 완료 (ID: %d)", int(self._scan_thread.currentThreadId()))
 
     def _setup_news_analyzer(self) -> None:
         """뉴스 분석기 초기화"""
@@ -133,8 +141,11 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
     def start_after_login(self) -> None:
         """로그인 후 실질적 시스템 가동"""
         self._port_worker.sync()
-        self._port_refresh_timer.start(10_000)
-        self._scan_refresh_timer.start(60_000)
+        # 10초(10,000) -> 60초(60,000)로 상향 조정 (서버 부하 방지)
+        self._port_refresh_timer.start(60_000)
+        # 60초(60,000) -> 120초(120,000)로 상향 조정 (config 연동)
+        scan_interval = int(getattr(self._scan_cfg, "scan_interval", 120.0)) * 1000
+        self._scan_refresh_timer.start(scan_interval)
         
         # 초기 스캔 즉시 실행
         QTimer.singleShot(1000, self.trading_controller.run_periodic_scan)

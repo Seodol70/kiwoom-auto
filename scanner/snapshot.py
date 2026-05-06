@@ -27,23 +27,49 @@ class TickToCandleProcessor:
         self._cur_candle: dict[str, MinuteCandle] = {} # code -> 현재 진행 중인 분봉
         self._last_cum_vol: dict[str, int] = {}    # code -> 직전 분 경계의 누적 거래량
 
-    def process_tick(self, code: str, price: float, cum_volume: int) -> Optional[MinuteCandle]:
+    def process_tick(self, code: str, price: float, cum_volume: int) -> list[MinuteCandle]:
         """
-        새로운 틱을 처리하고, 분(Minute)이 바뀌었을 경우 완성된 이전 분봉을 반환한다.
+        새로운 틱을 처리하고, 완성된 모든 분봉(공백 포함)을 리스트로 반환한다.
         """
         now = datetime.now()
         cur_min = now.hour * 100 + now.minute
         
-        # 1. 분이 바뀌었는지 확인
         prev_min = self._last_min.get(code, -1)
-        completed_candle = None
+        completed_candles: list[MinuteCandle] = []
 
-        if prev_min != cur_min:
-            # 분이 바뀌었으면 현재 진행 중인 봉을 완성본으로 간주
-            if code in self._cur_candle:
-                completed_candle = self._cur_candle[code]
-                self._last_cum_vol[code] = completed_candle.cum_volume
-            
+        # 1. 첫 수신이거나 분이 바뀐 경우
+        if prev_min != -1 and prev_min != cur_min:
+            # [Gap Filling] 마지막 틱 시각과 현재 시각 사이의 빈 분봉들을 메운다.
+            last_candle = self._cur_candle.get(code)
+            if last_candle:
+                # 1) 마지막 진행 중이던 봉 완성
+                completed_candles.append(last_candle)
+                self._last_cum_vol[code] = last_candle.cum_volume
+                
+                # 2) 중간에 빈 분(Minute)들 채우기 (09:30 -> 09:33 이라면 931, 932 채움)
+                # 시/분 계산을 위해 datetime 객체로 변환하여 순회
+                temp_time = datetime(now.year, now.month, now.day, prev_min // 100, prev_min % 100)
+                from datetime import timedelta
+                
+                while True:
+                    temp_time += timedelta(minutes=1)
+                    temp_min = temp_time.hour * 100 + temp_time.minute
+                    if temp_min >= cur_min:
+                        break
+                    
+                    # 거래량 0인 허수 캔들 생성 (직전 종가 유지)
+                    gap_candle = MinuteCandle(
+                        code=code,
+                        time_key=temp_min,
+                        open=last_candle.close,
+                        high=last_candle.close,
+                        low=last_candle.close,
+                        close=last_candle.close,
+                        volume=0,
+                        cum_volume=last_candle.cum_volume
+                    )
+                    completed_candles.append(gap_candle)
+
             # 새 분봉 시작
             self._last_min[code] = cur_min
             self._cur_candle[code] = MinuteCandle(
@@ -53,13 +79,20 @@ class TickToCandleProcessor:
                 high=price,
                 low=price,
                 close=price,
-                volume=0, # 첫 틱이므로 일단 0 (혹은 이전 누적과의 차이)
+                volume=max(0, cum_volume - self._last_cum_vol.get(code, cum_volume)),
                 cum_volume=cum_volume
             )
             
-            # 분이 바뀌는 첫 틱의 거래량 계산
-            last_vol = self._last_cum_vol.get(code, cum_volume)
-            self._cur_candle[code].volume = max(0, cum_volume - last_vol)
+        elif prev_min == -1:
+            # 최초 수신
+            self._last_min[code] = cur_min
+            self._cur_candle[code] = MinuteCandle(
+                code=code,
+                time_key=cur_min,
+                open=price, high=price, low=price, close=price,
+                volume=0, cum_volume=cum_volume
+            )
+            self._last_cum_vol[code] = cum_volume
             
         else:
             # 같은 분 내의 틱 업데이트
@@ -69,11 +102,11 @@ class TickToCandleProcessor:
             candle.close = price
             
             # 거래량 업데이트
-            last_vol = self._last_cum_vol.get(code, candle.cum_volume)
+            last_vol = self._last_cum_vol.get(code, cum_volume)
             candle.volume = max(0, cum_volume - last_vol)
             candle.cum_volume = cum_volume
 
-        return completed_candle
+        return completed_candles
 
     def set_initial_state(self, code: str, last_min_key: int, last_cum_vol: int):
         """캐시 로드 시 마지막 분봉 상태를 동기화하여 연속성을 보장한다."""

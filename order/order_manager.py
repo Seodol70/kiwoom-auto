@@ -113,6 +113,7 @@ class Position:
     # 섹터 쏠림 방지
     sector:          str  = ""            # 업종명 (opt10001 응답, 섹터 노출 집계용)
     entry_count:     int  = 1             # 진입 횟수 (피라미딩 추적용)
+    sl_triggered_at: Optional[datetime] = None # 손절(SL) 발동 시각
 
     @property
     def pnl(self) -> int:
@@ -711,7 +712,7 @@ class OrderManager(QObject):
             risk_amount = int(total_equity * (risk_pct / 100.0))
             
             # 손절가 산출 (기본 손절 % 사용)
-            sl_pct = abs(float(getattr(self._scan_cfg, "stop_loss_pct", -1.2)))
+            sl_pct = abs(float(getattr(self._scan_cfg, "jdm_stop_loss_pct", -1.2)))
             stop_price = int(price * (1 - sl_pct / 100.0))
             risk_per_share = max(1, price - stop_price)
             
@@ -780,8 +781,8 @@ class OrderManager(QObject):
 
         self.buy(code, name, qty, price=0)  # 시장가 매수
 
-    @pyqtSlot(str, int, int)
-    def _on_price_updated(self, code: str, price: int, trend_level: int) -> None:
+    @pyqtSlot(str, int, float, int)
+    def _on_price_updated(self, code: str, price: int, pct: float, trend_level: int) -> None:
         """SmartScanner 실시간 가격 갱신 신호 처리 (손절/익절 정확도 개선)."""
         if price <= 0:
             return
@@ -1368,7 +1369,7 @@ class OrderManager(QObject):
         self._roll_daily_realized_pnl_if_needed()
 
         code        = cj(9001).lstrip("A")
-        name        = cj(302)
+        name        = self._kiwoom._fix_enc(cj(302))
         _raw_qty    = cj(911)
         _raw_price  = cj(910)
         _cum_qty    = abs(int(_raw_qty   or 0))
@@ -1378,7 +1379,7 @@ class OrderManager(QObject):
         filled_qty  = max(0, _cum_qty - _prev_cum)
         self._order_fill_cumulative[order_no] = _cum_qty
 
-        _ot_str = cj(905)
+        _ot_str = self._kiwoom._fix_enc(cj(905))
         if "매수" in _ot_str:
             order_type = OrderType.BUY
         elif "매도" in _ot_str:

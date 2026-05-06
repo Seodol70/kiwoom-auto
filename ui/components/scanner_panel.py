@@ -29,7 +29,7 @@ class ScannerPanel(QWidget):
 
 
     # 스캐너: 전일 대비 당일 등락률(%) — 보유현황의 '수익률'(평단 대비)과 구분
-    _HEADERS = ["종목코드", "종목명", "현재가", "당일등락률", "거래대금", "신호", "추세", "매수"]
+    _HEADERS = ["No.", "종목코드", "종목명", "현재가", "당일등락률", "거래대금", "신호", "추세", "매수"]
 
 
     def __init__(self, parent=None) -> None:
@@ -56,10 +56,12 @@ class ScannerPanel(QWidget):
         hdr.setFont(QFont("Malgun Gothic", 9))
         hdr.setSectionResizeMode(QHeaderView.Interactive)
         hdr.setStretchLastSection(False)
-        col_widths = [65, 120, 78, 60, 95, 65, 80, 42]
+        # [NEW] 정렬 기능 활성화
+        self._table.setSortingEnabled(True)
+        col_widths = [35, 65, 120, 78, 60, 95, 65, 80, 42]
         for i, w in enumerate(col_widths):
             hdr.resizeSection(i, w)
-        hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -84,6 +86,19 @@ class ScannerPanel(QWidget):
 
     @pyqtSlot(list)
     def refresh(self, rows: list[dict]) -> None:
+        # 현재 선택된 종목 코드 및 스크롤 위치 저장
+        selected_code = None
+        sel_items = self._table.selectedItems()
+        if sel_items:
+            row_idx = sel_items[0].row()
+            it_c = self._table.item(row_idx, 1)
+            if it_c: selected_code = it_c.text()
+            
+        scroll_pos = self._table.verticalScrollBar().value()
+
+        # 정렬 일시 중지 (갱신 중 정렬 방지)
+        self._table.setSortingEnabled(False)
+        
         if self._table.rowCount() != len(rows):
             self._table.setRowCount(len(rows))
 
@@ -95,78 +110,97 @@ class ScannerPanel(QWidget):
             
             # 하이라이트 체크 (최근 신호 종목)
             is_flashing = code in self._flash_map and self._flash_map[code] > now
-            
-            if is_flashing:
-                bg_color = QColor("#4b4b00") # 진한 노란색 강조 (Dark Theme에 적합)
-            elif bool(row.get("signal")):
-                bg_color = QColor("#2a1a2e") # 일반 신호 배경
+            bg_color = QColor("#4b4b00") if is_flashing else None # 진한 노란색 강조
+
+            # 0: No.
+            it_no = QTableWidgetItem()
+            it_no.setData(Qt.EditRole, r + 1)
+            it_no.setTextAlignment(Qt.AlignCenter)
+            self._table.setItem(r, 0, it_no)
+
+            # 1: 종목코드
+            it_code = QTableWidgetItem(code)
+            it_code.setTextAlignment(Qt.AlignCenter)
+            self._table.setItem(r, 1, it_code)
+
+            # 2: 종목명
+            it_name = QTableWidgetItem(row["name"])
+            self._table.setItem(r, 2, it_name)
+
+            # 3: 현재가
+            it_price = QTableWidgetItem()
+            try:
+                _p_val = int(row.get("price", 0))
+            except:
+                _p_val = 0
+            it_price.setData(Qt.EditRole, _p_val)
+            it_price.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            it_price.setForeground(color)
+            self._table.setItem(r, 3, it_price)
+
+            # 4: 당일등락률
+            it_pct = QTableWidgetItem(f"{change:+.2f}%")
+            try:
+                _c_val = float(change)
+            except:
+                _c_val = 0.0
+            it_pct.setData(Qt.EditRole, _c_val)
+            it_pct.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            it_pct.setForeground(color)
+            self._table.setItem(r, 4, it_pct)
+
+            # 5: 거래대금 (사용자 요청으로 정렬 부하 방지를 위해 숫자 정렬 제외)
+            it_amt = QTableWidgetItem(format_trade_amount_korean(row.get("trade_amount", 0)))
+            it_amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._table.setItem(r, 5, it_amt)
+
+            # 6: 신호
+            it_sig = QTableWidgetItem(str(row.get("signal", "")))
+            it_sig.setTextAlignment(Qt.AlignCenter)
+            self._table.setItem(r, 6, it_sig)
+
+            # 7: 추세
+            it_trend = QTableWidgetItem(row.get("trend_text", "데이터부족"))
+            it_trend.setTextAlignment(Qt.AlignCenter)
+            # 추세별 색상
+            if "강세" in row.get("trend_text", "") or "상승" in row.get("trend_text", ""):
+                it_trend.setForeground(QColor("#a6e3a1"))
+            elif "약세" in row.get("trend_text", "") or "하락" in row.get("trend_text", ""):
+                it_trend.setForeground(QColor("#f38ba8"))
+            self._table.setItem(r, 7, it_trend)
+
+            # 8: 매수 버튼
+            btn = QPushButton("매수")
+            btn.setFixedSize(38, 22)
+            btn.setObjectName("buy_button")
+            btn.clicked.connect(lambda _, c=code, n=row["name"], p=row["price"]: self.manual_buy_requested.emit(c, n, p))
+            self._table.setCellWidget(r, 8, btn)
+            # 배경색 적용 (하이라이트)
+            if bg_color:
+                for c in range(self._table.columnCount() - 1):
+                    item = self._table.item(r, c)
+                    if item: item.setBackground(bg_color)
             else:
-                bg_color = None
+                for c in range(self._table.columnCount() - 1):
+                    item = self._table.item(r, c)
+                    if item: item.setBackground(QColor(0,0,0,0)) # 투명 (교차 행 색상 유지)
 
-            trade_amt = int(row.get("trade_amount") or 0)
-            trend_text = row.get("trend_text", "데이터부족")
-            tlevel = int(row.get("trend_level", 0))
-            chejan = float(row.get("chejan", 0.0))
-            
-            if trend_text == "강세": trend_color = QColor("#a6e3a1")
-            elif trend_text == "상승": trend_color = QColor("#89dceb")
-            elif trend_text == "약세": trend_color = QColor("#cdd6f4")
-            elif trend_text == "하락": trend_color = QColor("#f38ba8")
-            elif trend_text == "횡보": trend_color = QColor("#a6adc8")
-            else: trend_color = QColor("#585b70")
-            
-            trend_tip = f"추세Lv {tlevel} | 체결강도 {chejan:.0f}%"
+        # 정렬 복구
+        self._table.setSortingEnabled(True)
 
-            texts = [
-                code,
-                row["name"],
-                f"{row['price']:,}",
-                f"{change:+.2f}%",
-                format_trade_amount_korean(trade_amt),
-                row.get("signal", ""),
-                trend_text,
-            ]
-            for c, text in enumerate(texts):
-                item = self._table.item(r, c)
-                if not item:
-                    item = QTableWidgetItem(text)
-                    item.setFont(QFont("Malgun Gothic", 9))
-                    self._table.setItem(r, c, item)
-                else:
-                    item.setText(text)
-
-                item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignRight if c >= 2 else Qt.AlignLeft))
-                if c in (2, 3): item.setForeground(color)
-                if c == 6:
-                    item.setForeground(trend_color)
-                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignCenter)
-                    item.setToolTip(trend_tip)
-                
-                # 배경색 적용
-                if bg_color:
-                    item.setBackground(bg_color)
-                else:
-                    item.setBackground(QColor(0,0,0,0)) # 투명 (교차 행 색상 유지)
-
-            # 매수 버튼 관리
-            _name = row["name"]
-            _price = row["price"]
-            existing_btn = self._table.cellWidget(r, 7)
-            if existing_btn is None or existing_btn.property("code") != code:
-                btn = QPushButton("매수")
-                btn.setProperty("code", code)
-                btn.setFixedHeight(22)
-                btn.setStyleSheet(
-                    "QPushButton{background:#fab387;color:#11111b;border-radius:3px;font-size:11px;font-weight:bold;}"
-                    "QPushButton:hover{background:#f9e2af;color:#1e1e2e;}"
-                    "QPushButton:pressed{background:#eba0ac;}"
-                )
-                btn.clicked.connect(lambda _chk, c=code, n=_name, p=_price: self.manual_buy_requested.emit(c, n, p))
-                self._table.setCellWidget(r, 7, btn)
+        # 이전 선택 및 스크롤 복구
+        if selected_code:
+            for r in range(self._table.rowCount()):
+                it = self._table.item(r, 1) # 종목코드 열
+                if it and it.text() == selected_code:
+                    self._table.selectRow(r)
+                    break
+        self._table.verticalScrollBar().setValue(scroll_pos)
 
 
     def _on_click(self, row: int, _col: int) -> None:
-        item = self._table.item(row, 0)
+        # [FIX] 0번 열은 "No." 이고, 1번 열이 "종목코드"임
+        item = self._table.item(row, 1)
         if item:
             self.row_clicked.emit(item.text())
 
