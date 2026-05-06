@@ -771,17 +771,21 @@ class SmartScanner(QObject):
                 # FID 11도 없는 경우 — 기존 snapshot의 prev_close 재사용
                 st_temp = self.store.get_snapshot(code)
                 prev_close = st_temp.prev_close if st_temp else 0
-            
+
             # [FINAL FALLBACK] 여전히 기준가가 0이라면 OCX 강제 동원 (2단계)
             if prev_close <= 0:
                 prev_close = self._kiwoom.get_current_price(code)
             if prev_close <= 0:
                 prev_close = self._kiwoom.get_master_price(code)
-            
+
+            # [NEW] 기준가가 여전히 0이면 시가로 역산 (장 초기 대비)
+            if prev_close <= 0 and open_ > 0:
+                prev_close = open_
+
             # [ULTIMATE FALLBACK] 정말로 0이라면... 현재가를 기준가로 임시 세팅
             if prev_close <= 0 and price > 0:
                 prev_close = price
-            
+
             if prev_close > 0 and (pct == 0.0 or abs(pct) < 0.001):
                 # 기준가는 있는데 등락률이 0이면 직접 계산 (FID 12 지연 대응)
                 pct = round((price - prev_close) / prev_close * 100, 2)
