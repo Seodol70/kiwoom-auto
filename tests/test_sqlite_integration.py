@@ -37,7 +37,9 @@ class TestSQLiteIntegration(unittest.TestCase):
             volumes_1min = [100, 150, 200]
 
         self.audit.log_signal(MockSignal(), MockSnap())
-        
+        # Flush to DB (buffer may not auto-flush with just 1 row)
+        self.audit.flush_all()
+
         # DB 확인
         stats = self.db.get_summary_stats()
         # COMPLETED가 아니므로 stats에는 안 잡히지만, 테이블에는 있어야 함
@@ -49,16 +51,22 @@ class TestSQLiteIntegration(unittest.TestCase):
 
         # 2. Buy Fill
         self.audit.log_buy_fill("005930", 10, 70000)
-        
+
         # 3. Sell Fill
         self.audit.log_sell_fill("005930", 10, 71000, 70000, 10000)
-        
+
+        # Flush all pending rows to DB
+        self.audit.flush_all()
+
         # 최종 DB 확인
         from contextlib import closing
+        from trade_audit_logger import COLUMNS
         with closing(self.db._get_connection()) as conn:
             row = conn.execute("SELECT * FROM trades WHERE code='005930'").fetchone()
-            self.assertEqual(row[37], 10000) # realized_pnl (Index 37)
-            self.assertEqual(row[39], "COMPLETED") # final_status (Index 39)
+            realized_pnl_idx = COLUMNS.index("realized_pnl")
+            final_status_idx = COLUMNS.index("final_status")
+            self.assertEqual(row[realized_pnl_idx], 10000) # realized_pnl
+            self.assertEqual(row[final_status_idx], "COMPLETED") # final_status
 
     def tearDown(self):
         if os.path.exists(self.test_db):

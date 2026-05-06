@@ -593,7 +593,7 @@ class OrderManager(QObject):
 
         # [NEW] 데이터 신선도 체크 (Data Freshness)
         # 네트워크 지연으로 인한 3초 이상 과거 데이터 기반 신호 거절
-        snap = self._snap_store.get_snapshot(code)
+        snap = self._snap_store.get_snapshot(code) if self._snap_store else None
         if snap and snap.updated_at:
             delay = (datetime.now() - snap.updated_at).total_seconds()
             if delay > 3.0:
@@ -1014,7 +1014,21 @@ class OrderManager(QObject):
         """매수 직전 강제 차단 (유니버스 필터 + 전역 리스크 필터)."""
         # 0) 전역 리스크 및 지수 급락 체크 (AppState 기반)
         from scanner.universe import is_pure_equity_name
-        
+
+        # 0-1) 손절 락 확인 — RiskManager에서 손절 한도 도달 시 차단
+        if self.state and self.state.loss_cut_locked:
+            msg = f"매수 차단 — 당일 손절 한도 도달 (손절 락 활성화)"
+            logger.warning(msg)
+            self.order_failed.emit(msg)
+            return False
+
+        # 0-2) 시장 급락 확인 — AppState의 crash 플래그
+        if self.state and self.state._is_crash:
+            msg = f"매수 차단 — 지수 급락 감지 (시장 급락 상태)"
+            logger.warning(msg)
+            self.order_failed.emit(msg)
+            return False
+
         # 1) 이름 키워드 차단
         if not is_pure_equity_name(name):
             msg = f"매수 차단 — ETF/ETN/파생 종목 ({name} {code})"

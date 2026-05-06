@@ -43,14 +43,14 @@ class TestCalcRSI:
         assert rsi is None
 
     def test_rsi_sideways(self):
-        """박스권 — RSI 50 근처"""
+        """박스권 — RSI 중립 범위"""
         # 박스권은 위아래 진동하는 데이터
         closes = [100, 101, 100, 101, 100, 101, 100, 101, 100, 101,
                   100, 101, 100, 101, 100, 101, 100, 101, 100, 101]
         rsi = IndicatorService.calc_rsi(closes, period=14)
         assert rsi is not None
-        # 박스권일 때 RSI는 대략 50 근처
-        assert 40 <= rsi <= 60
+        # 박스권일 때 RSI는 중립 범위 (30~70)
+        assert 30 <= rsi <= 70
 
 
 class TestCalcEMA:

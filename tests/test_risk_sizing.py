@@ -92,7 +92,7 @@ def test_dynamic_sizing_risk():
     cfg = SmartScannerConfig()
     cfg.position_sizing_mode = "RISK"
     cfg.risk_per_trade_pct = 1.0 # 1% of total equity
-    cfg.stop_loss_pct = 2.0 # 2% SL
+    cfg.jdm_stop_loss_pct = -2.0 # 2% SL (negative value)
     
     om = OrderManager(kiwoom)
     om.max_order_amount = 10_000_000

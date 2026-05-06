@@ -23,6 +23,9 @@ def _make_fresh_app_state_mock():
 def test_risk_lock_integration(qapp):
     # 1. Setup Mock Objects
     state = AppState()
+    # Ensure clean state (may be loaded from session file)
+    state.loss_cut_locked = False
+    state.profit_locked = False
     win = MagicMock()
     win.state = state
     
@@ -64,6 +67,9 @@ def test_risk_lock_integration(qapp):
 def test_order_manager_gatekeeper_integration(qapp):
     # 1. Setup
     state = AppState()
+    # Ensure clean state (may be loaded from session file)
+    state.loss_cut_locked = False
+    state.profit_locked = False
     kiwoom = MagicMock()
     order_mgr = OrderManager(kiwoom)
     order_mgr.set_state(state)
