@@ -342,6 +342,9 @@ class SmartScanner(QObject):
             return
         self._running = True
 
+        # 캐시된 분봉 데이터 메모리 로드 (전체 한번에 로드 - I/O 최소화)
+        self.store.load_1min_cache()
+        logger.info("분봉 캐시 메모리 로드 완료")
 
         all_codes = self._fetch_all_codes()
         logger.info("전 종목 %d개 수집", len(all_codes))

@@ -586,25 +586,12 @@ class SnapshotStore:
             logger.warning("[1분봉캐시] 저장 실패 — %s", e)
 
     def load_1min_for_code(self, code: str) -> int:
-        """캐시 파일에서 특정 종목의 1분봉을 즉시 로드한다."""
-        try:
-            if not self._1min_cache_path.exists(): return 0
-            with open(self._1min_cache_path, encoding="utf-8") as f:
-                data = json.load(f)
-            ohlcv = data.get(code)
-            if not ohlcv or not ohlcv.get("c"): return 0
-            
-            with self._lock:
-                st = self._get_state(code)
-                if len(st.mins) >= 55: return len(st.mins)
-                st.mins       = [float(x) for x in ohlcv.get("c", [])]
-                st.min_opens  = [float(x) for x in ohlcv.get("o", [])]
-                st.min_highs  = [float(x) for x in ohlcv.get("h", [])]
-                st.min_lows   = [float(x) for x in ohlcv.get("l", [])]
-                st.min_vols   = [int(x)   for x in ohlcv.get("v", [])]
+        """메모리에 이미 로드된 분봉 데이터 개수 반환 (I/O 최소화)."""
+        with self._lock:
+            st = self._states.get(code)
+            if st and len(st.mins) > 0:
                 return len(st.mins)
-        except Exception:
-            return 0
+        return 0
 
     @staticmethod
     def _get_daily_cache_path() -> Path:
