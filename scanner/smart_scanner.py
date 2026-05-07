@@ -432,17 +432,22 @@ class SmartScanner(QObject):
                 target_indices.append(i)
         
         if target_indices:
-            logger.info("  ⚠ 데이터 보강 필요 (%d종목) -> opt10001 연동 시작", len(target_indices))
-            for idx in target_indices[:50]: # 최대 50종목으로 제한 (TR 과부하 방지)
-                r = rows[idx]
-                code = r.get("code")
-                if not code: continue
-                info = self._tr_q.call(self._kiwoom.get_stock_info, code)
-                if info:
-                    r["current_price"] = info.get("current_price", r.get("current_price"))
-                    r["change_pct"] = info.get("change_pct", r.get("change_pct"))
-                    r["trade_amount"] = info.get("trade_amount", r.get("trade_amount"))
-                    r["prev_close"] = info.get("base_price", r.get("prev_close"))
+            logger.info("  ⚠ 데이터 보강 필요 (%d종목) -> opt10004 배치 연동 시작", len(target_indices))
+            target_codes = [rows[idx].get("code") for idx in target_indices if rows[idx].get("code")][:100]
+            if target_codes:
+                info_list = self._tr_q.call(self._kiwoom.get_multiple_stock_info, target_codes)
+                if info_list:
+                    # 결과를 rows에 매핑
+                    code_to_row = {r.get("code"): r for r in rows if r.get("code")}
+                    for info in info_list:
+                        c = info.get("code")
+                        if c in code_to_row:
+                            row = code_to_row[c]
+                            row["current_price"] = info.get("current_price", row.get("current_price"))
+                            row["change_pct"] = info.get("change_pct", row.get("change_pct"))
+                            row["trade_amount"] = info.get("trade_amount", row.get("trade_amount"))
+                            row["prev_close"] = info.get("prev_close", row.get("prev_close"))
+                            row["name"] = info.get("name", row.get("name"))
 
         rows, _ = self.universe_mgr.filter_equity_rows(rows)
         mc = self.cfg.max_change_pct
@@ -1247,20 +1252,25 @@ class SmartScanner(QObject):
                     fallback_rows.sort(key=lambda x: x["change_pct"], reverse=True)
                     logger.info("[주기 스캔] 전일 캐시 기반 %d종목 유니버스 생성 완료 (등락률 우선)", len(fallback_rows))
                     
-                    # [WARMUP] 상위 20종목에 대해 즉시 시세 동기화 (0% 방지)
-                    # 너무 많이 하면 다시 멈추므로 20개 정도로 제한
-                    warmup_targets = fallback_rows[:20]
-                    logger.info("[WARMUP] 상위 %d종목 시세 동기화 시작...", len(warmup_targets))
-                    for r in warmup_targets:
-                        QCoreApplication.processEvents()
-                        info = self._kiwoom.get_stock_info(r["code"])
-                        if info:
-                            r.update({
-                                "current_price": info["current_price"],
-                                "change_pct": info["change_pct"],
-                                "trade_amount": info["trade_amount"],
-                                "volume": info["volume"],
-                            })
+                    # 너무 많이 하면 다시 멈추므로 100개 정도로 제한 (opt10004 배치 처리)
+                    warmup_targets = fallback_rows[:100]
+                    warmup_codes = [r["code"] for r in warmup_targets]
+                    logger.info("[WARMUP] 상위 %d종목 시세 동기화 시작 (opt10004 배치)...", len(warmup_targets))
+                    
+                    info_list = self._tr_q.call(self._kiwoom.get_multiple_stock_info, warmup_codes)
+                    if info_list:
+                        # 결과를 warmup_targets에 매핑
+                        code_to_target = {r["code"]: r for r in warmup_targets}
+                        for info in info_list:
+                            c = info.get("code")
+                            if c in code_to_target:
+                                target = code_to_target[c]
+                                target.update({
+                                    "current_price": info["current_price"],
+                                    "change_pct": info["change_pct"],
+                                    "trade_amount": info["trade_amount"],
+                                    "volume": info["volume"],
+                                })
                     
                     # 갱신된 데이터로 다시 정렬
                     fallback_rows.sort(key=lambda x: x["change_pct"], reverse=True)

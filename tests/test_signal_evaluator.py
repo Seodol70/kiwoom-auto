@@ -82,7 +82,7 @@ def test_check_breakout_fail_rising_bars(base_snap):
 
 def test_check_jdm_entry_opening_lite_mode(base_snap, base_config):
     # 장 초반 (09:05)
-    with patch("scanner.signal_evaluator.datetime") as mock_dt:
+    with patch("scanner.evaluators.jdm.datetime") as mock_dt:
         mock_dt.now.return_value.time.return_value = dtime(9, 5)
         # 09:05분은 OPENING 슬롯 (lite_mode)
         # lite_mode 발동을 위해 캔들 개수를 10개로 설정
@@ -99,7 +99,7 @@ def test_check_jdm_entry_opening_lite_mode(base_snap, base_config):
 
 def test_check_jdm_entry_midday_strict(base_snap, base_config):
     # 점심 시간 (12:00) - GC 미충족 시 탈락
-    with patch("scanner.signal_evaluator.datetime") as mock_dt:
+    with patch("scanner.evaluators.jdm.datetime") as mock_dt:
         mock_dt.now.return_value.time.return_value = dtime(12, 0)
         base_snap.trend_level = 0
         # 역배열 상태 (MA short < MA long)
@@ -109,7 +109,7 @@ def test_check_jdm_entry_midday_strict(base_snap, base_config):
 
 def test_check_jdm_entry_gc_override(base_snap, base_config):
     # 점심 시간이라도 추세 Lv3이면 GC 없이 진입 허용
-    with patch("scanner.signal_evaluator.datetime") as mock_dt:
+    with patch("scanner.evaluators.jdm.datetime") as mock_dt:
         mock_dt.now.return_value.time.return_value = dtime(12, 0)
         base_snap.trend_level = 3
         # R2 필터 통과를 위해 전일 변동성 축소

@@ -73,19 +73,14 @@ class KiwoomProtocol(ABC):
 
     @abstractmethod
     def get_stock_info(self, code: str) -> dict:
-        """
-        종목 기본정보 (opt10001).
+        """종목 기본정보 (opt10001)."""
+        pass
 
-        Returns:
-            {
-                'name': str,
-                'sector': str,
-                'current_price': int,
-                'prev_close': int,
-                'high_price': int,
-                'low_price': int,
-                ...
-            }
+    @abstractmethod
+    def get_multiple_stock_info(self, codes: list[str]) -> list[dict]:
+        """
+        복수종목 기본정보 (opt10004).
+        최대 100종목까지 한 번의 TR로 조회 가능.
         """
         pass
 

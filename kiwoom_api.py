@@ -89,6 +89,7 @@ class ReturnCode:
 
 # TR 코드
 TR_STOCK_INFO  = "opt10001"   # 주식기본정보요청
+TR_MULTI_STOCK_INFO = "opt10004" # 주식복수종목정보조회
 TR_ACCOUNT     = "opw00001"   # 예수금상세현황요청
 TR_HOLDINGS    = "opw00018"   # 계좌평가잔고내역요청
 TR_MIN_CANDLE  = "opt10080"   # 주식분봉차트조회요청
@@ -512,6 +513,54 @@ class KiwoomManager(KiwoomProtocol):
         logger.warning("[opt10001] %s 응답 없음 - 스냅샷 폴백", code)
         _TR_FAIL.fail("opt10001", f"code={code}")
         return None
+
+    def get_multiple_stock_info(self, codes: list[str]) -> list[dict]:
+        """
+        복수종목 기본정보 조회 (opt10004).
+        최대 100종목까지 지원.
+        """
+        if not codes:
+            return []
+        
+        target_codes = codes[:100]
+        code_str = ";".join(target_codes)
+        cnt = len(target_codes)
+        
+        logger.info("[TR] 복수종목조회(opt10004) 시작 - %d종목", cnt)
+        return self._comm_kw_rq(code_str, cnt, TR_MULTI_STOCK_INFO, "multi_stock_info")
+
+    def _comm_kw_rq(self, code_str: str, cnt: int, tr_code: str, rq_name: str, timeout_ms: int = 3000) -> list[dict]:
+        """CommKwRqData 전용 요청 (복수종목조회)."""
+        if self._tr_busy:
+            logger.warning("[TR] 복수조회 재진입 차단 - %s", rq_name)
+            return []
+            
+        self._tr_data = {"rows": []}
+        self._tr_busy = True
+        self._tr_current_rq = rq_name
+        try:
+            self._tr_limiter.acquire()
+            # CommKwRqData(sArrCode, bNext, nCodeCount, nTypeFlag, sRQName, sScreenNo)
+            ret = self._ocx.dynamicCall(
+                "CommKwRqData(QString, bool, int, int, QString, QString)",
+                code_str, False, cnt, 0, rq_name, "0104"
+            )
+            
+            if ret != ReturnCode.OK:
+                logger.error("CommKwRqData failed - ret=%d", ret)
+                return []
+                
+            self._tr_loop = QEventLoop()
+            self._tr_timeout_timer = QTimer(self._tr_loop)
+            self._tr_timeout_timer.setSingleShot(True)
+            self._tr_timeout_timer.timeout.connect(self._tr_loop.quit)
+            self._tr_timeout_timer.start(timeout_ms)
+            self._tr_loop.exec_()
+            self._tr_timeout_timer.stop()
+            
+            return self._tr_data.get("rows", [])
+        finally:
+            self._tr_busy = False
 
     def get_current_price(self, code: str) -> int:
         """현재가(사실상 전일종가/기준가) 조회 (OCX 메모리, TR 호출 없음)"""
@@ -1106,6 +1155,9 @@ class KiwoomManager(KiwoomProtocol):
                 "종목명", "현재가", "기준가", "전일종가", "전일대비", "등락률", "시가", "고가", "저가", "거래량", "시가총액",
             ])
 
+        elif rq_name == "multi_stock_info":
+            self._tr_data = {"rows": self._parse_multi_stock_info(tr_code, rq_name)}
+
         elif rq_name == "min_candle":
             self._tr_data = {"rows": self._parse_candle_rows(tr_code, rq_name)}
 
@@ -1352,6 +1404,34 @@ class KiwoomManager(KiwoomProtocol):
                 "rank":          i + 1,
             })
         logger.debug("[opt10030] 유효 행: %d/%d", len(rows), cnt)
+        return rows
+
+    def _parse_multi_stock_info(self, tr_code: str, rq_name: str) -> list[dict]:
+        cnt = self._get_repeat_cnt(tr_code, rq_name)
+        rows = []
+        for i in range(cnt):
+            def g(f, _i=i):
+                return self._get_comm_data(tr_code, rq_name, _i, f)
+            
+            cur_p = safe_int(g("현재가"))
+            prev_p = safe_int(g("전일종가")) or safe_int(g("기준가"))
+            raw_pct = g("등락률") or g("등락율") or "0"
+            chg_pct = safe_float(raw_pct)
+            
+            if prev_p == 0 and cur_p > 0:
+                prev_p = _resolve_prev_close(0, cur_p, chg_pct)
+            
+            code = g("종목코드").strip().lstrip("A")
+            rows.append({
+                "code":          code,
+                "name":          self._fix_enc(g("종목명")).strip(),
+                "current_price": cur_p,
+                "prev_close":    prev_p,
+                "change_pct":    chg_pct,
+                "change_amt":    safe_int(g("전일대비")),
+                "volume":        safe_int(g("거래량")),
+                "trade_amount":  safe_int(g("거래대금")) * 1000, # opt10004는 보통 천원 단위
+            })
         return rows
 
     def _parse_holdings_rows(self, tr_code: str, rq_name: str) -> list[dict]:
