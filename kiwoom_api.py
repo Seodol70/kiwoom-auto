@@ -392,20 +392,26 @@ class KiwoomManager(KiwoomProtocol):
             self._set_input("정렬구분", "1")    # 1=거래대금
             self._set_input("관리종목포함", "0")
             self._set_input("신용구분", "0")
+
+            # 페이지 간 1초 간격 추가 (TR Limit -200 방지)
+            if page > 0:
+                logger.debug("[opt10030] 페이지 %d 전 1초 대기 (TR Limit 회피)", page + 1)
+                time.sleep(1.0)
+
             ok = self._comm_rq("opt10030", "거래대금상위", screen_no, prev_next=prev_next)
             if not ok:
                 logger.warning("[opt10030] TR 요청 실패 (페이지 %d)", page + 1)
                 break
-            
+
             chunk = self._tr_data.get("rows", [])
             page += 1
             if not chunk:
                 logger.debug("[opt10030] 페이지 %d 데이터 없음", page)
                 break
-                
+
             all_rows.extend(chunk)
             logger.debug("[opt10030] 페이지 %d 수신 (%d행, 누적 %d)", page, len(chunk), len(all_rows))
-            
+
             if len(all_rows) >= max_rows or self._tr_prev_next != "2":
                 break
             prev_next = 2
@@ -417,6 +423,10 @@ class KiwoomManager(KiwoomProtocol):
         opt10032 전일거래량상위. (opt10030 공백 시 fallback 용)
         """
         all_rows: list[dict] = []
+        # opt10030 실패 시 폴백이므로 충분한 대기 후 호출
+        logger.debug("[opt10032] opt10030 폴백: 0.5초 대기 후 호출")
+        time.sleep(0.5)
+
         self._set_input("시장구분", "000")
         self._set_input("관리종목포함", "0")
         ok = self._comm_rq("opt10032", "전일거래량상위", "9001")
