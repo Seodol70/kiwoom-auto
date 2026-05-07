@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, QSplitter,
     QFrame, QHeaderView, QSizePolicy, QProgressBar, QDoubleSpinBox, QSpinBox,
-    QDialog, QDialogButtonBox, QComboBox, QGroupBox, QAction, QMenu
+    QDialog, QDialogButtonBox, QComboBox, QGroupBox, QAction, QMenu, QLineEdit
 )
 
 
@@ -43,9 +43,30 @@ class ScannerPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
 
+        title_lay = QHBoxLayout()
         title = QLabel("  🔍 스캐너 감시 종목")
         title.setObjectName("panel_title")
-        lay.addWidget(title)
+        title_lay.addWidget(title)
+        
+        title_lay.addStretch()
+        
+        # [NEW] 수동 종목 검색 및 매수 입력창
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("종목코드 입력 후 Enter (수동매수)")
+        self._search_input.setFixedWidth(180)
+        self._search_input.setFixedHeight(24)
+        self._search_input.setStyleSheet("""
+            QLineEdit { 
+                background-color: #1e1e2e; color: #cdd6f4; 
+                border: 1px solid #45475a; border-radius: 4px; padding-left: 5px;
+                font-size: 9pt;
+            }
+            QLineEdit:focus { border: 1px solid #89b4fa; }
+        """)
+        self._search_input.returnPressed.connect(self._on_search_requested)
+        title_lay.addWidget(self._search_input)
+        
+        lay.addLayout(title_lay)
 
         self._table = QTableWidget(0, len(self._HEADERS))
         self._table.setHorizontalHeaderLabels(self._HEADERS)
@@ -86,6 +107,11 @@ class ScannerPanel(QWidget):
 
     @pyqtSlot(list)
     def refresh(self, rows: list[dict]) -> None:
+        # [DEBUG] 데이터 수신 확인
+        if rows and time.time() - getattr(self, "_last_refresh_log", 0) > 10.0:
+            self._last_refresh_log = time.time()
+            logging.info("🖥 [ScannerPanel] UI 데이터 수신 완료 (%d종목)", len(rows))
+
         # 현재 선택된 종목 코드 및 스크롤 위치 저장
         selected_code = None
         sel_items = self._table.selectedItems()
@@ -169,12 +195,18 @@ class ScannerPanel(QWidget):
                 it_trend.setForeground(QColor("#f38ba8"))
             self._table.setItem(r, 7, it_trend)
 
-            # 8: 매수 버튼
-            btn = QPushButton("매수")
-            btn.setFixedSize(38, 22)
-            btn.setObjectName("buy_button")
+            # 8: 매수 버튼 (매번 생성하지 않고 재사용하여 성능 최적화)
+            btn = self._table.cellWidget(r, 8)
+            if not isinstance(btn, QPushButton):
+                btn = QPushButton("매수")
+                btn.setFixedSize(38, 22)
+                btn.setObjectName("buy_button")
+                self._table.setCellWidget(r, 8, btn)
+            
+            # 기존 연결 해제 후 재연결 (클로저 문제 방지)
+            try: btn.clicked.disconnect()
+            except: pass
             btn.clicked.connect(lambda _, c=code, n=row["name"], p=row["price"]: self.manual_buy_requested.emit(c, n, p))
-            self._table.setCellWidget(r, 8, btn)
             # 배경색 적용 (하이라이트)
             if bg_color:
                 for c in range(self._table.columnCount() - 1):
@@ -207,3 +239,20 @@ class ScannerPanel(QWidget):
 
 
 
+    def _on_search_requested(self) -> None:
+        """종목코드를 직접 입력하여 수동매수 창 띄우기"""
+        code = self._search_input.text().strip()
+        if not code: return
+        
+        # SnapshotStore 에서 최신 정보 조회 (MainWindow를 통해 접근)
+        win = self.window()
+        if hasattr(win, "_snap_store"):
+            snap = win._snap_store.get_snapshot(code)
+            if snap:
+                self.manual_buy_requested.emit(code, snap.name, snap.current_price)
+                self._search_input.clear()
+            else:
+                logging.warning("⚠️ [수동매수] 종목 정보를 찾을 수 없습니다: %s", code)
+        else:
+            # SnapshotStore 접근 불가 시 기본값으로 시도 (API 조회 필요할 수 있음)
+            logging.warning("⚠️ [수동매수] 시스템 초기화 중입니다. 잠시 후 다시 시도해 주세요.")

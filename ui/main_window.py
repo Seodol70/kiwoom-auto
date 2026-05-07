@@ -18,7 +18,7 @@ from ui.main_window_ui import MainWindowUI
 from ui.main_window_slots import MainWindowSlots
 from app.state import AppState
 from app.config_manager import config_manager as cfg
-from engine.workers import ScannerWorker, PortfolioWorker
+from engine.workers import PortfolioWorker
 
 logger = logging.getLogger(__name__)
 
@@ -118,20 +118,8 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         # 1. 포트폴리오 워커 (UI 스레드 - Kiwoom OCX 싱글 스레드 제약 때문)
         self._port_worker = PortfolioWorker(self.order_mgr, self.trading_controller)
         
-        # 2. 스캐너 워커 (별도 스레드)
-        logger.info("[MainWindow] ScannerWorker 스레드 생성 중...")
-        self._scan_thread = QThread(self)
-        self._scan_worker = ScannerWorker(self._snap_store, self._scan_cfg, self.order_mgr)
-        self._scan_worker.moveToThread(self._scan_thread)
-        self._scan_thread.started.connect(self._scan_worker.run)
-        self._scan_thread.start()
-
-        # [RETRY] started 시그널 유실 대비: 스레드가 살아있는데 안 돌면 강제 시작 (시그널 방식)
-        from PyQt5.QtCore import QMetaObject, Qt
-        print("DEBUG: Calling ScannerWorker.run() via invokeMethod...")
-        QMetaObject.invokeMethod(self._scan_worker, "run", Qt.QueuedConnection)
         
-        logger.info("[MainWindow] ScannerWorker 스레드 시작 완료 (ID: %d)", int(self._scan_thread.currentThreadId()))
+        logger.info("[MainWindow] 백그라운드 워커 설정 완료")
 
     def _setup_news_analyzer(self) -> None:
         """뉴스 분석기 초기화"""
@@ -147,6 +135,11 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         scan_interval = int(getattr(self._scan_cfg, "scan_interval", 120.0)) * 1000
         self._scan_refresh_timer.start(scan_interval)
         
+        # 2. 스마트 스캐너 시작 (백그라운드 루프 시동)
+        if hasattr(self, "_smart_scanner"):
+            self._smart_scanner.start()
+            self.append_log("🔍 [스캐너] 스마트 스캐너 루프 시작")
+
         # 초기 스캔 즉시 실행
         QTimer.singleShot(1000, self.trading_controller.run_periodic_scan)
         self.append_log("🚀 [시스템] 로그인 후 자동 동기화 및 스캔 시작")
@@ -175,14 +168,8 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
             if hasattr(self, "_scan_refresh_timer"): self._scan_refresh_timer.stop()
 
             # 2. 백그라운드 워커/스레드 안전 종료
-            if hasattr(self, "_scan_worker"):
-                self._scan_worker.stop()
-            
-            if hasattr(self, "_scan_thread") and self._scan_thread.isRunning():
-                self._scan_thread.quit()
-                if not self._scan_thread.wait(1000): # 최대 1초 대기
-                    logger.warning("[MainWindow] 스캐너 스레드 강제 종료")
-                    self._scan_thread.terminate()
+            # 2. 백그라운드 워커 종료
+            # self._port_worker.stop() # PortfolioWorker는 보통 MainWindow 생명주기 따름
 
             # 4. 데이터 강제 Flush (Clean Exit)
             if hasattr(self, "_audit") and self._audit:

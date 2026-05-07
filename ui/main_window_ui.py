@@ -92,6 +92,10 @@ class MainWindowUI:
             return
         ts = datetime.now().strftime("%H:%M:%S")
         self._log_queue.append(f"[{ts}] {text}")
+        
+        # 큐 폭주 방지 (최대 100개까지만 유지 후 일괄 배출)
+        if len(self._log_queue) > 100:
+            self._log_queue.pop(0)
 
     def _flush_logs(self) -> None:
         """큐에 쌓인 로그를 log_panel에 일괄 추가한다."""
@@ -112,9 +116,9 @@ class MainWindowUI:
     def _setup_logging_handlers(self) -> None:
         """스캐너 및 시스템 로그를 UI Panel에 연결"""
         import logging
-        # Scanner Log
+        # Scanner Log (전략 판정 전용)
         self._scanner_handler = ScannerLogHandler(self.scanner_panel)
-        logging.getLogger("scanner").addHandler(self._scanner_handler)
+        logging.getLogger("scanner.audit").addHandler(self._scanner_handler)
         
         # System Log
         self._sys_handler = SysLogQtHandler(self.log_panel)
@@ -122,3 +126,11 @@ class MainWindowUI:
 
         # [NEW] 스캐너 워커 로그 전파 차단 (중복 출력 방지)
         logging.getLogger("scanner.worker").propagate = False
+
+        # [NEW] 초기 기동 시 이미 로그인된 상태라면 헤더 정보 동기화
+        if hasattr(self, "login_mgr") and self.login_mgr.account:
+            self.header.set_connected(self.login_mgr.account, self.login_mgr.server_mode)
+        
+        # [NEW] 초기 손익 데이터 동기화
+        if hasattr(self, "state") and self.state:
+            self.header.set_pnl(self.state.daily_realized_pnl)

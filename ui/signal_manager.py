@@ -63,6 +63,9 @@ class SignalManager:
         # 첫 신호 자동매매 시작 — TC에서 판단, UI만 반응
         self.tc.auto_trade_started.connect(self.win._on_auto_trade_started)
 
+        # [NEW] 당일 실현손익 업데이트 연동
+        self.state.pnl_updated.connect(self.win.header.set_pnl)
+
         # 지수 급락 감지 신호 연결 (상태 변경)
         self.tc.market_crash_detected.connect(self.tc._on_market_crash_detected)
 
@@ -91,11 +94,11 @@ class SignalManager:
         self.win._port_worker.refresh_done.connect(self.win._on_portfolio_refresh)
         self.win._port_worker.log_message.connect(self.win.append_log)
 
-        # 스캐너 워커 — signal_detected를 TC(엔진)와 UI에 각각 연결
-        self.win._scan_worker.signal_detected.connect(self.tc.handle_signal)          # 엔진 직접
-        self.win._scan_worker.signal_detected.connect(self.win._on_scan_signal)       # UI 로그만
-        self.win._scan_worker.watch_list_updated.connect(self.win.scanner_panel.refresh)
-        self.win._scan_worker.log_message.connect(self.win.append_log)
+        # ScannerWorker 관련 시그널 (제거 예정)
+        # self.win._scan_worker.signal_detected.connect(self.tc.handle_signal)
+        # self.win._scan_worker.signal_detected.connect(self.win._on_scan_signal)
+        # self.win._scan_worker.watch_list_updated.connect(self.win.scanner_panel.refresh)
+        # self.win._scan_worker.log_message.connect(self.win.append_log)
 
         # 스케줄러
         ms = self.win.market_scheduler
@@ -137,9 +140,11 @@ class SignalManager:
             ss.signal_detected.connect(self.win._on_scan_signal)
             # [Phase 3] UI 하이라이트 효과 연결
             ss.signal_detected.connect(self.win.scanner_panel.add_signal)
+            # [NEW] 실시간 감시 목록 UI 갱신 연결
+            ss.watch_list_updated.connect(self.win.scanner_panel.refresh)
             # [Phase D-3] 포지션 현재가 갱신 신호 연결 (OrderManager에게 전달)
             ss.price_updated.connect(self.om._on_price_updated)
-            logger.info("[SignalManager] SmartScanner 시그널 연결 완료 (signal_detected & price_updated)")
+            logger.info("[SignalManager] SmartScanner 시그널 연결 완료 (signal_detected & watch_list_updated & price_updated)")
 
     def _bind_context_updates(self):
         """중앙 상태 관리자와 UI 동기화"""

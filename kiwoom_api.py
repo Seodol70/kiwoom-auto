@@ -419,6 +419,36 @@ class KiwoomManager(KiwoomProtocol):
             
         return all_rows[:max_rows]
 
+    def fetch_opt10004_top_volume(self, max_rows: int = 200) -> list[dict]:
+        """
+        opt10004 거래대금 상위 (한 번에 100~200개 조회, Circuit Breaker 회피용)
+        2026-05-07: opt10030 Circuit Breaker 문제 해결을 위해 추가
+
+        특징:
+        - 페이지 처리 없음 (1회 호출로 최대 200개 조회)
+        - API 호출 1회 → Circuit Breaker 회피 가능
+        - opt10030보다 안정적
+        """
+        all_rows: list[dict] = []
+        import random
+        screen_no = str(9010 + random.randint(0, 5))  # 화면 번호 순환
+
+        logger.info("[opt10004] 거래대금 상위 1회 조회 시작 (max=%d)", max_rows)
+
+        self._set_input("시장구분", "000")      # 전체 시장
+        self._set_input("정렬구분", "1")        # 1=거래대금 정렬
+        self._set_input("관리종목포함", "0")    # 관리종목 제외
+        self._set_input("신용구분", "0")        # 신용구분 무관
+
+        ok = self._comm_rq("opt10004", "거래대금상위", screen_no, prev_next=0)
+        if ok:
+            all_rows = self._tr_data.get("rows", [])
+            logger.info("[opt10004] 조회 성공 — %d개 종목 수신", len(all_rows))
+        else:
+            logger.warning("[opt10004] 조회 실패")
+
+        return all_rows[:max_rows]
+
     def fetch_opt10032_top_volume(self, max_rows: int = 200) -> list[dict]:
         """
         opt10032 전일거래량상위. (opt10030 공백 시 fallback 용)
@@ -1367,7 +1397,7 @@ class KiwoomManager(KiwoomProtocol):
                 # [DEBUG] 모든 필드값 조사 (필드명 누락 방지용)
                 fields = ["종목명", "현재가", "등락률", "등락율", "전일대비", "거래대금", "거래량", "전일대비율"]
                 vals = [f"{f}={g(f)}" for f in fields]
-                logger.info("[TR원본데이터] 행[%d] %s", i, " | ".join(vals))
+                logger.debug("[TR원본데이터] 행[%d] %s", i, " | ".join(vals))
 
             # 종목명 인코딩 보정
             name_fixed = self._fix_enc(g("종목명")).strip()
@@ -1380,10 +1410,10 @@ class KiwoomManager(KiwoomProtocol):
                     "전일종가", "기준가", "전일대비기호", "등락율", "전일대비율"
                 ]
                 debug_vals = [f"{f}:{g(f)}" for f in all_possible_fields if g(f)]
-                logger.info("[opt10030 RAW DATA] 행[0] %s", " | ".join(debug_vals))
+                logger.debug("[opt10030 RAW DATA] 행[0] %s", " | ".join(debug_vals))
 
             if i == 0:
-                logger.info("[opt10030 필드검록] 종목=%s 현재가=%s 등락률=%s 등락율=%s 전일대비=%s", 
+                logger.debug("[opt10030 필드검록] 종목=%s 현재가=%s 등락률=%s 등락율=%s 전일대비=%s", 
                             name_fixed, g("현재가"), g("등락률"), g("등락율"), g("전일대비"))
 
             rows.append({

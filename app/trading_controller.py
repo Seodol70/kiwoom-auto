@@ -99,6 +99,25 @@ class TradingController(QObject):
             self._order_mgr, self._risk_mgr, self._scan_cfg, self._snap_store
         )
 
+        # [NEW] SmartScanner 신호를 주문 모듈과 연결 (2026-05-07 수정)
+        if self._smart_scanner:
+            self._smart_scanner.signal_detected.connect(self._on_signal_from_scanner)
+
+    def _on_signal_from_scanner(self, sig) -> None:
+        """SmartScanner에서 발생한 신호를 처리하여 주문 실행"""
+        if not sig or not self._order_mgr:
+            return
+
+        try:
+            logger.warning(
+                "[신호처리] %s(%s) [%s] 신호 수신 — 매수 시도",
+                sig.name, sig.code, sig.signal_type
+            )
+            # OrderManager.handle_signal()으로 신호 처리
+            self._order_mgr.handle_signal(sig)
+        except Exception as e:
+            logger.error("[신호처리 오류] %s", e)
+
     def force_update_stock(self, code: str) -> None:
         """특정 종목의 정보를 즉시 강제 갱신한다 (사용자 클릭 시)."""
         if not code: return
@@ -542,10 +561,11 @@ class TradingController(QObject):
 
             # SnapshotStore 메모리 정리 (감시 목록 + 보유 포지션 외 제거)
             if self._snap_store and self._smart_scanner:
-                # watch_q.subscribed 대신 방금 스캔된 top_codes를 우선 사용
+                # 감시 대상 + 보유 종목 + UI 표시용 상위 종목 유지 (메모리 정리 방지)
                 watch_codes = set(top_codes) if top_codes else set(getattr(self._smart_scanner.watch_q, "subscribed", set()))
+                ui_codes = set(self._snap_store.top_by_trade_amount(120).index)
                 pos_codes = set(self._order_mgr.positions.keys())
-                removed = self._snap_store.cleanup_stale_data(watch_codes | pos_codes)
+                removed = self._snap_store.cleanup_stale_data(watch_codes | pos_codes | ui_codes)
                 if removed:
                     logger.info("[스캔] SnapshotStore 메모리 정리 — %d종목 제거", removed)
 

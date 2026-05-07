@@ -57,6 +57,9 @@ class HeaderBar(QWidget):
         self._lbl_title.setMinimumWidth(80)  # 너비 축소
 
         self._lbl_account = self._make("🏠 계좌: —")
+        self._lbl_daily_pnl = self._make("💰 당일손익: 0원")
+        self._lbl_daily_pnl.setMinimumWidth(150)
+        self._lbl_daily_pnl.setStyleSheet("color: #cdd6f4; font-weight: bold;")
         
         # [NEW] 헬스 인디케이터 (LED)
         self._lbl_health_led = QLabel()
@@ -161,6 +164,7 @@ class HeaderBar(QWidget):
         lay.addStretch()
         
         lay.addWidget(self._lbl_account)
+        lay.addWidget(self._lbl_daily_pnl)
         lay.addWidget(self._lbl_health_led)
         lay.addWidget(self._divider())
         lay.addWidget(self._lbl_conn)
@@ -171,6 +175,7 @@ class HeaderBar(QWidget):
         lay.addWidget(self._btn_auto)
         lay.addWidget(self._btn_unlock)
         lay.addWidget(self._btn_reload)
+        lay.addWidget(self._btn_restart)
         lay.addWidget(self._btn_exit)
 
 
@@ -301,8 +306,10 @@ class HeaderBar(QWidget):
         pass
 
     def set_pnl(self, pnl: int) -> None:
-        """실현손익 업데이트 (UI 항목 제거로 미사용)"""
-        pass
+        """실현손익 업데이트 (당일 누적)"""
+        color = "#f38ba8" if pnl > 0 else "#89b4fa" if pnl < 0 else "#cdd6f4"
+        self._lbl_daily_pnl.setText(f"💰 당일손익: {pnl:+,.0f}원")
+        self._lbl_daily_pnl.setStyleSheet(f"color: {color}; font-weight: bold;")
 
     def set_auto_checked(self, checked: bool) -> None:
         """자동매매 버튼 상태 공개 인터페이스"""
@@ -316,7 +323,7 @@ class HeaderBar(QWidget):
     def set_index(self, kospi_current: float, kospi_chg: float,
                   kosdaq_current: float, kosdaq_chg: float, is_crash: bool) -> None:
         """코스피·코스닥 현재가 및 등락률 표시 (한국식: 상승 빨강 / 하락 파랑)."""
-        logging.warning("[HeaderBar] set_index 호출됨: KP=%.2f(%.2f%%), KD=%.2f(%.2f%%)", 
+        logging.debug("[HeaderBar] set_index 호출됨: KP=%.2f(%.2f%%), KD=%.2f(%.2f%%)", 
                       kospi_current, kospi_chg, kosdaq_current, kosdaq_chg)
         
         def _fmt(name: str, cur: float, chg: float) -> str:

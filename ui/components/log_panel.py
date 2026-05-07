@@ -43,34 +43,42 @@ class ScannerLogHandler(QObject, logging.Handler):
 
     # UI에 표시할 FAIL 단계 — 초기 필터(VOL_SURGE, TIME 등) 제외, 후기 필터만 표시
     # 이 목록에 없는 FAIL은 파일에만 기록 (수백 개 초기 거절이 패널을 덮는 것 방지)
+    # FAIL 중에서도 진짜 의미 있는 단계만 표시 (노이즈 제거)
     _FAIL_SHOW_STEPS = {
+        "JDM_PIVOT", "BREAKOUT", "JDM_RSI", "JDM_EMA", "JDM_CANDLE",
+    }
+    
+    # NEAR(아까운 탈락)은 조금 더 폭넓게 표시
+    _NEAR_SHOW_STEPS = {
         "JDM_RSI", "JDM_EMA", "JDM_PRICE_EMA", "JDM_SLIP",
-        "JDM_CANDLE", "JDM_PIVOT",
-        "JDM_DAILY_MA20", "JDM_MA20_SLOPE", "JDM_ALIGN",
-        "JDM_SURGE", "JDM_LIQUIDITY",
-        "BREAKOUT", "PRE_SURGE", "OPENING_SCALP",
+        "JDM_CANDLE", "JDM_PIVOT", "JDM_TREND",
+        "BREAKOUT", "PRE_SURGE", "TREND_CHECK",
     }
 
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            msg = record.getMessage()          # "PASS/FAIL\tcode\tname\tstep\treason"
+            msg = record.getMessage()          # "PASS/FAIL/NEAR\tcode\tname\tstep\treason"
             parts = msg.split("\t")
             if len(parts) < 5:
-                if record.levelno >= logging.INFO:
-                    self.log_entry.emit(f"INFO\t{msg}\t\t")
+                # 탭 구분 데이터가 없는 일반 로그는 진단 패널에서 제외 (시스템 로그가 처리)
                 return
 
 
-            level = parts[0]   # "PASS" | "FAIL"
+            level = parts[0]   # "PASS" | "FAIL" | "NEAR"
             step  = parts[3]
 
 
             # PASS 중 노이즈 단계 제외
             if level == "PASS" and step in self._PASS_SKIP_STEPS:
                 return
-            # FAIL 중 초기 필터 단계 제외 (후기 단계만 표시)
+            
+            # FAIL 필터링
             if level == "FAIL" and step not in self._FAIL_SHOW_STEPS:
+                return
+                
+            # NEAR 필터링
+            if level == "NEAR" and step not in self._NEAR_SHOW_STEPS:
                 return
 
 
@@ -266,6 +274,15 @@ class LogPanel(QWidget):
         if len(parts) < 4:
             return
         level, who, step, reason = parts[0], parts[1], parts[2], "\t".join(parts[3:])
+        
+        # 과도한 로그 제한 (최대 500줄)
+        if self._log.document().blockCount() > 500:
+            cursor = self._log.textCursor()
+            cursor.movePosition(cursor.Start)
+            cursor.select(cursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
+
         ts = datetime.now().strftime("%H:%M:%S")
 
 
@@ -275,6 +292,9 @@ class LogPanel(QWidget):
         elif level == "FAIL":
             color  = "#585b70"
             prefix = "✗"
+        elif level == "NEAR":
+            color  = "#f9e2af"  # 노란색 (아까운 탈락)
+            prefix = "⚡"
         else:
             color  = "#cdd6f4"
             prefix = "ℹ"

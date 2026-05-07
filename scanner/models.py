@@ -61,6 +61,12 @@ class InternalStockState:
     daily_data: List[Dict] = field(default_factory=list)
     daily_updated_at: Optional[datetime] = None
 
+    # [NEW] 성능 최적화용 지표 캐시 및 갱신 제어
+    rsi_cached: float = 0.0
+    exec_vel_cached: float = 0.0
+    tick_count: int = 0
+    last_calc_ts: float = 0.0
+
     def update_trend(self, new_level: int):
         self.trend_prev_level = self.trend_level
         self.trend_level = new_level

@@ -180,6 +180,7 @@ class SmartScanner(QObject):
     signal_detected = pyqtSignal(object)  # ScanSignal 객체 전달
     price_updated = pyqtSignal(str, int, float, int)  # (code, price, pct, trend_level) — 포지션 현재가 갱신
     index_updated = pyqtSignal(str, float, float) # [NEW] (idx_name, price, pct) — 실시간 지수 갱신
+    watch_list_updated = pyqtSignal(list) # [NEW] UI 갱신용 종목 리스트 (list[dict])
 
     def __init__(self, kiwoom, cfg: Optional[SmartScannerConfig] = None, 
                  notification_mgr: Optional["NotificationManager"] = None) -> None:
@@ -350,8 +351,8 @@ class SmartScanner(QObject):
         logger.info("전 종목 %d개 수집", len(all_codes))
 
 
-        # ③ 터미널 뷰 시작
-        self.display.start()
+        # ③ 터미널 뷰 시작 (UI 대시보드 집중을 위해 비활성화)
+        # self.display.start()
 
 
         # 1단계 예약
@@ -452,10 +453,11 @@ class SmartScanner(QObject):
         rows, _ = self.universe_mgr.filter_equity_rows(rows)
         mc = self.cfg.max_change_pct
         _n0 = len(rows)
-        rows = [r for r in rows if float(r.get("change_pct", 0) or 0) < mc]
+        # 2026-05-07: 음수 종목 제외 필터 추가 (change_pct >= 0 필터링)
+        rows = [r for r in rows if 0 <= float(r.get("change_pct", 0) or 0) < mc]
         if _n0 != len(rows):
             logger.info(
-                "  등락률 상한 %.1f%% 미만만 유지 — %d → %d종목",
+                "  등락률 상한 0%% ~ %.1f%% 범위만 유지 — %d → %d종목",
                 mc, _n0, len(rows),
             )
         rows = self.universe_mgr.apply_scoring_cap(rows, self.cfg.watch_pool_max)
@@ -546,11 +548,41 @@ class SmartScanner(QObject):
                         self._last_reserve_refresh = t0
                 else:
                     # ====== SEARCH 모드 ======
+                    # [Optimization] 루프 시작 전 1회 일괄 동기화 (O(1) DataFrame update)
+                    self.store.sync()
+
                     # Tier 3 전체(~110개): 매 사이클 _evaluate() 실행
-                    for code in list(self.watch_q.subscribed):
+                    # [NEW] UI 갱신을 위해 상위 120종목 획득 (ScannerWorker 기존 동작 유지)
+                    _top_n = max(120, int(getattr(self.cfg, "display_top_n", 50)))
+                    top_df = self.store.top_by_trade_amount(_top_n)
+                    
+                    ui_rows = []
+                    subscribed = set(self.watch_q.subscribed)
+                    
+                    # 1. 상위 종목들에 대해 데이터 수집 및 감시 대상 평가
+                    for code, row in top_df.iterrows():
                         snap = self.store.get_snapshot(code)
-                        if snap:
-                            self._evaluate(snap)
+                        if not snap: continue
+                        
+                        # [NEW] 마이너스 종목 필터링 (사용자 요청)
+                        if snap.change_pct < 0:
+                            continue
+                        
+                        # 감시 대상인 경우에만 전략 평가 실행
+                        sig_type = None
+                        if code in subscribed:
+                            sig_type = self._evaluate(snap)
+                        
+                        # UI 행 데이터 생성
+                        ui_rows.append(self._build_ui_row(snap, sig_type))
+                    
+                    if ui_rows:
+                        # 이미 거래대금 순으로 정렬되어 있으나 보장 차원에서 재정렬
+                        ui_rows.sort(key=lambda x: x["trade_amount"], reverse=True)
+                        self.watch_list_updated.emit(ui_rows)
+                        if t0 - getattr(self, "_last_ui_log", 0) > 10.0:
+                            self._last_ui_log = t0
+                            logger.info("[UI통합] UI 데이터 송신 중... (%d종목)", len(ui_rows))
             # [NEW] 주기적 자원 정리 (10분 간격)
             if t0 - self._last_cleanup_ts >= self._CLEANUP_INTERVAL:
                 self._last_cleanup_ts = t0
@@ -562,34 +594,70 @@ class SmartScanner(QObject):
                 logger.info("[Cleanup] 주기적 자원 정리 완료 — SnapshotStore: %d건, OrderManager: %d건", c_store, c_order)
 
             elapsed = time.monotonic() - t0
-            # WATCH 모드: 0.1초(초정밀 대기) / SEARCH 모드: 기본 주기(1초)
-            interval = 0.1 if self._universe_paused else self.cfg.scan_interval
+            # UI 및 실시간 평가 루프는 1초 주기로 고정 (cfg.scan_interval은 TR 주기이므로 여기선 배제)
+            interval = 0.1 if self._universe_paused else 1.0
             time.sleep(max(0.0, interval - elapsed))
 
 
-    def _evaluate(self, snap: StockSnapshot) -> None:
+    def _build_ui_row(self, snap: StockSnapshot, signal: Optional[str] = None) -> dict:
+        """StockSnapshot 정보를 UI용 dict 행으로 변환 (ScannerWorker 통합)"""
+        st = self.store.get_internal_state(snap.code)
+        
+        # 추세 텍스트 변환
+        _tlv = snap.trend_level
+        _trend_text = "횡보"
+        if _tlv >= 3: _trend_text = "강세"
+        elif _tlv == 2: _trend_text = "상승"
+        elif _tlv == 1: _trend_text = "약세"
+        elif _tlv < 0: _trend_text = "하락"
+
+        return {
+            "code":           snap.code,
+            "name":           snap.name,
+            "price":          snap.current_price,
+            "change_pct":     snap.change_pct,
+            "trade_amount":   snap.trade_amount,
+            "signal":         signal or "",
+            "investor_score": st.inv_score if st else snap.investor_score,
+            "foreign_net":    st.inv_foreign if st else snap.foreign_net,
+            "inst_net":       st.inv_inst if st else snap.inst_net,
+            "trend_level":    _tlv,
+            "trend_text":     _trend_text,
+            "chejan":         st.chejan_str if st else snap.chejan_strength,
+        }
+
+    def _evaluate(self, snap: StockSnapshot) -> Optional[str]:
         # ① 유니버스 감시 중단 — 포지션 풀 시 신규 신호 판단 차단
         if self._universe_paused:
-            return
+            return None
 
 
-        # ① 캔들 마감 게이팅 (exploration_mode 시에는 매 틱 판단하여 정밀 데이터 확보)
-        if not getattr(self.cfg, "exploration_mode", False):
+        # ① 캔들 마감 게이팅
+        # - exploration_mode: 0.5초 간격으로 제한 (과도한 CPU 점유 방지)
+        # - 일반 모드: 분 단위 게이팅
+        now_ts = time.monotonic()
+        if getattr(self.cfg, "exploration_mode", False):
+            last_eval = getattr(self, "_last_eval_ts", {})
+            if now_ts - last_eval.get(snap.code, 0) < 0.5:
+                return
+            last_eval[snap.code] = now_ts
+            self._last_eval_ts = last_eval
+        else:
             cur_min = datetime.now().minute
             if self._eval_min.get(snap.code, -1) == cur_min:
-                return
+                return None
             self._eval_min[snap.code] = cur_min
 
 
         # ② 등락률 상한
         if snap.change_pct >= self.cfg.max_change_pct:
-            return
+            return None
 
 
         # ② 시간 필터
         now = datetime.now().time()
         if not (self.cfg.entry_start_time <= now <= self.cfg.entry_end_time):
-            return
+            return None
 
 
         # ②-bis 요셉 시그널 추세 단계 갱신 (분 단위 1회)
@@ -606,6 +674,17 @@ class SmartScanner(QObject):
             snap.trend_prev_level = int(getattr(snap, "trend_level", 0))
             snap.trend_level = int(trend_level)
             self.store.update_trend_level(snap.code, trend_level)
+            
+            # [NEW] 스캐너 로그 패널에 현재 상태 출력 (사용자 요청)
+            _trend_text = "횡보"
+            if trend_level >= 3: _trend_text = "강세"
+            elif trend_level == 2: _trend_text = "상승"
+            elif trend_level == 1: _trend_text = "약세"
+            elif trend_level < 0: _trend_text = "하락"
+            
+            # 추세 단계 변경 시에만 로그 기록 (사용자 가독성 중심)
+            if trend_level != snap.trend_prev_level:
+                ScannerLogger.passed(snap.code, snap.name, "TREND_CHECK", f"추세변화:{_trend_text}(Lv{snap.trend_prev_level}→{trend_level}) 등락:{snap.change_pct}%")
 
 
         # [v3.0] 모듈화된 전략 루프 적용
@@ -628,9 +707,9 @@ class SmartScanner(QObject):
                 sig.trend_level = int(getattr(snap, "trend_level", 0))
                 sig.trend_prev_level = int(getattr(snap, "trend_prev_level", 0))
                 self._emit(sig)
-                return
+                return strategy_name
         
-        # [NEW] 탈락 사유 로깅 (전략 조건 미달)
+        return None
         if not getattr(self.cfg, "exploration_mode", False):
             # 탐색 모드가 아닐 때만 너무 잦은 로그 방지용으로 필터링
             from scanner.scanner_logger import ScannerLogger as _SL
@@ -1044,10 +1123,10 @@ class SmartScanner(QObject):
         retry: int = 2,
     ) -> list[dict]:
         """
-        거래대금 상위 조회 — opt10030 (KiwoomManager.fetch_opt10030_top_volume).
+        거래대금 상위 조회 — opt10004 (한 번에 200개, Circuit Breaker 회피용)
+        2026-05-07: opt10030 Circuit Breaker 문제 해결을 위해 opt10004로 변경
 
-
-        target=400 기준 TR 약 4회(연속조회) + 레이트리미터 각 0.25s → 합계 ~1~2s 수준.
+        Fallback: opt10004 실패 → opt10030 → opt10032
 
 
         [2026-04-23] 최적화:
@@ -1085,20 +1164,28 @@ class SmartScanner(QObject):
         try:
             for attempt in range(retry):
                 try:
-                    if hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
-                        # TR 차단 상태 확인 (KiwoomManager 레벨의 차단 여부 체크)
-                        if getattr(self._kiwoom, "is_tr_banned", lambda x: False)("opt10030"):
-                            logger.warning("[opt10030] 현재 차단 상태(Ban)입니다. 조회를 건너뜁니다.")
-                            rows = []
-                        else:
+                    rows = []
+
+                    # [NEW] 1차: opt10004 (Circuit Breaker 회피용, 한 번에 200개)
+                    if hasattr(self._kiwoom, "fetch_opt10004_top_volume"):
+                        logger.info("[opt10004] 1차 조회 시작 (1회 호출)")
+                        rows = self._tr_q.call(self._kiwoom.fetch_opt10004_top_volume, target)
+                        if rows:
+                            logger.info("[opt10004] 성공 — %d개 종목 수신", len(rows))
+
+                    # [NEW] opt10004 실패 → 2차: opt10030 (폴백)
+                    if not rows and hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
+                        if not getattr(self._kiwoom, "is_tr_banned", lambda x: False)("opt10030"):
+                            logger.info("[opt10030] 2차 폴백 조회 시작")
                             rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
-                        
-                        # [NEW] opt10030 응답이 없으면(공휴일/장전) opt10032(전일거래대금상위) 시도
-                        # 단, 차단 상태가 아닐 때만 시도하여 연쇄 차단 방지
-                        if not rows and not getattr(self._kiwoom, "is_tr_banned", lambda x: False)("opt10030"):
-                            if hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
-                                logger.info("[opt10030] 데이터 없음 -> opt10032(전일거래대금상위) 폴백 시도")
-                                rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
+                        else:
+                            logger.warning("[opt10030] 차단 상태 — 조회 건너뜀")
+
+                    # [NEW] opt10030도 실패 → 3차: opt10032 (최종 폴백)
+                    if not rows and hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
+                        if not getattr(self._kiwoom, "is_tr_banned", lambda x: False)("opt10030"):
+                            logger.info("[opt10032] 3차 폴백 조회 시작")
+                            rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
                         
                         if rows:
                             self._last_volume_rows = rows
@@ -1150,6 +1237,7 @@ class SmartScanner(QObject):
         # 5. 실시간 구독 갱신 (상위 N종목)
         top_codes = [r["code"] for r in rows]
         self._refresh_realtime_watch(top_codes)
+        self._prefiltered = True  # [NEW] 실시간 루프 가동 플래그 활성화
 
         # 6. 부족한 분봉 데이터 비동기 로딩
         self._ensure_candle_data(top_codes)

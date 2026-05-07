@@ -200,4 +200,5 @@ class ScannerLogger:
     ) -> None:
         """거의 통과할 뻔한 탈락 (near-miss) 기록 — DEBUG 레벨."""
         detail = reason or f"actual={actual} threshold={threshold}"
-        scan_log.debug("⚡ [근접탈락] %s(%s) [%s] %s", code, name, filter_name, detail)
+        # Handler 형식: "PASS/FAIL/NEAR\tcode\tname\tstep\treason"
+        scan_log.debug("NEAR\t%s\t%s\t%s\t%s", code, name, filter_name, detail)

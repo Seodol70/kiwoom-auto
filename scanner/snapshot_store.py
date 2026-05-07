@@ -85,7 +85,7 @@ class SnapshotStore:
         self._daily_cache_path: Path = self._get_daily_cache_path()
         self._load_daily_cache()
         self._1min_cache_path: Path = self._get_1min_cache_path()
-        self._load_1min_cache()
+        self.load_1min_cache()
 
     def _get_state(self, code: str) -> InternalStockState:
         """종목 코드를 키로 하는 상태 객체를 반환하거나 새로 생성한다."""
@@ -270,16 +270,18 @@ class SnapshotStore:
             
             st.updated_at = datetime.now()
 
-            # [FIX] DataFrame 동기화 (UI 및 스캐너 연동) — 0값으로 기존 데이터 덮어쓰기 방지
-            if not self._df.empty and code in self._df.index:
-                _PRICE_COLS = {"current_price", "high_price", "low_price", "open_price", "prev_close"}
-                for col in self._TICK_COLS:
-                    val = getattr(st, col, None)
-                    if val is None:
-                        continue
-                    if col in _PRICE_COLS and val == 0:
-                        continue
-                    self._df.at[code, col] = val
+            # [Optimization] DataFrame 동기화 중단 (UI 및 스캐너 연동은 _sync_df_prices 에서 배치 처리)
+            # if not self._df.empty and code in self._df.index:
+            #     _PRICE_COLS = {"current_price", "high_price", "low_price", "open_price", "prev_close"}
+            #     for col in self._TICK_COLS:
+            #         val = getattr(st, col, None)
+            #         if val is None:
+            #             continue
+            #         if col in _PRICE_COLS and val == 0:
+            #             continue
+            #         self._df.at[code, col] = val
+
+            st.tick_count += 1
 
             # [NEW] 체결강도 히스토리 업데이트
             if hasattr(st, "chejan_str") and st.chejan_str > 0:
@@ -374,26 +376,36 @@ class SnapshotStore:
 
         from scanner.indicator_service import IndicatorService
         alignment = IndicatorService.check_daily_alignment(daily_closes, curr_p)
-        _rsi_cached = 0.0
-        if len(closes_list) >= 15:
-            try:
-                _r = IndicatorService.calc_rsi(closes_list, 14)
-                if _r is not None and _r > 0: _rsi_cached = float(_r)
-            except Exception: pass
-            
-        # [NEW] 체결 가속도(Execution Velocity) 계산 — 10초 체결량 vs 1분 평균
-        # ratio=0.0 은 데이터 부족(fail-open)
-        _vel_ratio = 0.0
+        # [Optimization] 지표 계산 쓰로틀링 (1초 경과 또는 10틱 수신 시 재계산)
+        _now_ts = time.monotonic()
         with self._lock:
-            ts_vol = list(st.tick_ts_vol)
-            if ts_vol:
-                _now = time.monotonic()
-                _v10 = sum(v for t, v in ts_vol if t >= _now - 10.0)
-                _v60 = sum(v for t, v in ts_vol if t >= _now - 60.0)
-                if _v60 > 0:
-                    # 1분 평균 10초량 = _v60 / 6
-                    _avg10 = _v60 / 6.0
-                    _vel_ratio = _v10 / _avg10 if _avg10 > 0 else 0.0
+            st = self._get_state(code)
+            
+            # 1. RSI 계산
+            if len(closes_list) >= 15:
+                if (st.rsi_cached == 0 or 
+                    _now_ts - st.last_calc_ts > 1.0 or 
+                    st.tick_count % 10 == 0):
+                    try:
+                        _r = IndicatorService.calc_rsi(closes_list, 14)
+                        if _r is not None and _r > 0:
+                            st.rsi_cached = float(_r)
+                            st.last_calc_ts = _now_ts
+                    except Exception: pass
+            _rsi_val = st.rsi_cached
+
+            # 2. 체결 가속도(Execution Velocity) 계산
+            if (st.exec_vel_cached == 0 or 
+                _now_ts - st.last_calc_ts > 0.5 or 
+                st.tick_count % 5 == 0):
+                ts_vol = list(st.tick_ts_vol)
+                if ts_vol:
+                    _v10 = sum(v for t, v in ts_vol if t >= _now_ts - 10.0)
+                    _v60 = sum(v for t, v in ts_vol if t >= _now_ts - 60.0)
+                    if _v60 > 0:
+                        _avg10 = _v60 / 6.0
+                        st.exec_vel_cached = _v10 / _avg10 if _avg10 > 0 else 0.0
+            _vel_ratio = st.exec_vel_cached
 
         return StockSnapshot(
             code          = code,
@@ -427,7 +439,7 @@ class SnapshotStore:
             cumulative_amount = st.cumulative_amount,
             market_type      = m_type,
             rank             = safe_int_cell("rank", 0),
-            rsi              = _rsi_cached,
+            rsi              = _rsi_val,
             exec_velocity_ratio = _vel_ratio,
             updated_at       = updated_at,
         )
@@ -549,7 +561,7 @@ class SnapshotStore:
         cache_dir.mkdir(exist_ok=True)
         return cache_dir / f"1min_{today}.json"
 
-    def _load_1min_cache(self) -> None:
+    def load_1min_cache(self) -> None:
         """당일 1분봉 캐시 파일이 있으면 메모리로 로드한다."""
         try:
             if not self._1min_cache_path.exists(): return
@@ -642,24 +654,36 @@ class SnapshotStore:
             st.daily_updated_at = datetime.now()
         self._save_daily_cache()
 
+    def sync(self) -> None:
+        """외부에서 명시적으로 DataFrame 동기화를 수행한다."""
+        with self._lock:
+            self._sync_df_prices()
+
     def _sync_df_prices(self) -> None:
-        """고속 캐시(InternalStockState)에 저장된 시세를 DataFrame에 일괄 반영한다."""
+        """고속 캐시(InternalStockState)에 저장된 시세를 DataFrame에 일괄 반영한다. (내부용, 락 필요)"""
         if not self._states: return
         
-        # 주의: 락(lock) 안에서 호출되어야 함
         # 개별 .at[] 호출은 오버헤드가 크므로 딕셔너리로 모아서 한번에 업데이트 시도
         updates = {}
         for code, st in self._states.items():
             if code in self._df.index:
+                # 0원 방어 로직 포함하여 일괄 업데이트
                 updates[code] = {
-                    "current_price": st.current_price,
+                    "current_price": st.current_price if st.current_price > 0 else self._df.at[code, "current_price"],
+                    "high_price": st.high_price if st.high_price > 0 else self._df.at[code, "high_price"],
+                    "low_price": st.low_price if st.low_price > 0 else self._df.at[code, "low_price"],
+                    "open_price": st.open_price if st.open_price > 0 else self._df.at[code, "open_price"],
                     "volume": st.volume,
                     "trade_amount": st.trade_amount,
-                    "change_pct": st.change_pct if st.change_pct != 0 else self._df.at[code, "change_pct"]
+                    "change_pct": st.change_pct if st.change_pct != 0 else self._df.at[code, "change_pct"],
+                    "total_ask_qty": st.total_ask_qty,
+                    "total_bid_qty": st.total_bid_qty,
+                    "updated_at": st.updated_at
                 }
         
         if updates:
             up_df = pd.DataFrame.from_dict(updates, orient='index')
+            # 0값이나 None인 컬럼이 있을 수 있으므로 update 사용
             self._df.update(up_df)
 
     def top_by_trade_amount(self, n: int = 20) -> pd.DataFrame:
