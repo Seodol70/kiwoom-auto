@@ -379,9 +379,27 @@ class SmartScanner(QObject):
 
     def stop(self) -> None:
         self._running = False
+
+        # 실시간 콜백 등록 해제
+        try:
+            self._kiwoom._ocx.OnReceiveRealData.disconnect(self._on_receive_real_data)
+            logger.info("SmartScanner 실시간 콜백 등록 해제 완료")
+        except Exception as e:
+            logger.warning("SmartScanner 콜백 등록 해제 실패: %s", e)
+
+        # SetRealReg 해제 (모든 감시 종목 unsubscribe)
+        try:
+            self.watch_q.refresh([])
+            logger.info("SmartScanner 실시간 감시 해제 완료")
+        except Exception as e:
+            logger.warning("SmartScanner 감시 해제 실패: %s", e)
+
+        # 디스플레이 정지
         self.display.stop()
+
+        # 스냅샷 저장
         self.store.export_csv(os.path.join(self.cfg.log_dir, "snapshot_final.csv"))
-        logger.info("SmartScanner 정지 — 스냅샷 저장 완료")
+        logger.info("SmartScanner 정지 완료")
 
 
     # -----------------------------------------------------------------------
@@ -748,6 +766,13 @@ class SmartScanner(QObject):
                     "[틱수신/진단] %s | 현재가=%d | 등락률(FID12)=%r | 전일대비(FID11)=%r",
                     code, price, fid(12), fid(11)
                 )
+                # [NEW] 147830 전용 상세 진단
+                if code == "147830":
+                    logger.warning(
+                        "[147830 진단] price=%d | change_amt=%r | pct=%r(입력) | "
+                        "prev_close(계산전)=%d | open_=%d | strength=%r",
+                        price, change_amt, pct, prev_close, open_, strength_raw
+                    )
                 last_log[code] = now_ts
                 self._last_diag_log = last_log
 
@@ -767,37 +792,58 @@ class SmartScanner(QObject):
             # FID 11(전일대비 금액)은 실시간으로 항상 제공되며 부호가 정확함
             if change_amt != 0.0 and price > 0:
                 prev_close = price - int(change_amt)
+                if code == "147830":
+                    logger.warning("[147830] 기준가① FID11 사용: change_amt=%r → prev_close=%d", change_amt, prev_close)
             else:
                 # FID 11도 없는 경우 — 기존 snapshot의 prev_close 재사용
                 st_temp = self.store.get_snapshot(code)
                 prev_close = st_temp.prev_close if st_temp else 0
+                if code == "147830":
+                    logger.warning("[147830] 기준가② Snapshot 사용: prev_close=%d (change_amt=%r)", prev_close, change_amt)
 
             # [FINAL FALLBACK] 여전히 기준가가 0이라면 OCX 강제 동원 (2단계)
             if prev_close <= 0:
-                prev_close = self._kiwoom.get_current_price(code)
+                prev_close_ocx = self._kiwoom.get_current_price(code)
+                if code == "147830":
+                    logger.warning("[147830] 기준가③ OCX get_current_price: %d", prev_close_ocx)
+                if prev_close_ocx > 0:
+                    prev_close = prev_close_ocx
             if prev_close <= 0:
-                prev_close = self._kiwoom.get_master_price(code)
+                prev_close_master = self._kiwoom.get_master_price(code)
+                if code == "147830":
+                    logger.warning("[147830] 기준가④ OCX get_master_price: %d", prev_close_master)
+                if prev_close_master > 0:
+                    prev_close = prev_close_master
 
             # [NEW] 기준가가 여전히 0이면 시가로 역산 (장 초기 대비)
             if prev_close <= 0 and open_ > 0:
                 prev_close = open_
+                if code == "147830":
+                    logger.warning("[147830] 기준가⑤ 시가 역산: open_=%d", open_)
 
             # [ULTIMATE FALLBACK] 정말로 0이라면... 현재가를 기준가로 임시 세팅
             if prev_close <= 0 and price > 0:
                 prev_close = price
+                if code == "147830":
+                    logger.warning("[147830] 기준가⑥ 현재가 사용 (최후수단): price=%d", price)
 
             if prev_close > 0 and (pct == 0.0 or abs(pct) < 0.001):
                 # 기준가는 있는데 등락률이 0이면 직접 계산 (FID 12 지연 대응)
                 pct = round((price - prev_close) / prev_close * 100, 2)
+                if code == "147830":
+                    logger.warning("[147830] 등락률 직접 계산: prev_close=%d, price=%d → pct=%.2f%%",
+                                 prev_close, price, pct)
+            elif code == "147830":
+                logger.warning("[147830] 등락률 계산 불가: prev_close=%d, pct=%.2f", prev_close, pct)
 
             # [FIX] 지능형 거래대금 단위 보정: 오차 최소화(Nearest Match) 방식 채택
             # 현재가 * 누적거래량(est_amt)과 비교하여 천원/백만 단위 중 더 가까운 쪽 선택
             raw_cum_amt = safe_int(fid(13))
             est_amt = price * cum_vol
             
-            # [진단 로그] 주요 종목 정밀 추적
+            # [진단 로그] 주요 종목 정밀 추적 (DEBUG 레벨)
             if code in ("005930", "076610", "086520"):
-                logger.info("[단위진단] %s | raw=%d | est=%d | p=%d | v=%d", 
+                logger.debug("[단위진단] %s | raw=%d | est=%d | p=%d | v=%d",
                             code, raw_cum_amt, est_amt, price, cum_vol)
 
             if raw_cum_amt > 0:
