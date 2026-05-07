@@ -43,46 +43,28 @@ class JdmStrategy(BaseStrategy):
     def __init__(self):
         super().__init__("JDM_ENTRY")
 
-    def evaluate(self, snap: StockSnapshot, cfg: SmartScannerConfig, 
+    def evaluate(self, snap: StockSnapshot, cfg: SmartScannerConfig,
                  index_history: Optional[dict[str, list[float]]] = None) -> Optional[ScanSignal]:
-        # 1. 컨텍스트 빌드
-        ctx = self._build_ctx(snap, cfg)
-        if ctx is None:
+        # [FIX] signal_evaluator.check_jdm_entry()를 직접 호출
+        # 이를 통해 JDM_GC_OVERRIDE 등 모든 판정 로직을 통합
+        from scanner.signal_evaluator import check_jdm_entry
+
+        reason = check_jdm_entry(snap, cfg)
+        if reason is None:
             return None
 
-        # 2. MA 골든크로스 + 추세 필터
-        ma_result = self._check_trend_and_ma(snap, cfg, ctx)
-        if ma_result is None:
-            return None
-        spread_tag, rsi_tag = ma_result
-
-        # 3. 실행 품질 체크 (가장 복잡한 필터군)
-        exec_result = self._check_execution_quality(snap, cfg, ctx)
-        if exec_result is None:
-            return None
-        r_vol, r_chej, candle_reason = exec_result
-
-        # 4. 일봉 컨텍스트 체크
-        daily_ctx = self._check_daily_context(snap, cfg, ctx)
-        if daily_ctx is None:
-            return None
-
-        # 5. 신호 생성
-        mode_tag = "JDM_LITE" if ctx.lite_mode else "JDM"
-        near_tag = " | 📈신고가근처(TP↑)" if daily_ctx["near_high"] else ""
-        warm_tag = " | [WARMUP]" if ctx.is_warmup else ""
-        reason = f"[{ctx.slot}][{mode_tag}]{warm_tag} {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} | {candle_reason}{near_tag}"
-        
-        ScannerLogger.passed(snap.code, snap.name, mode_tag, reason)
-        
         # AI 피처 추출
         ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
 
+        # 신호 생성
+        is_warmup = "WARMUP" in reason
+        entry_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+
         return ScanSignal(
             snap.code, snap.name, self.name, snap.current_price, reason,
-            entry_candle_low=int(snap.lows_1min[-1]) if snap.lows_1min else 0,
+            entry_candle_low=entry_low,
             change_pct=float(getattr(snap, "change_pct", 0) or 0),
-            is_warmup=ctx.is_warmup,
+            is_warmup=is_warmup,
             values=ai_features
         )
 
