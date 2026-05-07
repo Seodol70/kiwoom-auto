@@ -141,7 +141,7 @@ class ScannerWorker(QObject):
                         
                         # [🚑 긴급 진단 로그] 005930(삼성), 086520(에코프로), 076610(해성), 251370(와이엠티)
                         if code in ("005930", "086520", "076610", "251370"):
-                             _log.info("[UI진단] %s | pc=%d | cp=%d | ta=%d | ch=%.2f%%", 
+                             _log.debug("[UI진단] %s | pc=%d | cp=%d | ta=%d | ch=%.2f%%", 
                                        code, _pc, _cp, _ta, ch)
 
                         # 데이터 무결성 체크 (전략 분석용)

@@ -168,6 +168,11 @@ def reload_adaptive(scan_cfg) -> str:
             new_cfg.realtime_sub_max = wpm
             new_cfg.display_top_n    = wpm
 
+        # 유니버스 가중치 (등락률 우선순위 강화)
+        new_cfg.universe_trade_amt_weight = float(config_manager.get("universe_trade_amt_weight", 0.4))
+        new_cfg.universe_vol_ratio_weight = float(config_manager.get("universe_vol_ratio_weight", 0.4))
+        new_cfg.universe_chg_pct_weight   = float(config_manager.get("universe_chg_pct_weight", 0.2))
+
         # scan_cfg를 새 설정으로 스레드 안전하게 갱신 (apply_from이 내부 lock 사용)
         scan_cfg.apply_from(new_cfg)
 

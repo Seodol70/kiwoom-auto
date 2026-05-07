@@ -99,6 +99,14 @@ class SnapshotStore:
             st = self._states.get(code)
             return len(st.mins) if st else 0
 
+    def get_name(self, code: str) -> str:
+        """특정 종목의 한글명을 반환한다."""
+        with self._lock:
+            if code not in self._df.index:
+                return ""
+            val = self._df.at[code, "name"]
+            return _df_cell_scalar(val, "")
+
     _NUM_COLS = [
         "current_price", "open_price", "high_price", "low_price",
         "volume", "trade_amount", "prev_close", "change_pct", "rank",
@@ -639,13 +647,20 @@ class SnapshotStore:
         if not self._states: return
         
         # 주의: 락(lock) 안에서 호출되어야 함
+        # 개별 .at[] 호출은 오버헤드가 크므로 딕셔너리로 모아서 한번에 업데이트 시도
+        updates = {}
         for code, st in self._states.items():
             if code in self._df.index:
-                self._df.at[code, "current_price"] = st.current_price
-                self._df.at[code, "volume"]        = st.volume
-                if st.change_pct != 0:
-                    self._df.at[code, "change_pct"] = st.change_pct
-                self._df.at[code, "trade_amount"]  = st.trade_amount
+                updates[code] = {
+                    "current_price": st.current_price,
+                    "volume": st.volume,
+                    "trade_amount": st.trade_amount,
+                    "change_pct": st.change_pct if st.change_pct != 0 else self._df.at[code, "change_pct"]
+                }
+        
+        if updates:
+            up_df = pd.DataFrame.from_dict(updates, orient='index')
+            self._df.update(up_df)
 
     def top_by_trade_amount(self, n: int = 20) -> pd.DataFrame:
         """

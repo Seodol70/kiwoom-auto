@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime
 from pathlib import Path
 from typing import Optional, Callable, TYPE_CHECKING
 
@@ -114,22 +114,54 @@ class UniverseManager:
         return not any(kw in n for kw in exclude_kw)
 
     def apply_scoring_cap(self, rows: list[dict], limit: int) -> list[dict]:
-        """거래대금, 페이스, 등락률을 조합한 스코어링으로 상위 종목 선정."""
+        """거래대금, 페이스, 등락률을 조합한 스코어링으로 상위 종목 선정 (시간대별 가중치 자동 전환)."""
         if not rows: return []
         
         n = len(rows)
-        w_amt = getattr(self.cfg, "universe_trade_amt_weight", 0.4) if self.cfg else 0.4
-        w_vol = getattr(self.cfg, "universe_vol_ratio_weight", 0.4) if self.cfg else 0.4
-        w_chg = getattr(self.cfg, "universe_chg_pct_weight", 0.2) if self.cfg else 0.2
+        now_t = datetime.now().time()
         
-        # 거래대금 순위 스코어 (0.0 ~ 1.0)
+        # 1. 시간대별 기본 가중치 결정 (하이브리드 전략)
+        # Phase 1: 09:00 ~ 09:05 (전일 데이터 + 시가 갭 중심)
+        if now_t < dtime(9, 5):
+            w_amt = 0.6  # 전일/당일 합산 거래대금 순위
+            w_vol = 0.1  # 거래량 페이스
+            w_chg = 0.3  # 시가 갭 등락률
+            is_early = True
+        # Phase 2: 09:05 ~ 09:15 (과도기)
+        elif now_t < dtime(9, 15):
+            w_amt = 0.4
+            w_vol = 0.2
+            w_chg = 0.4
+            is_early = False
+        # Phase 3: 09:15 이후 (사용자 설정 가중치 - 등락률 중심)
+        else:
+            w_amt = getattr(self.cfg, "universe_trade_amt_weight", 0.2) if self.cfg else 0.2
+            w_vol = getattr(self.cfg, "universe_vol_ratio_weight", 0.2) if self.cfg else 0.2
+            w_chg = getattr(self.cfg, "universe_chg_pct_weight", 0.6) if self.cfg else 0.6
+            is_early = False
+        
+        # 2. 상대 순위 산정 (Rank-based Scoring)
+        # 당일 거래대금 순위
         sorted_by_amt = sorted(rows, key=lambda r: int(r.get("trade_amount", 0) or 0), reverse=True)
-        amt_rank = {r["code"]: 1.0 - (i / max(n - 1, 1)) for i, r in enumerate(sorted_by_amt)}
+        today_amt_rank = {r["code"]: 1.0 - (i / max(n - 1, 1)) for i, r in enumerate(sorted_by_amt)}
+        
+        # 전일 거래량 순위 (Yesterday's Heat)
+        sorted_by_prev = sorted(rows, key=lambda r: self._prev_volumes.get(r["code"], 0), reverse=True)
+        prev_vol_rank = {r["code"]: 1.0 - (i / max(n - 1, 1)) for i, r in enumerate(sorted_by_prev)}
+
+        # 등락률 순위 (Relative Change Pct)
+        sorted_by_chg = sorted(rows, key=lambda r: float(r.get("change_pct", 0) or 0), reverse=True)
+        chg_rank = {r["code"]: 1.0 - (i / max(n - 1, 1)) for i, r in enumerate(sorted_by_chg)}
         
         scored = []
         for r in rows:
             code = r["code"]
-            s_amt = amt_rank.get(code, 0.5)
+            
+            # 거래대금 스코어: 장 초반에는 전일 순위와 당일 순위를 혼합
+            if is_early:
+                s_amt = (prev_vol_rank.get(code, 0.5) * 0.7) + (today_amt_rank.get(code, 0.5) * 0.3)
+            else:
+                s_amt = today_amt_rank.get(code, 0.5)
             
             # 거래량 페이스 스코어
             today_vol = int(r.get("volume", 0) or 0)
@@ -138,10 +170,10 @@ class UniverseManager:
             r["vol_ratio"] = round(pace, 4)
             s_vol = min(pace / 3.0, 1.0) if pace > 0 else 0.5
             
-            # 등락률 스코어
-            chg = float(r.get("change_pct", 0) or 0)
-            s_chg = min(max(chg / 10.0, 0.0), 1.0)
+            # 등락률 스코어: 절대값 대신 상대적 순위 사용 (등락률 높은 순서대로 높은 점수)
+            s_chg = chg_rank.get(code, 0.0)
             
+            # 최종 스코어 합산
             score = s_amt * w_amt + s_vol * w_vol + s_chg * w_chg
             scored.append((score, r))
             

@@ -1089,55 +1089,18 @@ class SmartScanner(QObject):
                             if hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
                                 logger.info("[opt10030] 데이터 없음 -> opt10032(전일거래대금상위) 폴백 시도")
                                 rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
-                    else:
-                        rows = self._tr_q.call(self._do_fetch_opt10030)
-                        rows = rows[:target]
-                    logger.info("[opt10030] 응답 %d행 (목표 %d)", len(rows), target)
-
-
-                    if rows:
-                        result = rows[:target]
-                        # [DEBUG] opt10030 응답 상세 로깅
-                        for i, r in enumerate(result[:5]):
-                            name = r.get("name", "?")
-                            logger.warning("[opt10030] 응답 #%d: code=%s, name=%s (type=%s, repr=%r)",
-                                         i, r.get("code"), name, type(name).__name__, name)
-
-                        logger.info("[opt10030] 최종 %d종목 확보", len(result))
-                        self._last_volume_rows = result
-                        self._last_volume_updated = time.monotonic()
-                        if on_progress:
-                            on_progress("거래대금 상위 조회", len(result), target,
-                                        f"{len(result)}종목 확보")
-                        return result
-
-
+                        
+                        if rows:
+                            self._last_volume_rows = rows
+                            self._last_volume_updated = time.monotonic()
+                            return rows[:target]
                 except Exception as e:
-                    logger.warning("[opt10030] 조회 실패 (attempt %d): %s", attempt + 1, e)
+                    logger.warning("[opt10030] 시도 %d/%d 실패: %s", attempt+1, retry, e)
+                    time.sleep(0.5)
+
+            return []
         finally:
             self._opt10030_fetching = False
-
-        # 모든 재시도 실패 — 이전 캐시 재사용 (있으면) 또는 5대장 fallback
-        if self._last_volume_rows:
-            logger.info("[opt10030] 조회 실패 — 이전 캐시 %d종목 재사용", len(self._last_volume_rows))
-            return self._last_volume_rows[:target]
-
-        logger.warning("[opt10030] 모든 시도 실패 (캐시 없음) -> 상위 폴백 로직으로 위임")
-        return []
-
-    def _log_store_health(self) -> None:
-        """SnapshotStore 상태를 주기적으로 로깅한다."""
-        _now = time.monotonic()
-        if _now - getattr(self, "_store_health_last", 0.0) < 300.0:
-            return
-        self._store_health_last = _now
-        try:
-            with self.store._lock:
-                _n_codes = len(self.store._df)
-                _n_mins = len([s for s in self.store._states.values() if s.mins])
-            logger.info("[스토어헬스] 종목=%d 1분봉보유=%d", _n_codes, _n_mins)
-        except Exception as e:
-            logger.debug("[스토어헬스] 수집 실패: %s", e)
 
     def run_periodic_scan(self, on_progress=None) -> list:
         """
@@ -1175,8 +1138,7 @@ class SmartScanner(QObject):
         self._update_state_containers(rows)
 
         # 5. 실시간 구독 갱신 (상위 N종목)
-        _watch_df = self.store.top_by_trade_amount(self.cfg.watch_pool_max)
-        top_codes = _watch_df.index.tolist() if not _watch_df.empty else []
+        top_codes = [r["code"] for r in rows]
         self._refresh_realtime_watch(top_codes)
 
         # 6. 부족한 분봉 데이터 비동기 로딩
@@ -1238,43 +1200,26 @@ class SmartScanner(QObject):
             all_codes = self._fetch_all_codes()
             if all_codes:
                 fallback_rows = []
+                from PyQt5.QtCore import QCoreApplication
+                
+                # [OPTIMIZED] 루프 중간에 UI 이벤트 처리 (화면 멈춤 방지)
+                _loop_cnt = 0
                 for code in all_codes:
+                    _loop_cnt += 1
+                    if _loop_cnt % 200 == 0:
+                        QCoreApplication.processEvents()
+
                     pv = self.universe_mgr._prev_volumes.get(code, 0)
                     if pv > 0:
-                        # GetMasterCodeName의 CP949 인코딩 보정
-                        raw_name = self._kiwoom._ocx.dynamicCall("GetMasterCodeName(QString)", [code])
-                        try:
-                            # CP949 → UTF-8 변환 (키움API는 CP949 인코딩)
-                            if raw_name:
-                                name = raw_name.encode('latin-1').decode('cp949')
-                            else:
-                                name = ""
-                        except (UnicodeDecodeError, UnicodeEncodeError, AttributeError):
-                            # 변환 실패 시 원본 사용
-                            name = raw_name or ""
+                        # [FIX] 스토어 초기화 시 종목명이 없으면 OCX에서 직접 가져옴 (필터링 탈락 방지)
+                        name = self.store.get_name(code) or self._kiwoom.get_stock_name(code)
+                        # [FIX] 기준가(전일종가) 복구
+                        master_p = self._kiwoom.get_master_last_price(code)
 
-                        # [FIX] prev_close를 0이 아닌 마스터 정보(전일종가)에서 가져옴
-                        master_p = abs(self._kiwoom.get_master_last_price(code))
-                        
-                        # [NEW] 우선순위 기반 가격 복원
-                        # 1. SnapshotStore에 이미 있는 현재가 (실시간/개별TR 업데이트 반영)
-                        # 2. 1분봉 캐시 파일의 마지막 종가
-                        # 3. 마스터 가격 (전일 종가)
-                        
                         snap = self.store.get_snapshot(code)
                         cur_p = snap.current_price if snap and snap.current_price > 0 else 0
                         chg_pct = 0.0
                         
-                        # [NEW] 캐시 데이터 우선순위 강화
-                        # 스토어에 가격이 없거나, 있어도 전일종가(마스터)와 같다면 캐시에서 오늘 최종가 로드 시도
-                        if cur_p == 0 or cur_p == master_p:
-                            cnt = self.store.load_1min_for_code(code)
-                            if cnt > 0:
-                                st = self.store.get_internal_state(code)
-                                if st.mins:
-                                    cur_p = int(st.mins[-1])
-                        
-                        # 여전히 0이면 마스터 가격 사용
                         if cur_p == 0:
                             cur_p = master_p
                             
@@ -1293,9 +1238,27 @@ class SmartScanner(QObject):
                         })
                 
                 if fallback_rows:
-                    # 거래대금(추정) 순 정렬
-                    fallback_rows.sort(key=lambda x: x["trade_amount"], reverse=True)
-                    logger.info("[주기 스캔] 전일 캐시 기반 %d종목 유니버스 생성 완료", len(fallback_rows))
+                    # 등락률 순 정렬 (사용자 요청: 등락률 높은 거부터)
+                    fallback_rows.sort(key=lambda x: x["change_pct"], reverse=True)
+                    logger.info("[주기 스캔] 전일 캐시 기반 %d종목 유니버스 생성 완료 (등락률 우선)", len(fallback_rows))
+                    
+                    # [WARMUP] 상위 20종목에 대해 즉시 시세 동기화 (0% 방지)
+                    # 너무 많이 하면 다시 멈추므로 20개 정도로 제한
+                    warmup_targets = fallback_rows[:20]
+                    logger.info("[WARMUP] 상위 %d종목 시세 동기화 시작...", len(warmup_targets))
+                    for r in warmup_targets:
+                        QCoreApplication.processEvents()
+                        info = self._kiwoom.get_stock_info(r["code"])
+                        if info:
+                            r.update({
+                                "current_price": info["current_price"],
+                                "change_pct": info["change_pct"],
+                                "trade_amount": info["trade_amount"],
+                                "volume": info["volume"],
+                            })
+                    
+                    # 갱신된 데이터로 다시 정렬
+                    fallback_rows.sort(key=lambda x: x["change_pct"], reverse=True)
                     return fallback_rows[:self.cfg.collect_raw_top_n]
 
             logger.warning("[주기 스캔] opt10030/10032/전일캐시 모두 실패 — 빈 유니버스 반환")
@@ -1304,17 +1267,23 @@ class SmartScanner(QObject):
 
     def _filter_and_score_universe(self, rows: list[dict]) -> list[dict]:
         """유니버스 필터링(우선주 제외 등) 및 하이브리드 스코어링을 적용한다."""
-        rows, _ = filter_equity_rows(rows)
-        mc = self.cfg.max_change_pct
-        _n0 = len(rows)
-        rows = [r for r in rows if float(r.get("change_pct", 0) or 0) < mc]
+        _n_total = len(rows)
+        rows, _dropped_equity = filter_equity_rows(rows)
+        _n_equity = len(rows)
         
-        if _n0 != len(rows):
-            logger.info("[주기 스캔] 등락률 상한 %.1f%% 미만만 유지 — %d → %d종목", mc, _n0, len(rows))
+        mc = self.cfg.max_change_pct
+        rows = [r for r in rows if 0.0 <= float(r.get("change_pct", 0) or 0) < mc]
+        _n_chg = len(rows)
+        
+        if _n_total != _n_chg:
+            logger.info("[주기 스캔] 필터 결과: 전체 %d -> 종목명필터 %d -> 등락률필터(0%%~%.1f%%) %d종목", 
+                        _n_total, _n_equity, mc, _n_chg)
             
-        rows = apply_universe_score_cap(rows, self.cfg.watch_pool_max, self.cfg, self._prev_volumes)
         if not rows:
-            logger.warning("[주기 스캔] 필터 후 종목 없음 — 중단")
+            logger.warning("[주기 스캔] 필터 후 남은 종목이 없습니다 (전체 %d개 중 전원 탈락)", _n_total)
+            return []
+
+        rows = apply_universe_score_cap(rows, self.cfg.watch_pool_max, self.cfg, self._prev_volumes)
         return rows
 
     def _update_state_containers(self, rows: list[dict]) -> None:
@@ -1394,18 +1363,23 @@ class SmartScanner(QObject):
             QTimer.singleShot(delay, lambda c=list(codes_need): self._load_candles_async(c, 0))
 
     def _print_diagnostic_logs(self) -> None:
-        """진단용 로그를 출력한다."""
+        """진단용 로그를 출력한다 (현재 감시 중인 상위 종목)."""
         dn = max(1, int(self.cfg.diagnostic_sample_n))
-        sample = self.store.top_by_trade_amount(dn)
-        if sample.empty: return
+        top_codes = self.top_mgr.get_top_codes()[:dn]
+        if not top_codes: return
+        
+        with self.store._lock:
+            df_snap = self.store._df.copy()
 
-        for code, row in sample.iterrows():
+        for code in top_codes:
+            if code not in df_snap.index: continue
+            row = df_snap.loc[code]
             amt = int(row.get("trade_amount", 0))
-            logger.debug(
-                "[진단] %s(%s) 현재가=%s 거래대금=%s · %s",
+            logger.info(
+                "[진단] %s(%s) 현재가=%s 등락=%s 거래대금=%s",
                 row.get("name", "?"), code, f"{int(row.get('current_price', 0)):,}",
-                format_trade_amount_korean(amt),
-                format_trade_amount_growth(amt, self._amt_baseline.get(str(code)))
+                f"{float(row.get('change_pct', 0)):+.2f}%",
+                format_trade_amount_korean(amt)
             )
 
     def _schedule_daily_refresh(self, top_codes: list[str]) -> None:
@@ -1732,4 +1706,10 @@ class SmartScanner(QObject):
             logger.warning("[SmartScanner] 시장 구분 태깅 실패: %s", e)
 
 
-
+    def _log_store_health(self) -> None:
+        """SnapshotStore의 현재 상태를 요약하여 로그에 기록한다."""
+        try:
+            count = len(self.store)
+            logger.info("[SnapshotStore Health] 감시 중인 종목 수: %d", count)
+        except Exception as e:
+            logger.debug("[_log_store_health] 오류: %s", e)

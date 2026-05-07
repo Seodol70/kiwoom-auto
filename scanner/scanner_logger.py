@@ -51,7 +51,7 @@ def _build_scan_logger(log_dir: str = "logs") -> logging.Logger:
     os.makedirs(log_dir, exist_ok=True)
     logger = logging.getLogger("scanner.audit")
     logger.setLevel(logging.DEBUG)
-    logger.propagate = True
+    logger.propagate = False
 
     handler = _WinSafeRotatingFileHandler(
         filename=os.path.join(log_dir, "scanner.log"),
