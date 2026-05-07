@@ -652,7 +652,7 @@ class SmartScanner(QObject):
             return
         self._last_signal_ts[key] = now_ts
 
-        # [NEW] SQLite DB에 신호 및 AI 피처 저장
+        # [NEW] SQLite DB에 신호 및 AI 피처 저장 (비동기 처리로 UI 프리징 방지)
         try:
             db_data = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -665,8 +665,13 @@ class SmartScanner(QObject):
             # AI 피처가 있으면 업데이트
             if sig.values:
                 db_data.update(sig.values)
-                
-            DatabaseManager().insert_signal(db_data)
+
+            # 백그라운드 스레드에서 비동기 실행 (메인 스레드 블로킹 방지)
+            threading.Thread(
+                target=DatabaseManager().insert_signal,
+                args=(db_data,),
+                daemon=True
+            ).start()
         except Exception as e:
             logger.error("[SmartScanner] DB 신호 저장 실패: %s", e)
 

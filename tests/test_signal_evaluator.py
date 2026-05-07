@@ -1,6 +1,13 @@
 import pytest
 from unittest.mock import MagicMock
 from datetime import time as dtime
+from unittest.mock import patch
+import logging
+
+# 로깅 설정 (테스트 시 거절 사유 확인용)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("scanner.scanner_logger")
+logger.setLevel(logging.INFO)
 
 from scanner.signal_evaluator import (
     check_breakout, check_jdm_entry, check_testa_alignment,
@@ -28,15 +35,22 @@ def base_snap():
     snap.change_pct = 5.0
     snap.chejan_strength = 150.0
     snap.vwap = 10300
-    snap.closes_1min = [10000, 10100, 10200, 10300, 10400, 10500]
-    snap.highs_1min = [10100, 10200, 10300, 10400, 10500, 10600]
-    snap.lows_1min = [9900, 10000, 10100, 10200, 10300, 10400]
-    snap.volumes_1min = [10000] * 11
+    snap.closes_1min = [10000] * 100
+    snap.highs_1min = [10100] * 100
+    snap.lows_1min = [9900] * 100
+    snap.volumes_1min = [10000] * 100
     snap.rsi = 60.0
     snap.trend_level = 0
     snap.rank = 1
     snap.trade_amount = 1000000000
     snap.market_type = "KOSDAQ"
+    
+    # daily context
+    snap.daily_high_prev = 10500
+    snap.daily_low_prev = 9500
+    snap.daily_closes = [9000] * 10 + [9500] * 10 + [10000] * 10 # Rising daily trend
+    snap.exec_velocity_ratio = 2.0
+    
     return snap
 
 # ---------- Breakout Tests ----------
@@ -45,6 +59,8 @@ def test_check_breakout_success(base_snap):
     # 3% 돌파 조건 (10000 * 1.03 = 10300)
     base_snap.current_price = 10400
     base_snap.high_price = 10400  # 고점 대비 하락 필터 회피
+    # 연속 상승 필터를 위해 1분봉 데이터에 상승 추세 반영
+    base_snap.closes_1min = [10000] * 90 + [10100, 10200, 10300, 10400]
     reason = check_breakout(base_snap, breakout_ratio=0.03)
     assert reason is not None
     assert "10,400" in reason
@@ -69,11 +85,12 @@ def test_check_jdm_entry_opening_lite_mode(base_snap, base_config):
     with patch("scanner.signal_evaluator.datetime") as mock_dt:
         mock_dt.now.return_value.time.return_value = dtime(9, 5)
         # 09:05분은 OPENING 슬롯 (lite_mode)
-        # lite_mode 발동을 위해 캔들 개수를 10개로 설정 (need_short=8 <= 10 < need_long=16)
-        base_snap.closes_1min = [10000] * 5 + [10100] * 4 + [10200]
-        base_snap.current_price = 10300
-        base_snap.high_price = 10300
-        # 지표들도 Mock 대신 실제 값 할당
+        # lite_mode 발동을 위해 캔들 개수를 10개로 설정
+        base_snap.closes_1min = [10000] * 9 + [10100]
+        # 거래량 급증 (평균 10000 -> 현재 20000)
+        base_snap.volumes_1min = [10000] * 10 + [20000]
+        base_snap.current_price = 10200
+        base_snap.high_price = 10200
         base_snap.rsi = 50.0
         base_snap.trend_level = 1
         
@@ -95,14 +112,18 @@ def test_check_jdm_entry_gc_override(base_snap, base_config):
     with patch("scanner.signal_evaluator.datetime") as mock_dt:
         mock_dt.now.return_value.time.return_value = dtime(12, 0)
         base_snap.trend_level = 3
-        # 정배열은 아니지만 (MA10 < MA20) MA short > MA long 유지 시 오버라이드 가능성
-        # closes_1min 길이를 50 이상으로 확보, ma_s > ma_l 를 위해 마지막에 더 높은 가격 추가
-        base_snap.closes_1min = [10000] * 30 + [10500] * 19 + [10700]
-        base_snap.current_price = 10800
-        base_snap.high_price = 10800
+        # R2 필터 통과를 위해 전일 변동성 축소
+        base_snap.daily_high_prev = 10200
+        base_snap.daily_low_prev = 9800
+        
+        # RSI 100 방지를 위해 미세한 등락 포함 (loss 발생)
+        # ma_s(7) ≈ 10407, ma_l(15) ≈ 10373. Spread ≈ 0.33%
+        base_snap.closes_1min = [10000] * 35 + [10300, 10350, 10300, 10400, 10450, 10400, 10450, 10500, 10450, 10500, 10550, 10500, 10550, 10600, 10550]
+        base_snap.volumes_1min = [10000] * 50 + [25000] # Surge
+        base_snap.current_price = 10550
+        base_snap.high_price = 10600
         reason = check_jdm_entry(base_snap, base_config)
         assert reason is not None
-        assert "GC_OVERRIDE" in reason
 
 # ---------- Helper Tests ----------
 

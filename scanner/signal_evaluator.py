@@ -945,7 +945,7 @@ def _jdm_build_ctx(snap: StockSnapshot, cfg: SmartScannerConfig) -> Optional["_J
                 and amt < cfg.min_trade_amount:
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM_LIQUIDITY",
-                f"수급 부족 (rank={rank if rank else 'N/A'}, 거래대금={amt/1e9:.1f}억 < 최소 {cfg.min_trade_amount/1e9:.0f}억)",
+                f"수급 부족",
             )
             return None
 
@@ -961,8 +961,7 @@ def _jdm_build_ctx(snap: StockSnapshot, cfg: SmartScannerConfig) -> Optional["_J
         if surge_from_open >= _surge_cap:
             ScannerLogger.rejected(
                 snap.code, snap.name, "JDM_SURGE",
-                f"시가 대비 이미 {surge_from_open:.2f}% 상승 — 고점 진입 차단 "
-                f"(상한 {_surge_cap:.1f}%, trend={_snap_trend_lvl})",
+                f"시가 대비 이미 상승 — 고점 진입 차단",
             )
             return None
 
@@ -970,12 +969,14 @@ def _jdm_build_ctx(snap: StockSnapshot, cfg: SmartScannerConfig) -> Optional["_J
     if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
         ScannerLogger.rejected(
             snap.code, snap.name, "JDM_TIME",
-            f"진입 허용 시간 아님 ({cfg.entry_start_time}~{cfg.entry_end_time})",
+            f"진입 허용 시간 아님",
         )
         return None
 
     # ── 슬롯 기반 유효 파라미터 산출
     slot          = _resolve_time_slot(now, cfg)
+    if slot == "PRE":
+        return None
     eff_ch_max    = _get_slot_value(slot, cfg, "max_change_pct",     cfg.max_change_pct)
     eff_chejan    = _get_slot_value(slot, cfg, "min_chejan_strength", cfg.min_chejan_strength)
     eff_vol_mult  = _get_slot_value(slot, cfg, "volume_surge_mult",   cfg.volume_1min_surge_mult)
