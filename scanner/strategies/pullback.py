@@ -48,14 +48,20 @@ class PullbackStrategy(BaseStrategy):
             if vols[-1] > avg_v5 * 1.5: return None
 
         reason = f"[PULLBACK] EMA20지지({dist:.2f}%) | RSI {rsi:.1f} | 추세Lv{tlv}"
-        
+
         # AI 피처 추출
         ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
 
+        # 추가 메타 정보 저장
+        candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+        change_pct = float(getattr(snap, "change_pct", 0) or 0)
+        if candle_low > 0:
+            ai_features["entry_candle_low"] = candle_low
+        if change_pct != 0:
+            ai_features["change_pct"] = change_pct
+
         return ScanSignal(
             snap.code, snap.name, self.name, snap.current_price, reason,
-            entry_candle_low=int(snap.lows_1min[-1]) if snap.lows_1min else 0,
-            change_pct=float(getattr(snap, "change_pct", 0) or 0),
             is_warmup=False,
             values=ai_features
         )

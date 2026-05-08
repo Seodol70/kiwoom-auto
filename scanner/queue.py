@@ -55,6 +55,10 @@ class PriorityWatchQueue:
         self._max_subs = max_subs
         self._subscribed: set[str] = set()
         self._lock = threading.Lock()
+        self._pending_add: set[str] = set()
+        self._pending_remove: set[str] = set()
+        self._worker_thread = None
+        self._stop_worker = False
 
 
     def refresh(self, top_codes: list[str]) -> None:
@@ -62,33 +66,105 @@ class PriorityWatchQueue:
             target    = set(top_codes[: self._max_subs])
             to_add    = target - self._subscribed
             to_remove = self._subscribed - target
-            for code in to_remove:
-                self._unsub(code)
-            if to_add:
-                # 여러 종목을 SetRealReg 1회 배치 호출 (50회 → 1회)
-                # strCodeList 에 ';' 구분 다종목 지원 (키움 API 공식 지원)
-                code_list = ";".join(to_add)
+
+            # SetRealReg/Remove를 비동기로 처리하도록 큐에 추가 (블로킹 방지)
+            self._pending_remove.update(to_remove)
+            self._pending_add.update(to_add)
+
+        # 워커 스레드 시작 (아직 없으면)
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._stop_worker = False
+            self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self._worker_thread.start()
+
+
+    def _worker_loop(self) -> None:
+        """비동기로 SetRealReg/Remove를 처리하는 워커 스레드"""
+        import time as _time
+        while not self._stop_worker:
+            pending_remove = None
+            pending_add = None
+            with self._lock:
+                if self._pending_remove:
+                    pending_remove = list(self._pending_remove)
+                    self._pending_remove.clear()
+                if self._pending_add:
+                    pending_add = list(self._pending_add)
+                    self._pending_add.clear()
+
+            # SetRealRemove 처리
+            if pending_remove:
+                for code in pending_remove:
+                    try:
+                        self._unsub_impl(code)
+                    except Exception as e:
+                        logger.warning("[PriorityWatchQueue] SetRealRemove 실패: %s - %s", code, e)
+
+            # SetRealReg 처리 (배치)
+            if pending_add:
+                try:
+                    self._setrealreg_batch(pending_add)
+                    with self._lock:
+                        self._subscribed.update(pending_add)
+                    logger.debug("[PriorityWatchQueue] SetRealReg 배치 등록 %d종목", len(pending_add))
+                except Exception as e:
+                    logger.warning("[PriorityWatchQueue] SetRealReg 배치 실패: %s", e)
+                    # 실패 시 다시 큐에 추가
+                    with self._lock:
+                        self._pending_add.update(pending_add)
+
+            _time.sleep(0.05)  # 50ms 간격으로 확인
+
+
+    def _setrealreg_batch(self, codes: list[str], chunk_size: int = 20) -> None:
+        """SetRealReg를 청크 단위로 호출 (너무 많은 종목 한번에 등록 방지)"""
+        for i in range(0, len(codes), chunk_size):
+            chunk = codes[i:i+chunk_size]
+            code_list = ";".join(chunk)
+            try:
                 self._kiwoom._ocx.dynamicCall(
                     "SetRealReg(QString, QString, QString, QString)",
-                    [self._screen, code_list, "10;11;12;13;14;16;17;18;20;121;125", "1"],  # FID 20: 체결강도, 121: 매도잔량, 125: 매수잔량
+                    [self._screen, code_list, "10;11;12;13;14;16;17;18;20;121;125", "1"],
                 )
-                self._subscribed.update(to_add)
-                logger.debug("[PriorityWatchQueue] SetRealReg 배치 등록 %d종목", len(to_add))
+                import time as _time
+                _time.sleep(0.1)  # 청크 사이 100ms 대기
+            except Exception as e:
+                logger.warning("[PriorityWatchQueue] SetRealReg 청크 실패 (%d개): %s", len(chunk), e)
+                raise
 
 
-    def _sub(self, code: str) -> None:
-        self._kiwoom._ocx.dynamicCall(
-            "SetRealReg(QString, QString, QString, QString)",
-            [self._screen, code, "10;11;12;13;14;16;17;18;20;121;125", "1"],
-        )
-        self._subscribed.add(code)
-
-
-    def _unsub(self, code: str) -> None:
+    def _unsub_impl(self, code: str) -> None:
+        """SetRealRemove 구현 (워커 스레드에서 사용)"""
         self._kiwoom._ocx.dynamicCall(
             "SetRealRemove(QString, QString)", [self._screen, code]
         )
-        self._subscribed.discard(code)
+        with self._lock:
+            self._subscribed.discard(code)
+
+
+    def _sub(self, code: str) -> None:
+        """단일 종목 즉시 등록 (보유 종목 진입 시 사용)"""
+        try:
+            self._kiwoom._ocx.dynamicCall(
+                "SetRealReg(QString, QString, QString, QString)",
+                [self._screen, code, "10;11;12;13;14;16;17;18;20;121;125", "1"],
+            )
+            with self._lock:
+                self._subscribed.add(code)
+        except Exception as e:
+            logger.warning("[PriorityWatchQueue] _sub 실패: %s - %s", code, e)
+
+
+    def _unsub(self, code: str) -> None:
+        """단일 종목 해제 (포지션 청산 시 사용) - 비동기 큐에 추가"""
+        with self._lock:
+            self._pending_remove.add(code)
+
+        # 워커 스레드 시작 (아직 없으면)
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._stop_worker = False
+            self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self._worker_thread.start()
 
 
     @property

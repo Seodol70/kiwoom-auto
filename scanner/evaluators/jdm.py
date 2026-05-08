@@ -201,8 +201,10 @@ def _jdm_check_trend_and_ma(
         
         golden = pma_s <= pma_l and ma_s > ma_l
         gc_override = int(getattr(cfg, "jdm_golden_cross_trend_override", 2))
+        is_gc_override = False
         if not golden:
             if gc_override > 0 and ctx.trend_lv >= gc_override and ma_s > ma_l:
+                is_gc_override = True
                 ScannerLogger.passed(snap.code, snap.name, "JDM_GC_OVERRIDE",
                     f"골든크로스 없지만 추세Lv{ctx.trend_lv}+MA정배열 진입 허용 (직전{pma_s:.0f}/{pma_l:.0f}→현재{ma_s:.0f}/{ma_l:.0f})")
             else:
@@ -229,9 +231,16 @@ def _jdm_check_trend_and_ma(
             ScannerLogger.rejected(snap.code, snap.name, "JDM",
                 f"MA 이격 부족 ({spread_pct:.2f}% < 최소 {eff_ma_spread:.2f}%)")
             return None
-        if spread_pct > float(cfg.jdm_ma_spread_max_pct):
+        max_ma_spread = float(getattr(cfg, f"jdm_ma_spread_max_pct_{ctx.slot.lower()}", cfg.jdm_ma_spread_max_pct))
+        
+        # [NEW] OPENING 갭상승 또는 GC_OVERRIDE 강세 종목은 SMA 이격 상한을 완화
+        # (과거 데이터가 포함된 SMA 한계 보완. 실제 과열은 이후 EMA 이격에서 필터링됨)
+        if is_gc_override or ctx.slot == "OPENING":
+            max_ma_spread = max(max_ma_spread, 100.0)
+
+        if spread_pct > max_ma_spread:
             ScannerLogger.rejected(snap.code, snap.name, "JDM",
-                f"MA 이격 과열 ({spread_pct:.2f}% > 상한 {cfg.jdm_ma_spread_max_pct:.1f}%)")
+                f"MA 이격 과열 ({spread_pct:.2f}% > 상한 {max_ma_spread:.1f}%)")
             return None
         spread_tag = f"MA{cfg.jdm_ma_short}/{cfg.jdm_ma_long} {ma_s:.0f}/{ma_l:.0f} ({spread_pct:.2f}%)"
         rsi_tag    = f"RSI{rsi:.0f}"
@@ -257,7 +266,8 @@ def _jdm_check_execution_quality(
     # ── 체결 가속도 필터
     skip_exec_vel = ctx.slot == "OPENING" and getattr(cfg, "exec_velocity_disabled_opening", False)
     if getattr(cfg, "exec_velocity_enabled", True) and not skip_exec_vel:
-        vel_mult = float(getattr(cfg, "exec_velocity_mult", 1.8))
+        vel_mult = float(getattr(cfg, f"exec_velocity_mult_{ctx.slot.lower()}",
+                                 getattr(cfg, "exec_velocity_mult", 1.8)))
         if snap.exec_velocity_ratio > 0 and snap.exec_velocity_ratio < vel_mult:
             ScannerLogger.rejected(snap.code, snap.name, "JDM_EXEC_VEL",
                 f"[{ctx.slot}] 체결 가속도 미달 — {snap.exec_velocity_ratio:.2f}배 < {vel_mult:.1f}배")

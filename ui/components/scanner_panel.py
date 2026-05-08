@@ -107,10 +107,17 @@ class ScannerPanel(QWidget):
 
     @pyqtSlot(list)
     def refresh(self, rows: list[dict]) -> None:
+        # [FIX 2026-05-08] 증분 업데이트: 변경된 셀만 업데이트 (메인 스레드 블로킹 최소화)
+
         # [DEBUG] 데이터 수신 확인
         if rows and time.time() - getattr(self, "_last_refresh_log", 0) > 10.0:
             self._last_refresh_log = time.time()
             logging.info("🖥 [ScannerPanel] UI 데이터 수신 완료 (%d종목)", len(rows))
+
+        # 이전 데이터 캐시 (변경 감지용)
+        old_rows = getattr(self, "_cached_rows", {})
+        new_rows = {row["code"]: row for row in rows}
+        self._cached_rows = new_rows
 
         # 현재 선택된 종목 코드 및 스크롤 위치 저장
         selected_code = None
@@ -119,14 +126,15 @@ class ScannerPanel(QWidget):
             row_idx = sel_items[0].row()
             it_c = self._table.item(row_idx, 1)
             if it_c: selected_code = it_c.text()
-            
+
         scroll_pos = self._table.verticalScrollBar().value()
 
-        # 정렬 일시 중지 (갱신 중 정렬 방지)
-        self._table.setSortingEnabled(False)
-        
+        # 행 수 변경 시에만 재구성
         if self._table.rowCount() != len(rows):
             self._table.setRowCount(len(rows))
+
+        # [FIX] 정렬 일시 중지 (성능 최적화)
+        self._table.setSortingEnabled(False)
 
         now = time.time()
         for r, row in enumerate(rows):

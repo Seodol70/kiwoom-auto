@@ -47,12 +47,16 @@ class BreakoutStrategy(BaseStrategy):
         # 3. AI 피처 및 신호 생성
         reason = f"{breakout_reason} | {gate_reason}"
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
+        change_pct = float(getattr(snap, "change_pct", 0) or 0)
         ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
+
+        if candle_low > 0:
+            ai_features["entry_candle_low"] = candle_low
+        if change_pct != 0:
+            ai_features["change_pct"] = change_pct
 
         return ScanSignal(
             snap.code, snap.name, self.name, snap.current_price, reason,
-            entry_candle_low=candle_low,
-            change_pct=float(getattr(snap, "change_pct", 0) or 0),
             is_warmup="[WARMUP]" in reason,
             values=ai_features
         )

@@ -228,6 +228,9 @@ class SmartScanner(QObject):
         self._scan_thread: Optional[threading.Thread] = None
         self._lock        = threading.Lock()
 
+        # [FIX] UI 업데이트 큐 (스레드 분리)
+        self._ui_queue: _Deque = _Deque(maxlen=1)  # 최신 데이터만 유지
+        self._ui_update_timer = None
 
         # 첫 스캔 시 전체 종목 1분봉 일괄 로딩 플래그
         # True가 되면 이후 사이클은 12종목/사이클 제한으로 복귀
@@ -380,6 +383,13 @@ class SmartScanner(QObject):
         )
         self._scan_thread.start()
 
+        # [NEW] UI 업데이트 타이머 (Qt 메인 스레드에서 실행)
+        if hasattr(self, "watch_list_updated"):
+            from PyQt5.QtCore import QTimer
+            self._ui_update_timer = QTimer()
+            self._ui_update_timer.timeout.connect(self._process_ui_queue)
+            self._ui_update_timer.start(500)  # 500ms마다 큐 확인
+
 
     def stop(self) -> None:
         self._running = False
@@ -405,6 +415,26 @@ class SmartScanner(QObject):
         self.store.export_csv(os.path.join(self.cfg.log_dir, "snapshot_final.csv"))
         logger.info("SmartScanner 정지 완료")
 
+    def _process_ui_queue(self) -> None:
+        """UI 큐에서 최신 데이터를 가져와서 emit (Qt 메인 스레드에서 호출)."""
+        try:
+            if self._ui_queue:
+                ui_rows = self._ui_queue.pop()
+                self.watch_list_updated.emit(ui_rows)
+        except Exception as e:
+            logger.debug("UI 큐 처리 오류: %s", e)
+
+    def _seconds_until(self, target_time: dtime) -> float:
+        now = datetime.now().time()
+        target_dt = datetime.combine(datetime.today(), target_time)
+        now_dt = datetime.combine(datetime.today(), now)
+
+        delta = target_dt - now_dt
+        if delta.total_seconds() < 0:
+            target_dt = datetime.combine(datetime.today() + timedelta(days=1), target_time)
+            delta = target_dt - now_dt
+
+        return delta.total_seconds()
 
     # -----------------------------------------------------------------------
     # 1단계: Pre-Filter
@@ -579,10 +609,18 @@ class SmartScanner(QObject):
                     if ui_rows:
                         # 이미 거래대금 순으로 정렬되어 있으나 보장 차원에서 재정렬
                         ui_rows.sort(key=lambda x: x["trade_amount"], reverse=True)
-                        self.watch_list_updated.emit(ui_rows)
-                        if t0 - getattr(self, "_last_ui_log", 0) > 10.0:
-                            self._last_ui_log = t0
-                            logger.info("[UI통합] UI 데이터 송신 중... (%d종목)", len(ui_rows))
+                        # [FIX] UI 업데이트 큐에 저장 (스캔 스레드는 즉시 반환)
+                        try:
+                            self._ui_queue.append(ui_rows)
+                        except Exception:
+                            pass
+                        # [FIX] UI 송신 주기를 5초로 제한 (메인 스레드 부하 최소화)
+                        _last_ui_send = getattr(self, "_last_ui_send", 0)
+                        if t0 - _last_ui_send > 5.0:
+                            self._last_ui_send = t0
+                            if t0 - getattr(self, "_last_ui_log", 0) > 10.0:
+                                self._last_ui_log = t0
+                                logger.info("[UI통합] UI 데이터 송신 완료 (%d종목)", len(ui_rows))
             # [NEW] 주기적 자원 정리 (10분 간격)
             if t0 - self._last_cleanup_ts >= self._CLEANUP_INTERVAL:
                 self._last_cleanup_ts = t0

@@ -801,7 +801,7 @@ class OrderManager(QObject):
             if pos.pnl_pct <= _hard:
                 logger.warning("🚨 [하드스탑] %s(%s) 임계치 돌파 (%.2f%%) — 즉시 매도 및 블랙리스트 등록", pos.name, code, pos.pnl_pct)
                 self.mark_stop_loss(code)
-                self.force_sell(code)
+                self.force_exit(code, pos.name, pos.qty, "하드스탑")
                 return
 
             # 2. 일반 손절 (-1.2% 등) — 3초 유예
@@ -814,7 +814,7 @@ class OrderManager(QObject):
                     if elapsed >= 3.0:
                         logger.warning("📉 [확정손절] %s(%s) 3초간 손절가 하회 — 매도 및 블랙리스트 등록", pos.name, code)
                         self.mark_stop_loss(code)
-                        self.force_sell(code)
+                        self.force_exit(code, pos.name, pos.qty, "확정손절")
                     else:
                         logger.debug("⏳ [손절대기] %s 관찰 중... (%.1fs)", pos.name, elapsed)
             else:
@@ -1238,6 +1238,14 @@ class OrderManager(QObject):
     ) -> str:
         """시장가 또는 지정가 매도 주문을 전송한다."""
         return self._send(OrderType.SELL, code, name, qty, price, order_type)
+
+    def force_sell(self, code: str) -> str:
+        """포지션의 모든 수량을 시장가로 강제 매도한다."""
+        pos = self.positions.get(code)
+        if pos is None:
+            logger.warning("강제 매도 실패 — 포지션 없음: %s", code)
+            return ""
+        return self.sell(code, pos.name, pos.qty, price=0, order_type="")
 
     def partial_exit(
         self,

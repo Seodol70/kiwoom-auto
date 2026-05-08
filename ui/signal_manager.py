@@ -140,7 +140,7 @@ class SignalManager:
             ss.signal_detected.connect(self.win._on_scan_signal)
             # [Phase 3] UI 하이라이트 효과 연결
             ss.signal_detected.connect(self.win.scanner_panel.add_signal)
-            # [NEW] 실시간 감시 목록 UI 갱신 연결
+            # [NEW] 실시간 감시 목록 UI 갱신 연결 (최적화된 증분 업데이트)
             ss.watch_list_updated.connect(self.win.scanner_panel.refresh)
             # [Phase D-3] 포지션 현재가 갱신 신호 연결 (OrderManager에게 전달)
             ss.price_updated.connect(self.om._on_price_updated)
