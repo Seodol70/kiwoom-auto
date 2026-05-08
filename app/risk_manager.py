@@ -156,16 +156,20 @@ class RiskManager(QObject):
         realized = payload.get("realized_pnl", 0)
         # realized 가 없으면 (일부 체결 등) 계산 시도 (payload에 없으면 0으로 간주하거나 pass)
         # OrderManager.order_filled emit 시 realized_pnl이 포함되도록 수정 필요할 수 있음
-        
+
         # realized 가 음수면 손절로 간주
         if realized < 0:
             self._consecutive_losses += 1
             limit = int(getattr(self._scan_cfg, "consecutive_loss_limit", 3))
             if self._consecutive_losses >= limit:
-                # 냉각기 발동
+                # 냉각기 발동 (동적 시간: 1회 5분, 2회 10분, 3회 15분... 최대 30분)
                 from datetime import datetime, timedelta
                 from logging_config import order_log
-                minutes = int(getattr(self._scan_cfg, "cooling_off_minutes", 30))
+
+                # 선형 증가: (손절 횟수 - 임계값 + 1) * 5분, 최대 30분
+                cooloff_steps = min(self._consecutive_losses - limit + 1, 6)
+                minutes = cooloff_steps * 5  # 5, 10, 15, 20, 25, 30
+
                 self._cooling_off_until = datetime.now() + timedelta(minutes=minutes)
                 if self._state: self._state.profit_locked = True
                 order_log.warning("[리스크] %d회 연속 손절 발생 -> %d분간 매수 차단 (냉각기)", self._consecutive_losses, minutes)
