@@ -952,9 +952,10 @@ class SmartScanner(QObject):
             now_ts = time.monotonic()
             last_log = getattr(self, "_last_diag_log", {})
             if now_ts - last_log.get(code, 0) > 60.0:
-                logger.debug(
-                    "[틱수신/진단] %s | 현재가=%d | 등락률(FID12)=%r | 전일대비(FID11)=%r",
-                    code, price, fid(12), fid(11)
+                logger.warning(
+                    "[FID진단] %s | 가=%d | 거래량FID15=%d | 거래대금FID13(raw)=%d | "
+                    "정규화후=%d | 등락률=%r",
+                    code, price, cum_vol, cum_amt, price * cum_vol, fid(12)
                 )
                 # [NEW] 147830 전용 상세 진단
                 if code == "147830":
@@ -1433,8 +1434,13 @@ class SmartScanner(QObject):
                 for code in realtime_codes:
                     st = all_states.get(code)
                     if st:
-                        # name이 코드와 같으면 종목명 부재 (실시간 추가 데이터 없음)
-                        name = st.name if st.name and st.name != code else code
+                        # GetMasterCodeName(): 키움 내부 메모리 즉시 조회 (블로킹 없음)
+                        name = st.name if st.name and st.name != code else ""
+                        if not name and self._kiwoom:
+                            try:
+                                name = self._kiwoom.get_stock_name(code) or code
+                            except Exception:
+                                name = code
 
                         row_data = {
                             "code": code,
