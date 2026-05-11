@@ -381,10 +381,10 @@ class KiwoomManager(KiwoomProtocol):
         screen_no = str(9000 + random.randint(0, 5))
 
         while len(all_rows) < max_rows:
-            self._set_input("시장구분", "000")  # 000=전체
+            self._set_input("시장구분", "000")  # 000=전체 (코스피+코스닥)
             self._set_input("정렬구분", "1")    # 1=거래대금
-            self._set_input("관리종목포함", "0")
-            self._set_input("신용구분", "0")
+            self._set_input("관리종목포함", "1")  # 1=포함 (모의투자에서 데이터 부족 시 필요)
+            self._set_input("신용구분", "0")  # 0=전체 (현물+신용)
 
             # 페이지 간 5초 간격
             if page > 0:

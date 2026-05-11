@@ -1262,72 +1262,26 @@ class SmartScanner(QObject):
 
         self._opt10030_fetching = True
         try:
-            # CircuitBreaker 활성 중이면 캐시 사용
+            # CircuitBreaker 활성 중이면 조회 중단
             if self._kiwoom.is_tr_banned("opt10004") or self._kiwoom.is_tr_banned("opt10030"):
-                logger.warning("[CircuitBreaker] 활성 중 — 캐시된 데이터 사용")
-                if self._last_volume_rows:
-                    logger.info("[폴백] 캐시된 %d개 종목 반환", len(self._last_volume_rows))
-                    return self._last_volume_rows[:target]
-                else:
-                    logger.warning("[폴백] 캐시도 없음 — GetCodeListByMarket 폴백")
-                    # 아래로 진행 (GetCodeListByMarket 시도)
-
-            rows = []
-            try:
-                # 1차: opt10004
-                if hasattr(self._kiwoom, "fetch_opt10004_top_volume"):
-                    logger.info("[opt10004] 조회 시작")
-                    rows = self._tr_q.call(self._kiwoom.fetch_opt10004_top_volume, target)
-                    if rows:
-                        logger.info("[opt10004] 성공 — %d개 종목 수신", len(rows))
-                        self._last_volume_rows = rows
-                        self._last_volume_updated = time.monotonic()
-                        return rows[:target]
-
-                # 2차: opt10030 (opt10004 0개 반환 시만)
-                if not rows and hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
-                    logger.info("[opt10030] 2차 폴백 시작")
-                    rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
-                    if rows:
-                        logger.info("[opt10030] 성공 — %d개 종목 수신", len(rows))
-                        self._last_volume_rows = rows
-                        self._last_volume_updated = time.monotonic()
-                        return rows[:target]
-
-                # 3차: opt10032 (최종 폴백, 이것도 실패하면 그냥 반환)
-                if not rows and hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
-                    logger.info("[opt10032] 3차 폴백 시작")
-                    rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
-                    if rows:
-                        logger.info("[opt10032] 성공 — %d개 종목 수신", len(rows))
-                        self._last_volume_rows = rows
-                        self._last_volume_updated = time.monotonic()
-                        return rows[:target]
-
-                # 모든 폴백 실패 → GetCodeListByMarket 최종 폴백
-                if not rows:
-                    logger.warning("[폴백 실패] opt10004/10030/10032 모두 실패 → GetCodeListByMarket 최종 폴백")
-                    try:
-                        all_codes = self._kiwoom.get_code_list_by_market("0")  # 코스피
-                        all_codes.extend(self._kiwoom.get_code_list_by_market("10"))  # 코스닥
-                        rows = all_codes[:target]
-                        if rows:
-                            logger.info("[GetCodeListByMarket] %d개 종목 확보", len(rows))
-                            return rows
-                    except Exception as e:
-                        logger.error("[GetCodeListByMarket 실패] %s", e)
-
-                    logger.critical("[폴백 완전 실패] 모든 방법 실패 — 빈 리스트 반환")
-                    return []
-
-            except Exception as e:
-                logger.error("[폴백 오류] %s", e)
-                # 오류 발생 시에도 캐시 반환 시도
-                if self._last_volume_rows:
-                    logger.warning("[오류 복구] 캐시 데이터 반환")
-                    return self._last_volume_rows[:target]
+                logger.warning("[CircuitBreaker] 활성 중 — opt10030 조회 중단")
                 return []
 
+            # opt10030 단일 조회 (폴백 없음, 성공하거나 실패하거나 하나만)
+            logger.info("[opt10030] 조회 시작 (관리종목포함, 신용구분 전체)")
+            rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
+
+            if rows:
+                logger.info("[opt10030] 성공 — %d개 종목 수신", len(rows))
+                self._last_volume_rows = rows
+                self._last_volume_updated = time.monotonic()
+                return rows[:target]
+            else:
+                logger.warning("[opt10030] 0개 반환 — 파라미터 확인 필요")
+                return []
+
+        except Exception as e:
+            logger.error("[opt10030 조회 오류] %s", e)
             return []
         finally:
             self._opt10030_fetching = False
