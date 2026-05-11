@@ -34,6 +34,9 @@ class MarketScheduler(QObject):
     overnight_gap_check = pyqtSignal()
     """09:00 오버나잇 갭 체크 신호"""
 
+    eod_daytime_check = pyqtSignal()
+    """09:00~14:55 EOD 포지션 당일 수익률 체크 신호 (매분)"""
+
     overnight_timecut = pyqtSignal()
     """09:30 오버나잇 타임컷 신호"""
 
@@ -119,6 +122,12 @@ class MarketScheduler(QObject):
         elif (time(10, 30) <= now_time < time(10, 31)
               and is_weekday):
             self.phase1_cutoff.emit()
+
+        # ─── 09:00~14:55 EOD 당일 수익률 체크 (매분) ──────────────────
+
+        elif (time(9, 0) <= now_time < time(14, 55)
+              and is_weekday):
+            self.eod_daytime_check.emit()
 
         # ─── 10:31~15:15 Phase 1 트레일 체크 (매분) ──────────────────
 

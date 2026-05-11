@@ -658,6 +658,45 @@ class TradingController(QObject):
         self._auto_trading = False
         self.log_message.emit(f"🔴 [지수급락] 코스피 {kospi_pct}% / 코스닥 {kosdaq_pct}% — 자동매매 긴급 정지")
 
+    def check_eod_daytime_targets(self) -> None:
+        """EOD 포지션 당일 수익률 목표 확인 (Stage 2)"""
+        _tp_pct = float(getattr(self._scan_cfg, 'take_profit_pct', 2.5))
+        _pp_pct = float(getattr(self._scan_cfg, 'partial_profit_pct', 1.5))
+        _sl_pct = float(getattr(self._scan_cfg, 'stop_loss_pct', -1.5))
+
+        eod_positions = [(code, pos) for code, pos in list(self._order_mgr.positions.items())
+                         if getattr(pos, 'eod_trade', False) and not getattr(pos, 'overnight_held', False)]
+
+        for code, pos in eod_positions:
+            if getattr(pos, 'avg_price', 0) <= 0:
+                continue
+            chg_pct = float(pos.price_change_pct_vs_avg)
+
+            # 손절 우선 (도미노 방지)
+            if chg_pct <= _sl_pct:
+                self.log_message.emit(f'🔴 [EOD일중손절] {pos.name}({code}) {chg_pct:+.2f}% <= {_sl_pct:.1f}% — {pos.qty}주 시장가 매도')
+                if hasattr(self._order_mgr, '_audit') and self._order_mgr._audit:
+                    self._order_mgr._audit.log_sell_decision(code, f'EOD 일중손절 {chg_pct:+.2f}%', pos.current_price)
+                self._order_mgr.mark_stop_loss(code)
+                self._order_mgr.force_exit(code, pos.name, pos.qty, reason=f'EOD 일중손절 {chg_pct:+.2f}%')
+            # 완전 익절 (목표 달성)
+            elif chg_pct >= _tp_pct:
+                self.log_message.emit(f'🟢 [EOD일중익절] {pos.name}({code}) {chg_pct:+.2f}% >= {_tp_pct:.1f}% — {pos.qty}주 시장가 매도')
+                if hasattr(self._order_mgr, '_audit') and self._order_mgr._audit:
+                    self._order_mgr._audit.log_sell_decision(code, f'EOD 일중익절 {chg_pct:+.2f}%', pos.current_price)
+                self._order_mgr.force_exit(code, pos.name, pos.qty, reason=f'EOD 일중익절 {chg_pct:+.2f}%')
+            # 분할 익절 (중간 목표)
+            elif chg_pct >= _pp_pct and not getattr(pos, 'partial_taken', False):
+                half_qty = max(1, pos.qty // 2)
+                self.log_message.emit(f'⭐ [EOD분할익절] {pos.name}({code}) {chg_pct:+.2f}% >= {_pp_pct:.1f}% — {half_qty}주 시장가 매도')
+                if hasattr(self._order_mgr, '_audit') and self._order_mgr._audit:
+                    self._order_mgr._audit.log_sell_decision(code, f'EOD 분할익절 {chg_pct:+.2f}%', pos.current_price)
+                try:
+                    self._order_mgr.sell(code, pos.name, half_qty, price=0)
+                    pos.partial_taken = True
+                except Exception as e:
+                    self.log_message.emit(f'⚠️ [EOD분할익절실패] {pos.name}({code}): {e}')
+
     def check_overnight_gap(self) -> None:
         """EOD 포지션 익일 갭 확인"""
         _gap_up = float(getattr(self._scan_cfg, 'eod_gap_up_exit_pct', 2.0))

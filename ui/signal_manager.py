@@ -107,6 +107,7 @@ class SignalManager:
         ms.feedback_triggered.connect(self.win._on_feedback_triggered)
         ms.day_reset.connect(self.win._on_day_reset)
         ms.overnight_gap_check.connect(self.tc.check_overnight_gap)
+        ms.eod_daytime_check.connect(self.tc.check_eod_daytime_targets)
         ms.overnight_timecut.connect(self.tc.check_overnight_timecut)
         ms.phase1_cutoff.connect(lambda: self.tc.liquidate_phase1_positions(forced=True))
         ms.phase1_trail.connect(lambda: self.tc.liquidate_phase1_positions(forced=False))
