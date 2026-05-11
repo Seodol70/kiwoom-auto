@@ -936,8 +936,10 @@ class SmartScanner(QObject):
                 logger.debug("[데이터확인] %s | 현재가=%d | 전일대비=%.1f | 등락률(FID12)=%.2f%%", 
                             code, price, change_amt, pct)
 
-            cum_vol    = safe_int(fid(9))   # FID 9: 당일 누적거래량 (FID 15는 단건 체결량)
-            cum_amt    = safe_int(fid(13))  # FID 13: 누적거래대금 (단위: 천원)
+            cum_amt    = safe_int(fid(13))  # FID 13: 누적거래대금 (천원 단위)
+            # FID 9는 실시간 주식체결에서 지원 안 됨(항상 0), FID 15는 단건체결량
+            # → 거래량 근사값: FID 13 누적거래대금(천원) ÷ 현재가
+            cum_vol = int(cum_amt * 1_000 / price) if price > 0 and cum_amt > 0 else 0
             high       = safe_int(fid(17))
             low        = safe_int(fid(18))
             open_      = safe_int(fid(16))
@@ -1018,9 +1020,10 @@ class SmartScanner(QObject):
             _last_diag_map = getattr(self, "_last_diag_log", {})
             if _now_diag - _last_diag_map.get(code, 0) > 60.0:
                 logger.warning(
-                    "[FID진단] %s | 가=%d | 거래량FID9=%d | 거래대금FID13(천원raw)=%d → %s",
-                    code, price, cum_vol, raw_cum_amt,
-                    TradeAmountHelper.to_korean(real_trade_amt)
+                    "[FID진단] %s | 가=%d | FID9=%s FID14=%s FID15=%s | FID13(천원raw)=%d → %s",
+                    code, price,
+                    fid(9), fid(14), fid(15),
+                    raw_cum_amt, TradeAmountHelper.to_korean(real_trade_amt)
                 )
                 _last_diag_map[code] = _now_diag
                 self._last_diag_log = _last_diag_map

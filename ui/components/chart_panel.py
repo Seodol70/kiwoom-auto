@@ -54,10 +54,12 @@ class ChartPanel(QWidget):
         # 가격 플롯 (상단 70%)
         self._price_plot = self._gw.addPlot(row=0, col=0)
         self._price_plot.showGrid(x=True, y=True, alpha=0.15)
-        self._price_plot.getAxis("left").setWidth(70)
+        self._price_plot.getAxis("left").setWidth(80)
         self._price_plot.getAxis("left").setTickFont(_font)
         self._price_plot.getAxis("bottom").setTickFont(_font)
         self._price_plot.getAxis("bottom").setStyle(showValues=False)
+        # Y축 지수 표기 제거 → 실제 숫자 표시
+        self._price_plot.getAxis("left").enableAutoSIPrefix(False)
         # 축 레이블 폰트 설정
         for axis_name in ["left", "bottom"]:
             axis = self._price_plot.getAxis(axis_name)
@@ -222,6 +224,16 @@ class ChartPanel(QWidget):
                 self._ma7_line.setData(x=x, y=self._rolling_mean(closes, 7))
             if len(closes) >= 15:
                 self._ma15_line.setData(x=x, y=self._rolling_mean(closes, 15))
+
+            # Y축 범위: 실제 변동 범위에 5% 패딩 (직선 방지)
+            y_min = min(closes)
+            y_max = max(closes)
+            y_range = y_max - y_min
+            if y_range < y_min * 0.002:  # 변동 0.2% 미만이면 강제 패딩
+                y_range = y_min * 0.02
+            padding = y_range * 0.15
+            self._price_plot.setYRange(y_min - padding, y_max + padding, padding=0)
+
             if volumes:
                 vols = volumes[:len(closes)]
                 avg_vol = float(np.mean(vols)) if vols else 1.0

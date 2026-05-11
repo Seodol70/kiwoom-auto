@@ -29,7 +29,7 @@ class ScannerPanel(QWidget):
 
 
     # 스캐너: 전일 대비 당일 등락률(%) — 보유현황의 '수익률'(평단 대비)과 구분
-    _HEADERS = ["No.", "종목코드", "종목명", "현재가", "당일등락률", "거래량", "거래대금", "신호", "추세", "매수"]
+    _HEADERS = ["No.", "종목코드", "종목명", "현재가", "등락률", "거래량", "거래대금", "신호", "추세", "매수"]
 
 
     def __init__(self, parent=None) -> None:
@@ -79,7 +79,7 @@ class ScannerPanel(QWidget):
         hdr.setStretchLastSection(False)
         # [NEW] 정렬 기능 활성화
         self._table.setSortingEnabled(True)
-        col_widths = [28, 58, 110, 62, 55, 68, 80, 50, 62, 42]
+        col_widths = [28, 68, 120, 65, 52, 68, 80, 50, 62, 42]
         for i, w in enumerate(col_widths):
             hdr.resizeSection(i, w)
         self._table.verticalHeader().setVisible(False)
