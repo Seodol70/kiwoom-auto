@@ -200,7 +200,8 @@ def _jdm_check_trend_and_ma(
             return None
         
         golden = pma_s <= pma_l and ma_s > ma_l
-        gc_override = int(getattr(cfg, "jdm_golden_cross_trend_override", 2))
+        # [FIX 2026-05-11] GC_OVERRIDE 기준 완화: Lv2+ → Lv1+ (공격적 완화)
+        gc_override = int(getattr(cfg, "jdm_golden_cross_trend_override", 1))
         is_gc_override = False
         if not golden:
             if gc_override > 0 and ctx.trend_lv >= gc_override and ma_s > ma_l:
@@ -258,10 +259,13 @@ def _jdm_check_execution_quality(
     warmup_reason = check_indicator_warmup(snap, 15)
     ctx.is_warmup = bool(warmup_reason)
 
+    # [FIX 2026-05-11] 거래량 필터 완화 — 거래량 미달 시에도 진입 허용 (경고 로그만 기록)
     # ── 거래량 체크
     r_vol = check_volume_surge(snap, ctx.eff_vol_mult, getattr(cfg, "volume_surge_lookback", 10))
     if r_vol is None:
-        return None
+        # 거래량 부족하지만 진입 허용 (다른 필터가 충분히 제한)
+        r_vol = f"거래량부족_허용({snap.volumes_1min[-1] if snap.volumes_1min else 0}주)"
+        ScannerLogger.near_miss(snap.code, snap.name, "JDM_VOL", r_vol)
 
     # ── 체결 가속도 필터
     skip_exec_vel = ctx.slot == "OPENING" and getattr(cfg, "exec_velocity_disabled_opening", False)
