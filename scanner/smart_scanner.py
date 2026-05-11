@@ -1433,6 +1433,24 @@ class SmartScanner(QObject):
                 realtime_codes = list(self.store._states.keys())
 
             logger.warning("[진단] 실시간 데이터에서 %d개 종목 감지", len(realtime_codes))
+
+            # 실시간 데이터도 없으면 기본 감시 리스트 사용 (모의투자 대응)
+            if not realtime_codes:
+                logger.warning("[모의투자 모드] opt10030 미응답 + 실시간 데이터 없음 → 기본 감시 리스트 사용")
+                default_codes = [
+                    "005930",  # 삼성전자
+                    "000660",  # SK하이닉스
+                    "068270",  # 셀트리온
+                    "005380",  # 현대차
+                    "006400",  # 삼성SDI
+                    "035720",  # 카카오
+                    "207940",  # 삼성바이오로직스
+                    "086790",  # 하나금융
+                    "051910",  # LG화학
+                    "028260",  # 삼성물산
+                ]
+                realtime_codes = default_codes
+                logger.warning("[기본 리스트] %d개 종목으로 스캔 시작", len(realtime_codes))
             if realtime_codes and len(realtime_codes) <= 10:
                 for code in realtime_codes:
                     logger.warning("[진단]   - %s", code)
