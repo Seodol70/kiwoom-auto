@@ -219,10 +219,12 @@ class SmartScanner(QObject):
         from scanner.strategies.breakout import BreakoutStrategy
         from scanner.strategies.jdm_entry import JdmStrategy
         from scanner.strategies.pullback import PullbackStrategy
+        from scanner.strategies.eod import EODStrategy
         self.strategy_map = {
             "BREAKOUT": BreakoutStrategy(),
             "JDM_ENTRY": JdmStrategy(),
             "PULLBACK": PullbackStrategy(),
+            "EOD": EODStrategy(),
         }
 
 
