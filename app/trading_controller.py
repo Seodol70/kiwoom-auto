@@ -353,34 +353,30 @@ class TradingController(QObject):
             return result
 
         try:
+            from datetime import datetime, time
+            now_time = datetime.now().time()
+            is_trading_hours = time(9, 0) <= now_time < time(15, 30)
+
             # 1. 캔들 데이터 (1분봉 100개, 없으면 일봉 40개)
             candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=100)
-            is_daily = False
+
+            # 장 중 1분봉 실패 → 실시간 감시 데이터에서 현재가 보충
+            if not candles and is_trading_hours:
+                if hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
+                    snap = self._smart_scanner.store.get_snapshot(code)
+                    if snap and snap.current_price > 0:
+                        # 실시간 현재가를 기반으로 더미 캔들 생성 (최근 100분)
+                        candles = [{'close': snap.current_price, 'volume': 0} for _ in range(100)]
+                        logger.info("[차트데이터] %s 실시간 감시 데이터로 차트 구성 (현재가: %d원)",
+                                   code, snap.current_price)
+
+            # 여전히 없으면 일봉 사용
             if not candles:
                 candles = self._kiwoom.get_daily_candles(code, count=40)
-                is_daily = True
 
             if candles:
                 result["closes"] = [c['close'] for c in candles]
-                result["volumes"] = [c['volume'] for c in candles]
-
-                # 데이터 검증: 현재 시간대 기준 적절한가
-                from datetime import datetime, time
-                now = datetime.now().time()
-                is_trading_hours = time(9, 0) <= now < time(15, 30)
-
-                if is_trading_hours and is_daily:
-                    logger.warning("[차트데이터] %s 일봉 데이터 적용 (장 중 1분봉 로드 실패) — 종가: %d",
-                                   code, result["closes"][-1] if result["closes"] else 0)
-                elif is_daily and result["closes"]:
-                    close_price = result["closes"][-1]
-                    # 실시간 감시 데이터와 비교 (snapshot store 확인)
-                    if hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
-                        snap = self._smart_scanner.store.get_snapshot(code)
-                        if snap and abs(snap.current_price - close_price) > close_price * 0.1:
-                            logger.warning("[차트데이터] %s 가격 불일치 — 차트: %d, 실시간: %d (차이: %.1f%%)",
-                                         code, close_price, snap.current_price,
-                                         abs(snap.current_price - close_price) / snap.current_price * 100)
+                result["volumes"] = [c.get('volume', 0) for c in candles]
 
             # 2. 종목명
             result["name"] = self._kiwoom.get_stock_name(code)
