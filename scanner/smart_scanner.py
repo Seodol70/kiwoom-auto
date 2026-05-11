@@ -936,10 +936,12 @@ class SmartScanner(QObject):
                 logger.debug("[데이터확인] %s | 현재가=%d | 전일대비=%.1f | 등락률(FID12)=%.2f%%", 
                             code, price, change_amt, pct)
 
-            # FID 13 = 당일 누적 거래량(주) — 거래대금이 아님!
-            # 검증: 삼성전자 raw=25,857,422주 × 286,000원 = 7.4조 (실제 ~5조, 근접)
-            cum_vol    = safe_int(fid(13))  # FID 13: 당일 누적 거래량(주)
-            cum_amt    = 0                   # 실시간에서 거래대금 별도 FID 없음 → 현재가×거래량으로 계산
+            # FID 13 = 누적거래대금 (천원 단위)
+            # 한온시스템 raw=123,022,733 × 1,000 = 1,230억 ✅ (실제와 일치)
+            # 삼성전자 raw=25,857,422 × 1,000 = 258억 (모의투자 서버 제한 데이터)
+            cum_amt    = safe_int(fid(13))  # FID 13: 누적거래대금 (천원 단위)
+            # 거래량: FID 13 거래대금(원) ÷ 현재가 = 근사 거래량(주)
+            cum_vol    = int(cum_amt * 1_000 / price) if price > 0 and cum_amt > 0 else 0
             high       = safe_int(fid(17))
             low        = safe_int(fid(18))
             open_      = safe_int(fid(16))
@@ -1011,18 +1013,18 @@ class SmartScanner(QObject):
             elif code == "147830":
                 logger.warning("[147830] 등락률 계산 불가: prev_close=%d, pct=%.2f", prev_close, pct)
 
-            # 거래대금 = 현재가 × 당일누적거래량(FID 13)
-            raw_cum_amt = cum_vol  # FID 13이 이미 cum_vol에 저장됨
-            real_trade_amt = price * cum_vol if cum_vol > 0 else 0
+            # 거래대금 = FID 13 × 1,000 (천원 → 원)
+            raw_cum_amt = cum_amt
+            real_trade_amt = cum_amt * 1_000 if cum_amt > 0 else price * cum_vol
 
             # [진단] 60초에 한 번 거래량/거래대금 확인
             _now_diag = time.monotonic()
             _last_diag_map = getattr(self, "_last_diag_log", {})
             if _now_diag - _last_diag_map.get(code, 0) > 60.0:
                 logger.warning(
-                    "[FID진단] %s | 가=%d | FID13(거래량)=%d | 거래대금=%s",
-                    code, price, cum_vol,
-                    TradeAmountHelper.to_korean(real_trade_amt)
+                    "[FID진단] %s | 가=%d | FID13(천원raw)=%d → 거래대금=%s | 역산거래량=%d주",
+                    code, price, cum_amt,
+                    TradeAmountHelper.to_korean(real_trade_amt), cum_vol
                 )
                 _last_diag_map[code] = _now_diag
                 self._last_diag_log = _last_diag_map
