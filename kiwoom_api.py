@@ -1091,12 +1091,21 @@ class KiwoomManager(KiwoomProtocol):
             # timer = QTimer() 로컬 변수는 exec_() 대기 중 GC 수집 위험 -> timeout 무효화 가능
             self._tr_timeout_timer = QTimer(self._tr_loop)
             self._tr_timeout_timer.setSingleShot(True)
-            self._tr_timeout_timer.timeout.connect(self._tr_loop.quit)
+
+            # ★ 타임아웃 발동 여부 감지용 플래그
+            self._tr_timed_out = False
+            def _on_timeout():
+                self._tr_timed_out = True
+                logger.warning("[CommRqData] ⏱️ TIMEOUT 발동! rq=%s (2초 이내 응답 없음)", rq_name)
+                self._tr_loop.quit()
+            self._tr_timeout_timer.timeout.connect(_on_timeout)
+
             self._tr_timeout_timer.start(timeout_ms)
-            logger.debug("[CommRqData] exec_() 진입 전 - rq=%s, _tr_data=%s", rq_name, self._tr_data)
+            logger.info("[CommRqData] exec_() 진입 - rq=%s tr=%s screen=%s, timeout=%dms",
+                       rq_name, tr_code, screen_no, timeout_ms)
             self._tr_loop.exec_()
-            logger.debug("[CommRqData] exec_() 복귀 후 - rq=%s, _tr_data=%s, prev_next=%s",
-                        rq_name, list(self._tr_data.keys()) if self._tr_data else "EMPTY", self._tr_prev_next)
+            logger.info("[CommRqData] exec_() 복귀 - rq=%s, timed_out=%s, _tr_data keys=%s, prev_next=%s",
+                       rq_name, self._tr_timed_out, list(self._tr_data.keys()) if self._tr_data else "EMPTY", self._tr_prev_next)
             self._tr_timeout_timer.stop()
             self._tr_timeout_timer = None
             self._tr_loop = None
