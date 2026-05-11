@@ -1263,19 +1263,27 @@ class SmartScanner(QObject):
         self._opt10030_fetching = True
         try:
             for attempt in range(retry):
+                # 각 시도마다 CircuitBreaker 확인 — 차단되면 폴백 중단
+                if self._kiwoom.is_tr_banned("opt10004") and self._kiwoom.is_tr_banned("opt10030"):
+                    logger.warning("[폴백 중단] opt10004/opt10030 모두 차단 — 재시도 건너뜀 (%d/%d)", attempt+1, retry)
+                    break
+
                 try:
                     rows = []
 
                     # [NEW] 1차: opt10004 (Circuit Breaker 회피용, 한 번에 200개)
                     if hasattr(self._kiwoom, "fetch_opt10004_top_volume"):
-                        logger.info("[opt10004] 1차 조회 시작 (1회 호출)")
-                        rows = self._tr_q.call(self._kiwoom.fetch_opt10004_top_volume, target)
-                        if rows:
-                            logger.info("[opt10004] 성공 — %d개 종목 수신", len(rows))
+                        if not self._kiwoom.is_tr_banned("opt10004"):
+                            logger.info("[opt10004] 1차 조회 시작 (시도 %d/%d)", attempt+1, retry)
+                            rows = self._tr_q.call(self._kiwoom.fetch_opt10004_top_volume, target)
+                            if rows:
+                                logger.info("[opt10004] 성공 — %d개 종목 수신", len(rows))
+                        else:
+                            logger.warning("[opt10004] 차단 상태 — 폴백 건너뜀")
 
                     # [NEW] opt10004 실패 → 2차: opt10030 (폴백)
                     if not rows and hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
-                        if not getattr(self._kiwoom, "is_tr_banned", lambda x: False)("opt10030"):
+                        if not self._kiwoom.is_tr_banned("opt10030"):
                             logger.info("[opt10030] 2차 폴백 조회 시작")
                             rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
                         else:
@@ -1283,16 +1291,23 @@ class SmartScanner(QObject):
 
                     # [NEW] opt10030도 실패 → 3차: opt10032 (최종 폴백)
                     if not rows and hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
-                        if not getattr(self._kiwoom, "is_tr_banned", lambda x: False)("opt10030"):
+                        if not self._kiwoom.is_tr_banned("opt10032"):
                             logger.info("[opt10032] 3차 폴백 조회 시작")
                             rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
-                        
-                        if rows:
-                            self._last_volume_rows = rows
-                            self._last_volume_updated = time.monotonic()
-                            return rows[:target]
+                            if rows:
+                                self._last_volume_rows = rows
+                                self._last_volume_updated = time.monotonic()
+                                return rows[:target]
+                        else:
+                            logger.warning("[opt10032] 차단 상태 — 조회 건너뜀")
+
+                    # 폴백 체인 전체 실패 시 재시도하지 말고 즉시 반환
+                    if not rows:
+                        logger.warning("[폴백 완료] 모든 폴백 체인 실패 (시도 %d/%d)", attempt+1, retry)
+                        return []
+
                 except Exception as e:
-                    logger.warning("[opt10030] 시도 %d/%d 실패: %s", attempt+1, retry, e)
+                    logger.warning("[폴백] 시도 %d/%d 실패: %s", attempt+1, retry, e)
                     time.sleep(0.5)
 
             return []
