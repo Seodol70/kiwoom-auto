@@ -34,11 +34,11 @@ def check_breakout(
         return None
 
     # [FIX 2026-05-11] FID 13 거래대금 부정확 → 분봉 거래량으로 변경
-    # [FIX 2026-05-11] 분봉 데이터 부족 시 우선순위 변경: 절대값(rank) > 분봉거래량
+    # [FIX 2026-05-11-v2] 분봉 데이터 5개 이상에서만 거래량 필터 검사 (데이터 부족 시 순위 필터 의존)
     vols = list(snap.volumes_1min) if snap.volumes_1min else []
 
-    # 거래량 필터: 분봉 데이터 2개 이상 있을 때만 검사
-    if len(vols) >= 2 and volume_mult > 0:
+    # 거래량 필터: 분봉 데이터 5개 이상 있을 때만 검사 (최소 샘플 크기)
+    if len(vols) >= 5 and volume_mult > 0:
         recent_vols = vols[:-1]  # 직전 데이터들
         avg_vol_1min = sum(recent_vols) / len(recent_vols)
         cur_vol_1min = vols[-1]
@@ -48,11 +48,11 @@ def check_breakout(
                 f"거래량 미달 ({cur_vol_1min:,}주 < 평균 {avg_vol_1min:,.0f}주 × {volume_mult:.1f}배)",
             )
             return None
-    elif len(vols) < 2 and volume_mult > 0:
+    elif len(vols) < 5 and volume_mult > 0:
         # 분봉 데이터 부족 시 로그만 남기고 계속 진행 (순위 기반 필터에 의존)
         ScannerLogger.rejected(
             snap.code, snap.name, "BREAKOUT",
-            f"분봉 데이터 부족 ({len(vols)}/2 필요) — 순위 필터로 대체",
+            f"분봉 데이터 부족 ({len(vols)}/5 필요) — 순위 필터로 대체",
         )
         # return None 안 함 — 진행 계속
 
