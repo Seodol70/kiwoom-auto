@@ -936,36 +936,18 @@ class SmartScanner(QObject):
                 logger.debug("[데이터확인] %s | 현재가=%d | 전일대비=%.1f | 등락률(FID12)=%.2f%%", 
                             code, price, change_amt, pct)
 
-            cum_vol    = safe_int(fid(15))  # FID 15: 당일거래량 (누적)
+            cum_vol    = safe_int(fid(9))   # FID 9: 당일 누적거래량 (FID 15는 단건 체결량)
             cum_amt    = safe_int(fid(13))  # FID 13: 누적거래대금 (단위: 천원)
             high       = safe_int(fid(17))
             low        = safe_int(fid(18))
             open_      = safe_int(fid(16))
             strength_raw = safe_float(fid(20))    # FID 20: 체결강도
 
-            # [진단] 등락률 관련 FID 원시값 기록 (첫 틱만, INFO 레벨)
+            # [진단] 첫 틱 기록용 집합 초기화
             if not getattr(self, "_fid_diag_logged", None):
                 self._fid_diag_logged = set()
             if code not in self._fid_diag_logged:
                 self._fid_diag_logged.add(code)
-            # [EXTREME DEBUG] 60초에 한 번만 로그 출력 (로그 폭발 방지)
-            now_ts = time.monotonic()
-            last_log = getattr(self, "_last_diag_log", {})
-            if now_ts - last_log.get(code, 0) > 60.0:
-                logger.warning(
-                    "[FID진단] %s | 가=%d | 거래량FID15=%d | 거래대금FID13(raw)=%d | "
-                    "정규화후=%d | 등락률=%r",
-                    code, price, cum_vol, cum_amt, price * cum_vol, fid(12)
-                )
-                # [NEW] 147830 전용 상세 진단
-                if code == "147830":
-                    logger.warning(
-                        "[147830 진단] price=%d | change_amt=%r | pct=%r(입력) | "
-                        "prev_close(계산전)=%d | open_=%d | strength=%r",
-                        price, change_amt, pct, prev_close, open_, strength_raw
-                    )
-                last_log[code] = now_ts
-                self._last_diag_log = last_log
 
             # FID 20 정규화 (10000 이상이면 100으로 나눔)
             strength = strength_raw / 100.0 if strength_raw >= 10000.0 else strength_raw
@@ -1027,10 +1009,21 @@ class SmartScanner(QObject):
             elif code == "147830":
                 logger.warning("[147830] 등락률 계산 불가: prev_close=%d, pct=%.2f", prev_close, pct)
 
-            # [2026-05-11] FID 13 거래대금 단위 재확인: 백만 원 단위
-            # 키움 API FID 13 = 누적거래대금(백만원) → TradeAmountHelper 통합 처리
+            # FID 13 = 누적거래대금 (천원 단위) → × 1,000 = 원 단위
             raw_cum_amt = safe_int(fid(13))
-            real_trade_amt = TradeAmountHelper.normalize_from_kiwoom(raw_cum_amt, price, cum_vol)
+            real_trade_amt = raw_cum_amt * 1_000 if raw_cum_amt > 0 else price * cum_vol
+
+            # [진단] 60초에 한 번 거래량/거래대금 FID 값 확인
+            _now_diag = time.monotonic()
+            _last_diag_map = getattr(self, "_last_diag_log", {})
+            if _now_diag - _last_diag_map.get(code, 0) > 60.0:
+                logger.warning(
+                    "[FID진단] %s | 가=%d | 거래량FID9=%d | 거래대금FID13(천원raw)=%d → %s",
+                    code, price, cum_vol, raw_cum_amt,
+                    TradeAmountHelper.to_korean(real_trade_amt)
+                )
+                _last_diag_map[code] = _now_diag
+                self._last_diag_log = _last_diag_map
 
             # [FINAL RECOVERY] 기준가가 여전히 0이면 마스터 정보에서 가져옴
             if prev_close <= 0:

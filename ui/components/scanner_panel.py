@@ -79,7 +79,7 @@ class ScannerPanel(QWidget):
         hdr.setStretchLastSection(False)
         # [NEW] 정렬 기능 활성화
         self._table.setSortingEnabled(True)
-        col_widths = [30, 60, 90, 65, 55, 70, 85, 55, 65, 45]
+        col_widths = [28, 58, 110, 62, 55, 68, 80, 50, 62, 42]
         for i, w in enumerate(col_widths):
             hdr.resizeSection(i, w)
         self._table.verticalHeader().setVisible(False)
