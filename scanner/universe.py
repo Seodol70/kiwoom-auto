@@ -239,8 +239,9 @@ def get_filtered_universe(rows: list[dict]) -> list[str]:
     return [r["code"] for r in filtered]
 
 def format_trade_amount_korean(amount_won: int) -> str:
-    """[레거시 호환] 한글 거래대금 포맷팅."""
-    return UniverseManager.format_trade_amount(amount_won)
+    """[레거시 호환] 한글 거래대금 포맷팅 (TradeAmountHelper 위임)."""
+    from scanner.trade_amount import TradeAmountHelper
+    return TradeAmountHelper.to_korean(amount_won)
 
 def apply_watch_pool_cap(rows: list[dict], limit: int) -> list[dict]:
     """[레거시 호환] 거래대금 단일 정렬로 상위 N개 선정."""
@@ -261,14 +262,13 @@ _EOK_WON = 100_000_000
 
 
 def format_trade_amount_growth(current: int, baseline: Optional[int]) -> str:
-    """거래대금 증가율(%) — baseline 이 없거나 0이면 '—'."""
+    """거래대금 증가율(%) — baseline 이 없거나 0이면 '—' (TradeAmountHelper 위임)."""
+    from scanner.trade_amount import TradeAmountHelper
     if baseline is None or baseline <= 0:
         return "증가율(9시대비) —"
     pct = (current - baseline) / baseline * 100.0
-    return (
-        f"증가율(9시대비) {pct:+.1f}% "
-        f"(기준 {format_trade_amount_korean(baseline)})"
-    )
+    baseline_str = TradeAmountHelper.to_korean(baseline)
+    return f"증가율(9시대비) {pct:+.1f}% (기준 {baseline_str})"
 
 
 def seconds_until(t: dtime) -> float:

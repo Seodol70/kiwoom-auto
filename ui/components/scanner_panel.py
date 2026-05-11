@@ -29,7 +29,7 @@ class ScannerPanel(QWidget):
 
 
     # 스캐너: 전일 대비 당일 등락률(%) — 보유현황의 '수익률'(평단 대비)과 구분
-    _HEADERS = ["No.", "종목코드", "종목명", "현재가", "당일등락률", "거래대금", "신호", "추세", "매수"]
+    _HEADERS = ["No.", "종목코드", "종목명", "현재가", "당일등락률", "거래량", "거래대금", "신호", "추세", "매수"]
 
 
     def __init__(self, parent=None) -> None:
@@ -79,10 +79,9 @@ class ScannerPanel(QWidget):
         hdr.setStretchLastSection(False)
         # [NEW] 정렬 기능 활성화
         self._table.setSortingEnabled(True)
-        col_widths = [35, 65, 120, 78, 60, 95, 65, 80, 42]
+        col_widths = [35, 65, 50, 70, 55, 80, 100, 60, 70, 45]
         for i, w in enumerate(col_widths):
             hdr.resizeSection(i, w)
-        hdr.setSectionResizeMode(2, QHeaderView.Stretch)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -141,7 +140,7 @@ class ScannerPanel(QWidget):
             code = row["code"]
             change = row["change_pct"]
             color = QColor("#f38ba8") if change < 0 else QColor("#a6e3a1")
-            
+
             # 하이라이트 체크 (최근 신호 종목)
             is_flashing = code in self._flash_map and self._flash_map[code] > now
             bg_color = QColor("#4b4b00") if is_flashing else None # 진한 노란색 강조
@@ -183,17 +182,30 @@ class ScannerPanel(QWidget):
             it_pct.setForeground(color)
             self._table.setItem(r, 4, it_pct)
 
-            # 5: 거래대금 (사용자 요청으로 정렬 부하 방지를 위해 숫자 정렬 제외)
+            # 5: 거래량 (포맷팅: 만주 단위)
+            volume = int(row.get("volume", 0))
+            if volume > 1_000_000:
+                vol_text = f"{volume / 1_000_000:.1f}M"
+            elif volume > 1_000:
+                vol_text = f"{volume // 1_000}K"
+            else:
+                vol_text = str(volume) if volume > 0 else "0"
+            it_vol = QTableWidgetItem(vol_text)
+            it_vol.setData(Qt.EditRole, volume)  # 정렬용
+            it_vol.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._table.setItem(r, 5, it_vol)
+
+            # 6: 거래대금
             it_amt = QTableWidgetItem(format_trade_amount_korean(row.get("trade_amount", 0)))
             it_amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self._table.setItem(r, 5, it_amt)
+            self._table.setItem(r, 6, it_amt)
 
-            # 6: 신호
+            # 7: 신호
             it_sig = QTableWidgetItem(str(row.get("signal", "")))
             it_sig.setTextAlignment(Qt.AlignCenter)
-            self._table.setItem(r, 6, it_sig)
+            self._table.setItem(r, 7, it_sig)
 
-            # 7: 추세
+            # 8: 추세
             it_trend = QTableWidgetItem(row.get("trend_text", "데이터부족"))
             it_trend.setTextAlignment(Qt.AlignCenter)
             # 추세별 색상
@@ -201,15 +213,15 @@ class ScannerPanel(QWidget):
                 it_trend.setForeground(QColor("#a6e3a1"))
             elif "약세" in row.get("trend_text", "") or "하락" in row.get("trend_text", ""):
                 it_trend.setForeground(QColor("#f38ba8"))
-            self._table.setItem(r, 7, it_trend)
+            self._table.setItem(r, 8, it_trend)
 
-            # 8: 매수 버튼 (매번 생성하지 않고 재사용하여 성능 최적화)
-            btn = self._table.cellWidget(r, 8)
+            # 9: 매수 버튼 (매번 생성하지 않고 재사용하여 성능 최적화)
+            btn = self._table.cellWidget(r, 9)
             if not isinstance(btn, QPushButton):
                 btn = QPushButton("매수")
-                btn.setFixedSize(38, 22)
+                btn.setFixedSize(40, 24)
                 btn.setObjectName("buy_button")
-                self._table.setCellWidget(r, 8, btn)
+                self._table.setCellWidget(r, 9, btn)
             
             # 기존 연결 해제 후 재연결 (클로저 문제 방지)
             try: btn.clicked.disconnect()

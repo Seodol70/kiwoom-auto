@@ -236,37 +236,12 @@ def _resolve_prev_close(prev_close: int, current_price: int, change_pct: float) 
 
 def _resolve_trade_amount(raw_amt: int, price: int, volume: int) -> int:
     """
-    거래대금 단위를 자동 판별하여 '원' 단위로 정규화한다 (2026-05-06).
+    거래대금을 원 단위로 정규화한다 (2026-05-11 통합).
 
-    키움 API의 '거래대금' 필드는 TR마다 단위가 다르거나(천원/백만),
-    장 마감 직후 0으로 나오는 경우가 있음.
-
-    로직:
-      1. raw_amt 가 0이고 price, volume이 있으면 직접 계산 (price * volume)
-      2. raw_amt 가 0보다 크면:
-         - raw_amt * 1,000,000 이 (price * volume)과 유사하면 백만 단위로 판정
-         - raw_amt * 1,000 이 (price * volume)과 유사하면 천원 단위로 판정
-         - 그 외에는 price * volume 우위
+    TradeAmountHelper.normalize_from_kiwoom() 위임.
     """
-    calc_amt = price * volume
-    if raw_amt <= 0:
-        return calc_amt
-
-    # 단위 판별 (백만 vs 천원 vs 원)
-    amt_m = raw_amt * 1_000_000
-    amt_k = raw_amt * 1_000
-
-    # 계산값과 비교 (오차범위 20% 이내면 해당 단위로 인정)
-    if calc_amt > 0:
-        if 0.8 <= (amt_m / calc_amt) <= 1.2:
-            return amt_m
-        if 0.8 <= (amt_k / calc_amt) <= 1.2:
-            return amt_k
-
-    # 판별 불가 시 계산값 우선 (단, raw_amt가 너무 크면 raw_amt가 원 단위일 가능성 고려)
-    if raw_amt > calc_amt * 0.5:
-        return raw_amt
-    return calc_amt
+    from scanner.trade_amount import TradeAmountHelper
+    return TradeAmountHelper.normalize_from_kiwoom(raw_amt, price, volume)
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +340,15 @@ class KiwoomManager(KiwoomProtocol):
         now = time.monotonic()
         return now < self._tr_bans.get(tr_code, 0)
 
+    def get_tr_ban_status(self) -> dict[str, float]:
+        """모든 차단된 TR의 상태를 반환한다 (진단용)."""
+        now = time.monotonic()
+        result = {}
+        for tr_code, ban_until in self._tr_bans.items():
+            if now < ban_until:
+                result[tr_code] = ban_until - now
+        return result
+
     @property
     def is_mock(self) -> bool:
         """현재 접속된 서버가 모의투자 서버인지 여부 (GetServerGubun="1")"""
@@ -378,26 +362,34 @@ class KiwoomManager(KiwoomProtocol):
     def fetch_opt10030_top_volume(self, max_rows: int = 200) -> list[dict]:
         """
         opt10030 거래대금 상위 종목을 조회한다.
-        서버 차단을 피하기 위해 화면 번호를 순환 사용한다.
+        2026-05-11: 메인 스레드 블로킹 제거
+          - CircuitBreaker 활성 중이면 즉시 반환 (메인 스레드 보호)
+          - 페이지 간 5초 대기 (메인 스레드 밖에서 실행 시에만)
+          - 재시도 로직 제거 (CircuitBreaker가 15분 대기 처리)
         """
+        # ⚠️ CircuitBreaker 활성 중 → 즉시 반환 (UI 멈춤 방지)
+        if self.is_tr_banned("opt10030"):
+            logger.warning("[opt10030] 차단 상태 — 조회 건너뜀 (회피 중인 -200 대기)")
+            return []
+
         all_rows: list[dict] = []
         prev_next = 0
         page = 0
-        
+
         # 화면 번호 순환 (9000 ~ 9005)
         import random
         screen_no = str(9000 + random.randint(0, 5))
-        
+
         while len(all_rows) < max_rows:
             self._set_input("시장구분", "000")  # 000=전체
             self._set_input("정렬구분", "1")    # 1=거래대금
             self._set_input("관리종목포함", "0")
             self._set_input("신용구분", "0")
 
-            # 페이지 간 1초 간격 추가 (TR Limit -200 방지)
+            # 페이지 간 5초 간격
             if page > 0:
-                logger.debug("[opt10030] 페이지 %d 전 1초 대기 (TR Limit 회피)", page + 1)
-                time.sleep(1.0)
+                logger.debug("[opt10030] 페이지 %d 전 5초 대기", page + 1)
+                time.sleep(5.0)
 
             ok = self._comm_rq("opt10030", "거래대금상위", screen_no, prev_next=prev_next)
             if not ok:
@@ -416,21 +408,30 @@ class KiwoomManager(KiwoomProtocol):
             if len(all_rows) >= max_rows or self._tr_prev_next != "2":
                 break
             prev_next = 2
-            
+
+        logger.info("[opt10030] 조회 완료: %d개 (max %d)", len(all_rows), max_rows)
         return all_rows[:max_rows]
 
     def fetch_opt10004_top_volume(self, max_rows: int = 200) -> list[dict]:
         """
         opt10004 거래대금 상위 (한 번에 100~200개 조회, Circuit Breaker 회피용)
-        2026-05-07: opt10030 Circuit Breaker 문제 해결을 위해 추가
+        2026-05-11: 메인 스레드 블로킹 제거
+          - CircuitBreaker 활성 중이면 즉시 반환 (메인 스레드 보호)
+          - 재시도 로직 제거 (CircuitBreaker가 15분 대기 처리)
 
         특징:
         - 페이지 처리 없음 (1회 호출로 최대 200개 조회)
         - API 호출 1회 → Circuit Breaker 회피 가능
         - opt10030보다 안정적
         """
+        # ⚠️ CircuitBreaker 활성 중 → 즉시 반환 (UI 멈춤 방지)
+        if self.is_tr_banned("opt10004"):
+            logger.warning("[opt10004] 차단 상태 — 조회 건너뜀 (회피 중인 -200 대기)")
+            return []
+
         all_rows: list[dict] = []
         import random
+
         screen_no = str(9010 + random.randint(0, 5))  # 화면 번호 순환
 
         logger.info("[opt10004] 거래대금 상위 1회 조회 시작 (max=%d)", max_rows)
@@ -517,6 +518,12 @@ class KiwoomManager(KiwoomProtocol):
                 raw_amt = safe_int(d.get("거래대금"))
                 volume_v = safe_int(d.get("거래량"))
                 trade_amount = _resolve_trade_amount(raw_amt, current_price, volume_v)
+
+                # [진단] opt10001 거래대금 (DEBUG 레벨)
+                from scanner.trade_amount import TradeAmountHelper
+                diag_str = TradeAmountHelper.to_korean(trade_amount)
+                logger.debug("[opt10001 거래대금] %s raw=%d백만원 → %s",
+                           code, raw_amt, diag_str)
 
                 _TR_FAIL.ok("opt10001")
                 return {
@@ -1307,26 +1314,19 @@ class KiwoomManager(KiwoomProtocol):
     _OPT10030_AMT_FIELDS = ("거래대금", "누적거래대금", "거래금액", "거래대금(천원)")
 
     def _parse_top_volume_rows(self, tr_code: str, rq_name: str) -> list[dict]:
-        """opt10030 거래량/거래대금 상위 종목 행 파싱"""
+        """opt10030 거래량/거래대금 상위 종목 행 파싱
+
+        [2026-05-08] 거래대금 필드 제거
+        opt10030/opt10004의 거래대금 단위가 불명확(천원/백만/원 혼재)하여
+        더 이상 사용하지 않음. opt10001(개별 조회)의 거래대금만 사용.
+        """
         cnt = self._get_repeat_cnt(tr_code, rq_name)
-        logger.info("[%s] GetRepeatCnt=%d", rq_name, cnt)
+        logger.warning("[%s] GetRepeatCnt=%d (tr=%s, rq=%s)", rq_name, cnt, tr_code, rq_name)
         rows = []
 
         if cnt == 0:
+            logger.warning("[%s] 반복 데이터 0건 — GetRepeatCnt 확인 필요", rq_name)
             return []
-
-        # 첫 행에서 거래대금 실제 필드명을 자동 감지
-        _amt_field: str = "거래대금"
-        def _g0(f):
-            return self._get_comm_data(tr_code, rq_name, 0, f)
-            
-        for _cand in self._OPT10030_AMT_FIELDS:
-            _val = _g0(_cand).strip()
-            if _val and _val != "0":
-                _amt_field = _cand
-                break
-        
-        logger.debug("[%s] Detected Amt Field: '%s'", rq_name, _amt_field)
 
         for i in range(cnt):
             def g(f, _i=i):
@@ -1338,17 +1338,15 @@ class KiwoomManager(KiwoomProtocol):
 
             price_v  = abs(safe_int(g("현재가")))
             volume_v = abs(safe_int(g("거래량")))
-            raw_amt  = safe_int(g(_amt_field))
-            
-            # [FIX] 지능형 단위 보정 적용 (천원 vs 백만)
+
+            # [2026-05-08] 거래대금 단위 정규화
+            raw_amt = safe_int(g("거래대금") or "0")
             amt_val = _resolve_trade_amount(raw_amt, price_v, volume_v)
 
-            if i < 5:
-                # 거래대금 단위 진단 (천원->원 변환 확인용) - DEBUG 레벨로 유지
-                from scanner.smart_scanner import format_trade_amount_korean
-                amt_korean = format_trade_amount_korean(amt_val) if amt_val > 0 else "0원"
-                logger.debug("[opt10030 진단] 행[%d] %s(%s) 거래대금: raw='%s' -> %d원 ~ %s",
-                             i, code, g("종목명").strip(), raw_amt, amt_val, amt_korean)
+            if i < 20:  # 상위 20개 진단 (거래대금 검증용)
+                logger.warning("[opt10030 거래대금] 행[%d] %s raw_amt=%d (백만원 단위?) → amt_val=%d원 = %.2f억",
+                           i, code, raw_amt, amt_val, amt_val / 100_000_000)
+
             # 현재가 필드 추출 (부호 제거는 safe_int가 처리)
             raw_p = g("현재가") or g("현재가(원)") or g("종가") or "0"
             price_v = abs(safe_int(raw_p))
@@ -1365,6 +1363,10 @@ class KiwoomManager(KiwoomProtocol):
                 # 시세 데이터 진단 - DEBUG 레벨
                 logger.debug("[opt10030 진단] 행[%d] %s(%s) 현재가: raw='%s' -> %d원",
                              i, code, g("종목명").strip(), g("현재가"), price_v)
+                from scanner.trade_amount import TradeAmountHelper
+                diag_str = TradeAmountHelper.to_korean(amt_val)
+                logger.debug("[opt10030 거래대금] 행[%d] %s raw=%d백만원 → %s",
+                           i, code, raw_amt, diag_str)
 
             # [개선] 등락률 필드명 감지 및 역산 보강
             raw_chg_pct = g("등락률") or g("등락율") or g("전일대비율") or "0"
@@ -1424,7 +1426,7 @@ class KiwoomManager(KiwoomProtocol):
                 "high_price":    safe_int(g("고가")),
                 "low_price":     safe_int(g("저가")),
                 "volume":        safe_int(g("거래량")) if safe_int(g("거래량")) < 2_000_000_000 else 0,
-                "trade_amount":  amt_val,
+                "trade_amount":  amt_val,  # [2026-05-08] 단위 정규화 적용
                 "prev_close":    (price_v_recovered if price_v_recovered > 0 else _resolve_prev_close(
                                      safe_int(g("전일종가")),
                                      price_v,

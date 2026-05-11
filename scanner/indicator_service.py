@@ -234,7 +234,12 @@ class IndicatorService:
     @staticmethod
     def get_ai_features(snap: 'StockSnapshot', index_history: dict[str, list[float]] = None, config: any = None) -> dict[str, float]:
         """
-        AI 모델 학습/추론에 사용할 20종 이상의 정규화된 피처를 생성한다.
+        AI 모델 학습/추론에 사용할 19종의 정규화된 피처를 생성한다.
+
+        피처 정의 (ML Trainer와 동기화):
+          1-7: 기본 (RSI, EMA20, BB, VolSurge, 등락률, 체결강도, 추세)
+          8-15: 고급 (가격모멘텀, 당일위치, 변동성, MA정배열, RS스코어, VWAP, MTF)
+          16-19: 캔들 패턴 (Body, UpperTail, LowerTail) + 호가비율
         """
         features = {}
         closes = snap.closes_1min
@@ -246,7 +251,7 @@ class IndicatorService:
             # 1. RSI (0~1)
             rsi = IndicatorService.calc_rsi(arr, 14)
             features["f_rsi"] = (rsi / 100.0) if rsi is not None else 0.5
-            
+
             # 2. 이평선 이격도 (현재가/EMA20 - 1.0)
             ema20 = IndicatorService.calc_ema(arr, 20)
             if ema20 and ema20 > 0:
@@ -254,7 +259,7 @@ class IndicatorService:
                 features["f_ema20_gap"] = np.clip(gap * 5.0, -1.0, 1.0)
             else:
                 features["f_ema20_gap"] = 0.0
-                
+
             # 3. 볼린저 밴드 위치 (Percent B)
             bb = IndicatorService.calc_bollinger_bands(arr, 20)
             if bb and (bb["upper"] - bb["lower"]) > 0:
@@ -273,19 +278,17 @@ class IndicatorService:
 
             # 5. 등락률 (0~30% -> 0~1)
             features["f_change_pct"] = np.clip(snap.change_pct / 30.0, -1.0, 1.0)
-            
+
             # 6. 체결강도 (0~500 -> 0~1)
             features["f_strength"] = np.clip(snap.chejan_strength / 500.0, 0.0, 1.0)
-            
+
             # 7. 추세 단계 (0~3 -> 0~1)
             features["f_trend"] = snap.trend_level / 3.0
 
-            # --- [NEW] 고급 피처 추가 ---
-            
             # 8. 가격 모멘텀 (최근 3분 변화율)
             if len(arr) >= 4:
                 price_mom = (arr[-1] / arr[-4]) - 1.0
-                features["f_price_mom"] = np.clip(price_mom * 10.0, -1.0, 1.0) # 10% 변화 시 1.0
+                features["f_price_mom"] = np.clip(price_mom * 10.0, -1.0, 1.0)
             else:
                 features["f_price_mom"] = 0.0
 
@@ -299,7 +302,7 @@ class IndicatorService:
             # 10. 최근 10분 변동성 (Volatility)
             if len(arr) >= 10:
                 recent_range = (np.max(arr[-10:]) - np.min(arr[-10:])) / snap.current_price
-                features["f_volatility"] = np.clip(recent_range * 20.0, 0.0, 1.0) # 5% 변동 시 1.0
+                features["f_volatility"] = np.clip(recent_range * 20.0, 0.0, 1.0)
             else:
                 features["f_volatility"] = 0.0
 
@@ -315,32 +318,29 @@ class IndicatorService:
                 features["f_ma_align"] = 0.0
 
             # 12. 시장 지수 대비 강도 (Relative Strength)
-            # snap.rs_score 활용 (Stock% - Index%)
-            features["f_rs_score"] = np.clip(snap.rs_score / 5.0, -1.0, 1.0) # 5% 초과 달성 시 1.0
+            features["f_rs_score"] = np.clip(snap.rs_score / 5.0, -1.0, 1.0)
 
             # 13. VWAP 대비 이격도
-            vols = np.array(snap.volumes_1min)
-            vwap = IndicatorService.calc_vwap(arr, vols)
+            vols_arr = np.array(snap.volumes_1min)
+            vwap = IndicatorService.calc_vwap(arr, vols_arr)
             if vwap and vwap > 0:
                 vwap_dist = (snap.current_price / vwap) - 1.0
-                features["f_vwap_dist"] = np.clip(vwap_dist * 20.0, -1.0, 1.0) # 5% 이격 시 1.0
+                features["f_vwap_dist"] = np.clip(vwap_dist * 20.0, -1.0, 1.0)
             else:
                 features["f_vwap_dist"] = 0.0
 
-            # 14. 다중 시간 프레임 (MTF) 분석 - AI 학습용
-            # 15분봉 EMA20 추정 (1분봉 300개 사용)
-            if len(arr) >= 200: # 최소 200개 이상일 때만 신뢰
+            # 14. MTF 15분봉 이격도
+            if len(arr) >= 200:
                 ema_15m_20 = IndicatorService.calc_ema(arr, 300)
                 if ema_15m_20 and ema_15m_20 > 0:
                     mtf_15m_gap = (snap.current_price / ema_15m_20) - 1.0
-                    features["f_mtf_15m_gap"] = np.clip(mtf_15m_gap * 10.0, -1.0, 1.0) # 10% 이격 시 1.0
+                    features["f_mtf_15m_gap"] = np.clip(mtf_15m_gap * 10.0, -1.0, 1.0)
                 else:
                     features["f_mtf_15m_gap"] = 0.0
             else:
                 features["f_mtf_15m_gap"] = 0.0
 
-            # 60분봉 EMA20 추정 (1분봉 1200개... 데이터 부족 시 가능한 최대치 사용)
-            # 여기서는 60분봉의 대략적 추세를 위해 1분봉 400개를 최대한 활용 (약 60분 EMA7에 해당)
+            # 15. MTF 60분봉 이격도
             ema_60m_trend = IndicatorService.calc_ema(arr, min(len(arr), 400))
             if ema_60m_trend and ema_60m_trend > 0:
                 mtf_60m_gap = (snap.current_price / ema_60m_trend) - 1.0
@@ -348,24 +348,14 @@ class IndicatorService:
             else:
                 features["f_mtf_60m_gap"] = 0.0
 
-            # 15. 호가 잔량 분석 (Bid-Ask Imbalance) - AI 학습용
-            total_ask = getattr(snap, "total_ask_qty", 0)
-            total_bid = getattr(snap, "total_bid_qty", 0)
-            if total_bid > 0:
-                hoga_ratio = total_ask / total_bid
-                # 보통 매도잔량이 많을 때 매수 에너지가 강함 (흡수)
-                features["f_hoga_ratio"] = np.clip(hoga_ratio / 3.0, 0.0, 1.0) 
-            else:
-                features["f_hoga_ratio"] = 0.0
-
-            # 16. 캔들 패턴 분석 (마지막 완성봉 기준)
+            # 16-18. 캔들 패턴 분석 (Body, UpperTail, LowerTail)
             c_list = snap.closes_1min
             o_list = snap.opens_1min
             if len(c_list) >= 1 and len(o_list) >= 1:
                 curr_c, curr_o = c_list[-1], o_list[-1]
                 curr_h = snap.highs_1min[-1] if snap.highs_1min else curr_c
                 curr_l = snap.lows_1min[-1] if snap.lows_1min else curr_c
-                
+
                 candle_range = curr_h - curr_l
                 if candle_range > 0:
                     features["f_candle_body"] = (curr_c - curr_o) / candle_range
@@ -380,56 +370,16 @@ class IndicatorService:
                 features["f_candle_upper_tail"] = 0.0
                 features["f_candle_lower_tail"] = 0.0
 
-            # 17. 지수 가속도 (Market Velocity)
-            if index_history:
-                # 종목의 시장(코스피/코스닥) 결정 — StockSnapshot.market_type 사용
-                # "0": KOSPI, "10": KOSDAQ
-                m_code = getattr(snap, "market_type", "10")
-                m_type = "KOSDAQ" if m_code == "10" else "KOSPI"
-                hist = index_history.get(m_type, [])
-                if len(hist) >= 3:
-                    velocity = hist[-1] - hist[-3] # 3분간의 변화량
-                    features["f_index_velocity"] = np.clip(velocity * 5.0, -1.0, 1.0)
-                else:
-                    features["f_index_velocity"] = 0.0
+            # 19. 호가 잔량 비율 (Bid-Ask Imbalance)
+            total_ask = getattr(snap, "total_ask_qty", 0)
+            total_bid = getattr(snap, "total_bid_qty", 0)
+            if total_bid > 0:
+                hoga_ratio = total_ask / total_bid
+                features["f_hoga_ratio"] = np.clip(hoga_ratio / 3.0, 0.0, 1.0)
             else:
-                features["f_index_velocity"] = 0.0
-
-            # 18. 호가 유동성 점수 (Liquidity Depth)
-            # 주문 금액 대비 매수 호가 잔량 확인
-            target_amount = 1_500_000 # 기본 주문 금액 150만원
-            if config:
-                target_amount = getattr(config, "fixed_order_amount", 1_500_000)
-            
-            total_bid_val = getattr(snap, "total_bid_qty", 0) * snap.current_price
-            if target_amount > 0:
-                liq_score = total_bid_val / (target_amount * 10) # 주문량의 10배 이상이면 1.0
-                features["f_liquidity_score"] = np.clip(liq_score, 0.0, 1.0)
-            else:
-                features["f_liquidity_score"] = 1.0
-
-            # 19. VI 거리 (VI Distance)
-            # 정적 VI 기준 (시가 대비 10% 단위로 가정 - 단순화)
-            if snap.open_price > 0:
-                vi_price = snap.open_price * 1.1 # 1차 정적 VI
-                if snap.current_price > vi_price: # 이미 1차 통과 시 2차 (20%)
-                     vi_price = snap.open_price * 1.2
-                
-                dist_to_vi = (vi_price / snap.current_price) - 1.0
-                features["f_vi_distance"] = np.clip(dist_to_vi * 10.0, 0.0, 1.0) # 10% 남았을 때 1.0, 0%일 때 0.0
-            else:
-                features["f_vi_distance"] = 0.5
-
-            # 20. 수급 지속성 (Strength Continuity)
-            chejan_hist = getattr(snap, "chejan_history", [])
-            if len(chejan_hist) >= 3:
-                avg_chejan = sum(chejan_hist[-3:]) / 3
-                continuity = snap.chejan_strength / (avg_chejan + 0.1)
-                features["f_strength_continuity"] = np.clip(continuity / 2.0, 0.0, 1.0)
-            else:
-                features["f_strength_continuity"] = 0.5
+                features["f_hoga_ratio"] = 0.0
 
         except Exception as e:
             logger.error(f"AI 피처 생성 실패: {snap.code}, {e}")
-            
+
         return features

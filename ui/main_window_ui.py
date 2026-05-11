@@ -68,8 +68,8 @@ class MainWindowUI:
         right_v.setSizes([560, 280])   # 보유현황:차트 ≈ 66:33 (차트 크기 축소)
         h_split.addWidget(right_v)
 
-        # 4 : 6 비율
-        h_split.setSizes([640, 960])
+        # 6 : 4 비율 (스캐너 60% : 보유현황 40%)
+        h_split.setSizes([960, 640])
         root.addWidget(h_split, stretch=1)
 
         # 구분선

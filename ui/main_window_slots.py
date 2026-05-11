@@ -170,6 +170,11 @@ class MainWindowSlots:
         self.append_log("💰 [수익완료] 목표 수익 달성 — 신규 매수 제한")
 
     @pyqtSlot()
+    def _on_feedback_triggered(self) -> None:
+        """마켓 스케줄러: 장 종료 → 피드백 엔진 자동 실행"""
+        self._run_feedback_loop()
+
+    @pyqtSlot()
     def _on_day_reset(self) -> None:
         """장 시작 시 당일 상태 초기화"""
         self._already_started = False

@@ -99,6 +99,10 @@ class TradingController(QObject):
             self._order_mgr, self._risk_mgr, self._scan_cfg, self._snap_store
         )
 
+        # [AI] AI 필터 초기화 (ML 모델 기반 신호 판정)
+        from app.ai_filter import AIFilter
+        self._ai_filter = AIFilter()
+
         # [NEW] SmartScanner 신호를 주문 모듈과 연결 (2026-05-07 수정)
         if self._smart_scanner:
             self._smart_scanner.signal_detected.connect(self._on_signal_from_scanner)
@@ -253,8 +257,10 @@ class TradingController(QObject):
                 self.log_message.emit(f"{msg} → 진입 승인 (기준 {ai_thr*100:.0f}%)")
 
         # ✅ RS 필터 검증 (지수 대비 강도)
-        if snap:
-            rs_score = features.get("rs_score", 0)
+        if snap and features:
+            # f_rs_score는 정규화 피처 (0~1 범위)로 저장됨
+            # snap.rs_score는 실제 RS 점수 (Stock% - Index%)로 조회
+            rs_score = snap.rs_score
             rs_thr = float(getattr(self._scan_cfg, "rs_threshold", 0.0))
             if rs_score < rs_thr:
                 self.log_message.emit(f"📉 [RS필터] {sig.name} RS={rs_score:.2f} (기준 {rs_thr:.2f}) → 거절")

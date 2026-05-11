@@ -105,7 +105,14 @@ class SnapshotStore:
             if code not in self._df.index:
                 return ""
             val = self._df.at[code, "name"]
-            return _df_cell_scalar(val, "")
+            name_result = _df_cell_scalar(val, "")
+            # [DEBUG] 첫 호출 시에만 로그
+            if not getattr(self, "_name_log_set", None):
+                self._name_log_set = set()
+            if code not in self._name_log_set and len(self._name_log_set) < 5:
+                self._name_log_set.add(code)
+                logger.debug("[get_name] code=%s → name=%r (type=%s)", code, name_result, type(name_result).__name__)
+            return name_result
 
     _NUM_COLS = [
         "current_price", "open_price", "high_price", "low_price",
@@ -113,19 +120,31 @@ class SnapshotStore:
         "prev_volume", "vol_ratio", "total_ask_qty", "total_bid_qty",
     ]
 
-    def bulk_update(self, rows: list[dict]) -> None:
+    def bulk_update(self, rows: list[dict], kiwoom_mgr=None) -> None:
         """
         Pre-Filter 결과(list[dict])를 DataFrame 에 일괄 적재한다.
         기존 행이 있으면 갱신, 없으면 추가한다.
+
+        [2026-05-11] 종목명이 코드인 경우 kiwoom_mgr을 통해 opt10001 조회로 보강
         """
         if not rows:
             logger.warning("[SnapshotStore.bulk_update] rows 빈 리스트 — 적재 스킵")
             return
 
+        # [NEW] 들어오는 rows 데이터 샘플 로그 (첫 1개만)
+        if rows:
+            sample = rows[0]
+            logger.warning("[bulk_update 입력] rows[0]: code=%s name=%s volume=%s trade_amount=%s",
+                         sample.get("code"), sample.get("name"), sample.get("volume"), sample.get("trade_amount"))
+
         rows, _dropped = filter_equity_rows(rows)
         if not rows:
             logger.warning("[SnapshotStore.bulk_update] ETF·파생 제외 후 빈 리스트 — 적재 스킵")
             return
+
+        # ⚠️ [2026-05-11] 종목명 opt10001 조회 제거 (UI 블로킹 방지)
+        # 이미 InternalStockState에 캐싱된 데이터가 있으므로 추가 동기 호출 불필요
+        # get_snapshot()에서 별도 처리
 
         for row in rows:
             prev_close = row.get("prev_close")
@@ -170,7 +189,14 @@ class SnapshotStore:
 
             for code in new_df.index:
                 st = self._get_state(code)
-                st.name = str(new_df.at[code, "name"])
+                name_from_df = str(new_df.at[code, "name"])
+                st.name = name_from_df
+                # [DEBUG] 처음 5개만 로그
+                if not hasattr(self, "_bulk_name_log"):
+                    self._bulk_name_log = set()
+                if code not in self._bulk_name_log and len(self._bulk_name_log) < 5:
+                    self._bulk_name_log.add(code)
+                    logger.warning("[bulk_update] %s: st.name 설정 → %r", code, name_from_df)
                 
                 # 고속 캐시 및 상태 업데이트 - 0원 방어 로직
                 try:
@@ -187,11 +213,24 @@ class SnapshotStore:
                     st.change_pct = new_cp
                 elif st.change_pct == 0:
                     st.change_pct = 0.0
-                # 거래대금 및 기준가 보호
+                # 거래대금 및 거래량 보호
                 new_amt = int(new_df.at[code, "trade_amount"]) if "trade_amount" in new_df.columns else 0
                 if new_amt != 0:
                     st.trade_amount = new_amt
-                
+
+                new_vol = int(new_df.at[code, "volume"]) if "volume" in new_df.columns else 0
+                if new_vol != 0:
+                    st.volume = new_vol
+                    st.cumulative_volume = new_vol
+
+                # [DEBUG] 첫 5개 종목의 거래대금 값 로그 (bulk_update 후)
+                if not hasattr(self, "_bulk_amt_log"):
+                    self._bulk_amt_log = set()
+                if code not in self._bulk_amt_log and len(self._bulk_amt_log) < 5:
+                    self._bulk_amt_log.add(code)
+                    logger.warning("[bulk_update 후] %s: st.trade_amount=%d | new_amt=%d | df값=%s",
+                                 code, st.trade_amount, new_amt, new_df.at[code, "trade_amount"] if "trade_amount" in new_df.columns else "N/A")
+
                 new_prev = int(new_df.at[code, "prev_close"]) if "prev_close" in new_df.columns else 0
                 if new_prev != 0:
                     st.prev_close = new_prev
@@ -222,10 +261,20 @@ class SnapshotStore:
         cum_vol:      int = 0,
         cum_amt:      int = 0,
         prev_close:   int = 0,
+        name:         str = "",
     ) -> None:
         """실시간 체결 한 틱을 해당 종목 상태에 반영한다."""
         with self._lock:
             st = self._get_state(code)
+
+            # [NEW] 종목명이 비어있으면 실시간 전달값으로 갱신
+            if name and not st.name:
+                st.name = name
+                if not getattr(self, "_name_update_log", None):
+                    self._name_update_log = set()
+                if code not in self._name_update_log and len(self._name_update_log) < 5:
+                    self._name_update_log.add(code)
+                    logger.debug("[update_price] %s: st.name 업데이트 → %r", code, name)
             
             # [NEW] 기준가 업데이트 (TR 차단 시 fallback 데이터 반영)
             if prev_close > 0:
@@ -315,7 +364,7 @@ class SnapshotStore:
         with self._lock:
             return self._states.get(code)
 
-    def get_snapshot(self, code: str) -> Optional[StockSnapshot]:
+    def get_snapshot(self, code: str, _debug: bool = False) -> Optional[StockSnapshot]:
         """단일 종목 스냅샷을 반환한다 (API 호출 없음). 락 범위 최소화 버전."""
         with self._lock:
             if code not in self._df.index:
@@ -364,8 +413,15 @@ class SnapshotStore:
             chejan_hist   = list(st.chejan_history)
             m_type        = getattr(st, "market_type", "10")
 
-        nm = row_copy.get("name", "")
-        name_s = str(nm) if nm is not None else ""
+        # [FIX] DataFrame의 "name" 컬럼이 코드로 덮어씌워질 수 있으므로 내부 상태에서 가져오기
+        with self._lock:
+            st_name = self._get_state(code)
+            name_s = st_name.name if st_name and st_name.name else ""
+
+        # 대체값: DataFrame에서 "name" 가져오기
+        if not name_s:
+            nm = row_copy.get("name", "")
+            name_s = str(nm) if nm is not None else ""
 
         ua_raw = row_copy.get("updated_at", None)
         updated_at = ua_raw if isinstance(ua_raw, datetime) else datetime.now()
@@ -407,6 +463,19 @@ class SnapshotStore:
                         st.exec_vel_cached = _v10 / _avg10 if _avg10 > 0 else 0.0
             _vel_ratio = st.exec_vel_cached
 
+        # [DEBUG] 거래대금 값 추적 (get_snapshot 단계 - 반환 전)
+        st_amt = st.trade_amount if st and st.trade_amount > 0 else safe_int_cell("trade_amount", 0)
+        if not getattr(self, "_snap_debug_log", None):
+            self._snap_debug_log = set()
+        if code not in self._snap_debug_log and len(self._snap_debug_log) < 5:
+            self._snap_debug_log.add(code)
+            logger.warning(
+                "[get_snapshot] %s: st.trade_amount=%d | safe_int_cell=%d | df원본=%s",
+                code, st.trade_amount if st else -1,
+                safe_int_cell("trade_amount", 0),
+                row_copy.get("trade_amount", "N/A")
+            )
+
         return StockSnapshot(
             code          = code,
             name          = name_s,
@@ -415,7 +484,7 @@ class SnapshotStore:
             high_price    = safe_int_cell("high_price",    0),
             low_price     = safe_int_cell("low_price",     0),
             volume        = st.volume if st.volume > 0 else safe_int_cell("volume", 0),
-            trade_amount  = st.trade_amount if st.trade_amount > 0 else safe_int_cell("trade_amount", 0),
+            trade_amount  = st_amt,
             prev_close    = safe_int_cell("prev_close",    0),
             change_pct    = st.change_pct if st.change_pct != 0 else safe_float_cell("change_pct",  0.0),
             total_ask_qty = st.total_ask_qty if st.total_ask_qty > 0 else safe_int_cell("total_ask_qty", 0),
@@ -736,6 +805,30 @@ class SnapshotStore:
 
             logger.info("[SnapshotStore] 메모리 정리 완료 — %d종목 데이터 제거", len(stale))
             return len(stale)
+
+    def get_ranked_df(self, sort_by: str = "trade_amount"):
+        """
+        SnapshotStore를 정렬된 DataFrame으로 반환 (순위/상위% 포함).
+
+        영상(유튜브 bQeN0WL5pEM) 구현 방식:
+          df.sort_values(by='거래대금', ascending=False)
+          df['순위'] = range(1, len(df)+1)
+          df['상위퍼센트'] = (df['순위'] / len(df) * 100).round(2)
+        """
+        import pandas as pd
+
+        with self._lock:
+            df = self._df[["name", "change_pct", "trade_amount", "volume"]].copy()
+
+        df = df[df["trade_amount"] > 0]
+        if len(df) == 0:
+            return df
+
+        df = df.sort_values(by=sort_by, ascending=False)
+        n = len(df)
+        df["순위"] = range(1, n + 1)
+        df["상위퍼센트"] = (df["순위"] / n * 100).round(2)
+        return df
 
     def export_csv(self, path: str = "logs/snapshot.csv") -> None:
         """현재 스냅샷을 CSV 로 내보낸다."""
