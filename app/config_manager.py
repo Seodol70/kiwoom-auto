@@ -173,6 +173,13 @@ def reload_adaptive(scan_cfg) -> str:
         new_cfg.universe_vol_ratio_weight = float(config_manager.get("universe_vol_ratio_weight", 0.4))
         new_cfg.universe_chg_pct_weight   = float(config_manager.get("universe_chg_pct_weight", 0.2))
 
+        # 종가매매 모드 (UI에서 설정 가능)
+        overnight_mode = config_manager.get("overnight_mode_enabled", False)
+        if isinstance(overnight_mode, str):
+            new_cfg.overnight_mode_enabled = overnight_mode.lower() in ("true", "1", "yes")
+        else:
+            new_cfg.overnight_mode_enabled = bool(overnight_mode)
+
         # scan_cfg를 새 설정으로 스레드 안전하게 갱신 (apply_from이 내부 lock 사용)
         scan_cfg.apply_from(new_cfg)
 
