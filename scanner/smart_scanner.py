@@ -1262,53 +1262,51 @@ class SmartScanner(QObject):
 
         self._opt10030_fetching = True
         try:
-            for attempt in range(retry):
-                # 각 시도마다 CircuitBreaker 확인 — 차단되면 폴백 중단
-                if self._kiwoom.is_tr_banned("opt10004") and self._kiwoom.is_tr_banned("opt10030"):
-                    logger.warning("[폴백 중단] opt10004/opt10030 모두 차단 — 재시도 건너뜀 (%d/%d)", attempt+1, retry)
-                    break
+            # CircuitBreaker 활성 중이면 재시도 금지
+            if self._kiwoom.is_tr_banned("opt10004") or self._kiwoom.is_tr_banned("opt10030"):
+                logger.warning("[폴백 중단] CircuitBreaker 활성 중 — 재시도 금지")
+                return []
 
-                try:
-                    rows = []
+            rows = []
+            try:
+                # 1차: opt10004
+                if hasattr(self._kiwoom, "fetch_opt10004_top_volume"):
+                    logger.info("[opt10004] 조회 시작")
+                    rows = self._tr_q.call(self._kiwoom.fetch_opt10004_top_volume, target)
+                    if rows:
+                        logger.info("[opt10004] 성공 — %d개 종목 수신", len(rows))
+                        self._last_volume_rows = rows
+                        self._last_volume_updated = time.monotonic()
+                        return rows[:target]
 
-                    # [NEW] 1차: opt10004 (Circuit Breaker 회피용, 한 번에 200개)
-                    if hasattr(self._kiwoom, "fetch_opt10004_top_volume"):
-                        if not self._kiwoom.is_tr_banned("opt10004"):
-                            logger.info("[opt10004] 1차 조회 시작 (시도 %d/%d)", attempt+1, retry)
-                            rows = self._tr_q.call(self._kiwoom.fetch_opt10004_top_volume, target)
-                            if rows:
-                                logger.info("[opt10004] 성공 — %d개 종목 수신", len(rows))
-                        else:
-                            logger.warning("[opt10004] 차단 상태 — 폴백 건너뜀")
+                # 2차: opt10030 (opt10004 0개 반환 시만)
+                if not rows and hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
+                    logger.info("[opt10030] 2차 폴백 시작")
+                    rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
+                    if rows:
+                        logger.info("[opt10030] 성공 — %d개 종목 수신", len(rows))
+                        self._last_volume_rows = rows
+                        self._last_volume_updated = time.monotonic()
+                        return rows[:target]
 
-                    # [NEW] opt10004 실패 → 2차: opt10030 (폴백)
-                    if not rows and hasattr(self._kiwoom, "fetch_opt10030_top_volume"):
-                        if not self._kiwoom.is_tr_banned("opt10030"):
-                            logger.info("[opt10030] 2차 폴백 조회 시작")
-                            rows = self._tr_q.call(self._kiwoom.fetch_opt10030_top_volume, target)
-                        else:
-                            logger.warning("[opt10030] 차단 상태 — 조회 건너뜀")
+                # 3차: opt10032 (최종 폴백, 이것도 실패하면 그냥 반환)
+                if not rows and hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
+                    logger.info("[opt10032] 3차 폴백 시작")
+                    rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
+                    if rows:
+                        logger.info("[opt10032] 성공 — %d개 종목 수신", len(rows))
+                        self._last_volume_rows = rows
+                        self._last_volume_updated = time.monotonic()
+                        return rows[:target]
 
-                    # [NEW] opt10030도 실패 → 3차: opt10032 (최종 폴백)
-                    if not rows and hasattr(self._kiwoom, "fetch_opt10032_top_volume"):
-                        if not self._kiwoom.is_tr_banned("opt10032"):
-                            logger.info("[opt10032] 3차 폴백 조회 시작")
-                            rows = self._tr_q.call(self._kiwoom.fetch_opt10032_top_volume, target)
-                            if rows:
-                                self._last_volume_rows = rows
-                                self._last_volume_updated = time.monotonic()
-                                return rows[:target]
-                        else:
-                            logger.warning("[opt10032] 차단 상태 — 조회 건너뜀")
+                # 모든 폴백 실패 → 재시도 없이 즉시 반환
+                if not rows:
+                    logger.warning("[폴백 실패] opt10004/10030/10032 모두 0개 — 재시도 금지")
+                    return []
 
-                    # 폴백 체인 전체 실패 시 재시도하지 말고 즉시 반환
-                    if not rows:
-                        logger.warning("[폴백 완료] 모든 폴백 체인 실패 (시도 %d/%d)", attempt+1, retry)
-                        return []
-
-                except Exception as e:
-                    logger.warning("[폴백] 시도 %d/%d 실패: %s", attempt+1, retry, e)
-                    time.sleep(0.5)
+            except Exception as e:
+                logger.error("[폴백 오류] %s", e)
+                return []
 
             return []
         finally:
@@ -1434,23 +1432,17 @@ class SmartScanner(QObject):
 
             logger.warning("[진단] 실시간 데이터에서 %d개 종목 감지", len(realtime_codes))
 
-            # 실시간 데이터도 없으면 기본 감시 리스트 사용 (모의투자 대응)
+            # 실시간 데이터도 없으면 GetCodeListByMarket으로 전체 종목 조회
             if not realtime_codes:
-                logger.warning("[모의투자 모드] opt10030 미응답 + 실시간 데이터 없음 → 기본 감시 리스트 사용")
-                default_codes = [
-                    "005930",  # 삼성전자
-                    "000660",  # SK하이닉스
-                    "068270",  # 셀트리온
-                    "005380",  # 현대차
-                    "006400",  # 삼성SDI
-                    "035720",  # 카카오
-                    "207940",  # 삼성바이오로직스
-                    "086790",  # 하나금융
-                    "051910",  # LG화학
-                    "028260",  # 삼성물산
-                ]
-                realtime_codes = default_codes
-                logger.warning("[기본 리스트] %d개 종목으로 스캔 시작", len(realtime_codes))
+                logger.warning("[폴백] opt10030 미응답 + 실시간 데이터 없음 → GetCodeListByMarket 전체 종목 조회")
+                try:
+                    all_codes = self._kiwoom.get_code_list_by_market("0")  # 0=코스피
+                    all_codes.extend(self._kiwoom.get_code_list_by_market("10"))  # 10=코스닥
+                    realtime_codes = all_codes[:200]  # 상위 200개만 (SetRealReg 부하 제한)
+                    logger.info("[GetCodeListByMarket] %d개 종목 확보 → SetRealReg 등록", len(realtime_codes))
+                except Exception as e:
+                    logger.error("[GetCodeListByMarket 실패] %s", e)
+                    realtime_codes = []
             if realtime_codes and len(realtime_codes) <= 10:
                 for code in realtime_codes:
                     logger.warning("[진단]   - %s", code)
