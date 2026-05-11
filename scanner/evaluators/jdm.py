@@ -38,14 +38,14 @@ class _JdmCtx:
 
 def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional["_JdmCtx"]:
     """슬롯·유효 파라미터 계산. 조기 차단 조건 해당 시 None 반환."""
-    # [FIX 2026-05-11] FID 13 거래대금 부정확 → rank(순위) 필터만 사용
-    # ── 거래대금 순위 기반 유동성 필터
-    if hasattr(cfg, 'min_daily_rank') and cfg.min_daily_rank:
-        rank = snap.rank if hasattr(snap, 'rank') else None
-        if not (rank is not None and rank > 0 and rank <= cfg.min_daily_rank):
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_LIQUIDITY",
-                f"거래대금 순위 미달 (rank={rank}, 기준={cfg.min_daily_rank})")
-            return None
+    # [FIX 2026-05-11] FID 13 거래대금 부정확 + rank=0 문제
+    # → 거래대금 필터 임시 비활성화, 거래량 기반으로 대체
+    # ── 거래량 기반 유동성 필터 (거래대금 대체)
+    min_volume = getattr(cfg, 'min_daily_volume', 100_000)  # 기본값: 10만주
+    if snap.volume > 0 and snap.volume < min_volume:
+        ScannerLogger.rejected(snap.code, snap.name, "JDM_LIQUIDITY",
+            f"거래량 미달 (volume={snap.volume:,}, 기준={min_volume:,})")
+        return None
 
     # ── 시가 대비 상승도 차단
     if snap.open_price > 0:
