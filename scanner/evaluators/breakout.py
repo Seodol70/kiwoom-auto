@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 def check_breakout(
     snap:                    "StockSnapshot",
     breakout_ratio:          float = 0.03,
-    volume_mult:             float = 1.0,
     pullback_from_high_pct:  float = 1.5,
     min_rising_bars:         int   = 2,
 ) -> Optional[str]:
@@ -33,28 +32,10 @@ def check_breakout(
         )
         return None
 
-    # [FIX 2026-05-11] FID 13 거래대금 부정확 → 분봉 거래량으로 변경
-    # [FIX 2026-05-11-v2] 분봉 데이터 5개 이상에서만 거래량 필터 검사 (데이터 부족 시 순위 필터 의존)
-    vols = list(snap.volumes_1min) if snap.volumes_1min else []
-
-    # 거래량 필터: 분봉 데이터 5개 이상 있을 때만 검사 (최소 샘플 크기)
-    if len(vols) >= 5 and volume_mult > 0:
-        recent_vols = vols[:-1]  # 직전 데이터들
-        avg_vol_1min = sum(recent_vols) / len(recent_vols)
-        cur_vol_1min = vols[-1]
-        if avg_vol_1min > 0 and cur_vol_1min < avg_vol_1min * volume_mult:
-            ScannerLogger.rejected(
-                snap.code, snap.name, "BREAKOUT",
-                f"거래량 미달 ({cur_vol_1min:,}주 < 평균 {avg_vol_1min:,.0f}주 × {volume_mult:.1f}배)",
-            )
-            return None
-    elif len(vols) < 5 and volume_mult > 0:
-        # 분봉 데이터 부족 시 로그만 남기고 계속 진행 (순위 기반 필터에 의존)
-        ScannerLogger.rejected(
-            snap.code, snap.name, "BREAKOUT",
-            f"분봉 데이터 부족 ({len(vols)}/5 필요) — 순위 필터로 대체",
-        )
-        # return None 안 함 — 진행 계속
+    # [REMOVED 2026-05-11-v3] FID 13 기반 분봉 거래량 필터 완전 제거
+    # 사유: 분봉 거래량(1~100주대)이 너무 작아서 배수 필터(0.5배)가 의미 없음
+    # 대체: 순위 기반 필터(min_daily_rank=100) + 체결강도 필터로 충분
+    # 참고: check_breakout_gate()에서 체결강도(min_chejan_strength) 검사
 
     if pullback_from_high_pct > 0 and snap.high_price > 0:
         pullback = (snap.current_price - snap.high_price) / snap.high_price * 100

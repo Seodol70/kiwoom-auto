@@ -30,9 +30,8 @@ class BreakoutStrategy(BaseStrategy):
         # 1. 기본 돌파 체크 (기존 check_breakout 로직)
         # cfg에 정의된 파라미터 사용
         breakout_reason = check_breakout(
-            snap, 
+            snap,
             breakout_ratio=cfg.breakout_ratio,
-            volume_mult=cfg.breakout_volume_mult,
             pullback_from_high_pct=cfg.breakout_pullback_from_high_pct,
             min_rising_bars=cfg.breakout_min_rising_bars
         )
