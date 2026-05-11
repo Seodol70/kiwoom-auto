@@ -38,13 +38,13 @@ class _JdmCtx:
 
 def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional["_JdmCtx"]:
     """슬롯·유효 파라미터 계산. 조기 차단 조건 해당 시 None 반환."""
-    # ── 수급 절대치 필터
+    # [FIX 2026-05-11] FID 13 거래대금 부정확 → rank(순위) 필터만 사용
+    # ── 거래대금 순위 기반 유동성 필터
     if hasattr(cfg, 'min_daily_rank') and cfg.min_daily_rank:
         rank = snap.rank if hasattr(snap, 'rank') else None
-        amt  = snap.trade_amount if hasattr(snap, 'trade_amount') else 0
-        if not (rank is not None and rank > 0 and rank <= cfg.min_daily_rank) \
-                and amt < cfg.min_trade_amount:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_LIQUIDITY", "수급 부족")
+        if not (rank is not None and rank > 0 and rank <= cfg.min_daily_rank):
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_LIQUIDITY",
+                f"거래대금 순위 미달 (rank={rank}, 기준={cfg.min_daily_rank})")
             return None
 
     # ── 시가 대비 상승도 차단

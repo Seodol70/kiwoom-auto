@@ -195,7 +195,8 @@ class ScannerPanel(QWidget):
             it_vol.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._table.setItem(r, 5, it_vol)
 
-            # 6: 거래대금
+            # 6: 거래대금 [정보용] — FID 13이 부정확하여 신호 판단에는 사용되지 않음
+            # 신호 판단은 분봉 거래량(volumes_1min) + 거래대금 순위(rank) 기반만 사용
             it_amt = QTableWidgetItem(format_trade_amount_korean(row.get("trade_amount", 0)))
             it_amt.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self._table.setItem(r, 6, it_amt)

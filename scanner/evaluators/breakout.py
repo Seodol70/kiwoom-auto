@@ -33,13 +33,18 @@ def check_breakout(
         )
         return None
 
-    avg_vol = snap.trade_amount / snap.current_price if snap.current_price else 0
-    if snap.trade_amount > 0 and (avg_vol <= 0 or snap.volume < avg_vol * volume_mult):
-        ScannerLogger.rejected(
-            snap.code, snap.name, "BREAKOUT",
-            f"거래량 부족 ({snap.volume:,} < 기준 {avg_vol * volume_mult:,.0f})",
-        )
-        return None
+    # [FIX 2026-05-11] FID 13 거래대금 부정확 → 분봉 거래량으로 변경
+    vols = list(snap.volumes_1min) if snap.volumes_1min else []
+    if len(vols) >= 2:
+        recent_vols = vols[:-1]  # 직전 데이터들
+        avg_vol_1min = sum(recent_vols) / len(recent_vols)
+        cur_vol_1min = vols[-1]
+        if avg_vol_1min > 0 and cur_vol_1min < avg_vol_1min * volume_mult:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "BREAKOUT",
+                f"거래량 미달 ({cur_vol_1min:,}주 < 평균 {avg_vol_1min:,.0f}주 × {volume_mult:.1f}배)",
+            )
+            return None
 
     if pullback_from_high_pct > 0 and snap.high_price > 0:
         pullback = (snap.current_price - snap.high_price) / snap.high_price * 100
