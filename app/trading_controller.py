@@ -698,13 +698,13 @@ class TradingController(QObject):
                     self.log_message.emit(f'⚠️ [EOD분할익절실패] {pos.name}({code}): {e}')
 
     def check_overnight_gap(self) -> None:
-        """EOD 포지션 익일 갭 확인"""
+        """EOD 포지션 익일 갭 확인 (Stage 1)"""
         _gap_up = float(getattr(self._scan_cfg, 'eod_gap_up_exit_pct', 2.0))
         _gap_dn = float(getattr(self._scan_cfg, 'eod_gap_down_exit_pct', -1.5))
         eod_positions = [(code, pos) for code, pos in list(self._order_mgr.positions.items()) if getattr(pos, 'eod_trade', False)]
         if not eod_positions:
             return
-        
+
         self.log_message.emit(f'🌅 [EOD갭체크] {len(eod_positions)}개 오버나잇 포지션 갭 확인...')
         for code, pos in eod_positions:
             if getattr(pos, 'avg_price', 0) <= 0:
@@ -724,6 +724,34 @@ class TradingController(QObject):
             else:
                 pos.overnight_held = True
                 self.log_message.emit(f'⏳ [EOD보합] {pos.name}({code}) 갭 {chg:+.2f}% — 트레일 스탑 모드로 전환')
+
+    def check_overnight_trend_break(self) -> None:
+        """EOD 포지션 익일 추세 체크 (Stage 3: 일봉 정배열 파괴 시 강제 청산)"""
+        from scanner.indicator_service import IndicatorService
+
+        eod_overnight = [(code, pos) for code, pos in list(self._order_mgr.positions.items())
+                         if getattr(pos, 'eod_trade', False) and getattr(pos, 'overnight_held', False)]
+        if not eod_overnight:
+            return
+
+        for code, pos in eod_overnight:
+            # 포지션에 저장된 일봉 데이터 사용 (또는 snapshot에서)
+            daily_closes = getattr(pos, '_snapshot_daily_closes', None)
+            if not daily_closes or len(daily_closes) < 20:
+                continue
+
+            current_price = float(getattr(pos, 'current_price', 0))
+            if current_price <= 0:
+                continue
+
+            # 일봉 정배열 재확인
+            align_ctx = IndicatorService.check_daily_alignment(daily_closes, current_price)
+            if not align_ctx.get('is_aligned', False):
+                self.log_message.emit(f'📉 [EOD추세파괴] {pos.name}({code}) 일봉 정배열 깨짐 — {pos.qty}주 즉시 시장가 매도')
+                if hasattr(self._order_mgr, '_audit') and self._order_mgr._audit:
+                    self._order_mgr._audit.log_sell_decision(code, 'EOD 추세파괴 (일봉정배열)', pos.current_price)
+                self._order_mgr.force_exit(code, pos.name, pos.qty, reason='EOD 추세파괴 (일봉정배열)')
+                pos.overnight_held = False
 
     def liquidate_phase1_positions(self, forced: bool=False) -> None:
         """Phase1 모닝 스캘핑 포지션 정리"""
