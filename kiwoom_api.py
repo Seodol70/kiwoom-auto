@@ -396,14 +396,25 @@ class KiwoomManager(KiwoomProtocol):
                 logger.warning("[opt10030] TR 요청 실패 (페이지 %d)", page + 1)
                 break
 
+            # 응답 상세 분석 로그
             chunk = self._tr_data.get("rows", [])
+            tr_data_keys = list(self._tr_data.keys())
+            logger.info("[opt10030분석] 페이지 %d TR응답: _tr_data 키=%s, rows길이=%d, prev_next=%s",
+                       page + 1, tr_data_keys, len(chunk), self._tr_prev_next)
+
             page += 1
             if not chunk:
-                logger.debug("[opt10030] 페이지 %d 데이터 없음", page)
+                logger.warning("[opt10030분석] 페이지 %d 데이터 없음 — _tr_data 내용 상세: %s",
+                              page, str(self._tr_data)[:500])
                 break
 
             all_rows.extend(chunk)
             logger.debug("[opt10030] 페이지 %d 수신 (%d행, 누적 %d)", page, len(chunk), len(all_rows))
+
+            # 첫 행 샘플 출력
+            if chunk and len(chunk) > 0:
+                first_row = chunk[0]
+                logger.debug("[opt10030샘플] 첫 행: %s", str(first_row)[:200])
 
             if len(all_rows) >= max_rows or self._tr_prev_next != "2":
                 break
@@ -1082,7 +1093,10 @@ class KiwoomManager(KiwoomProtocol):
             self._tr_timeout_timer.setSingleShot(True)
             self._tr_timeout_timer.timeout.connect(self._tr_loop.quit)
             self._tr_timeout_timer.start(timeout_ms)
+            logger.debug("[CommRqData] exec_() 진입 전 - rq=%s, _tr_data=%s", rq_name, self._tr_data)
             self._tr_loop.exec_()
+            logger.debug("[CommRqData] exec_() 복귀 후 - rq=%s, _tr_data=%s, prev_next=%s",
+                        rq_name, list(self._tr_data.keys()) if self._tr_data else "EMPTY", self._tr_prev_next)
             self._tr_timeout_timer.stop()
             self._tr_timeout_timer = None
             self._tr_loop = None
@@ -1185,6 +1199,7 @@ class KiwoomManager(KiwoomProtocol):
         _spl_msg: str,
     ) -> None:
         self._tr_prev_next = str(prev_next).strip()
+        logger.info("[TR 수신 진입] rq=%s tr=%s prev_next=%s — 콜백 실행됨", rq_name, tr_code, self._tr_prev_next)
         logger.debug("[TR 수신] rq=%s tr=%s prev_next=%s screen=%s", rq_name, tr_code, self._tr_prev_next, screen_no)
 
         if rq_name == "stock_info":
@@ -1227,12 +1242,21 @@ class KiwoomManager(KiwoomProtocol):
             self._tr_data = {"rows": self._parse_holdings_rows(tr_code, rq_name)}
 
         elif rq_name in ("거래대금상위", "전일거래량상위"):
+            logger.info("[opt10030콜백진입] rq=%s 경로 진입 확인", rq_name)
             rows = self._parse_top_volume_rows(tr_code, rq_name)
-            logger.debug("[%s] 파싱 결과: %d행, prev_next=%s", rq_name, len(rows), self._tr_prev_next)
+            logger.info("[%s분석] 파싱 결과: %d행, prev_next=%s, tr_code=%s",
+                       rq_name, len(rows), self._tr_prev_next, tr_code)
+            if rows:
+                logger.info("[%s샘플] 첫 행: %s", rq_name, str(rows[0])[:300])
+            else:
+                # 0개인 경우 원본 데이터 확인
+                logger.warning("[%s분석] 0개 반환 — RecordCnt=%s", rq_name,
+                              self._get_comm_data(tr_code, rq_name, 0, "RecordCnt") if hasattr(self, '_get_comm_data') else "?")
             self._tr_data = {"rows": rows}
+            logger.info("[opt10030설정완료] _tr_data={'rows': %d개 행}", len(rows))
 
         else:
-            logger.debug("[TR 수신] 알 수 없는 rq_name=%s - 처리 스킵", rq_name)
+            logger.warning("[TR 수신] 알 수 없는 rq_name='%s' 처리 스킵 (opt10030 예상했음)", rq_name)
 
         if self._tr_loop and self._tr_loop.isRunning():
             self._tr_loop.quit()
