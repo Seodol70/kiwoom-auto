@@ -338,7 +338,7 @@ class TradingController(QObject):
         return True, f"✅ [수동매수] {name}({code}) {qty}주 {otype_str} 요청 완료 (ID: {order_no})"
 
     def get_chart_data(self, code: str) -> dict[str, Any]:
-        """차트 표시용 데이터 조회 — 캔들, 포지션, 위험 파라미터"""
+        """차트 표시용 데이터 조회 — 실시간 감시 데이터에서 현재가 조회"""
         result = {
             "code": code,
             "closes": [],
@@ -353,41 +353,29 @@ class TradingController(QObject):
             return result
 
         try:
-            from datetime import datetime, time
-            now_time = datetime.now().time()
-            is_trading_hours = time(9, 0) <= now_time < time(15, 30)
+            # SmartScanner 실시간 감시 데이터에서 현재가 조회
+            if hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
+                snap = self._smart_scanner.store.get_snapshot(code)
+                if snap and snap.current_price > 0:
+                    # 실시간 현재가 1개만 리스트로 반환 (차트 호환성)
+                    result["closes"] = [snap.current_price]
+                    result["volumes"] = [snap.volume if hasattr(snap, 'volume') else 0]
+                    result["name"] = snap.name if hasattr(snap, 'name') else self._kiwoom.get_stock_name(code)
+                else:
+                    logger.warning("[차트데이터] %s 실시간 감시 데이터 없음 — 종목명만 조회", code)
+                    result["name"] = self._kiwoom.get_stock_name(code)
+            else:
+                logger.warning("[차트데이터] %s SmartScanner store 없음", code)
+                result["name"] = self._kiwoom.get_stock_name(code)
 
-            # 1. 캔들 데이터 (최근 20분 1분봉)
-            candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=20) if is_trading_hours else None
-
-            # 1분봉 없거나 장 종료 후 → 일봉 사용
-            if not candles:
-                candles = self._kiwoom.get_daily_candles(code, count=20)
-
-            # 캔들이 있으면 데이터 추출
-            if candles:
-                result["closes"] = [c['close'] for c in candles]
-                result["volumes"] = [c.get('volume', 0) for c in candles]
-
-                # 장 중 시간에 일봉을 사용 중이면, 현재가로 마지막 값을 덮어씀
-                if is_trading_hours and len(candles) <= 20:  # 20개 이하 = 일봉 데이터
-                    if hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
-                        snap = self._smart_scanner.store.get_snapshot(code)
-                        if snap and snap.current_price > 0:
-                            # 마지막 캔들(일봉)의 close를 현재가로 업데이트
-                            result["closes"][-1] = snap.current_price
-
-            # 2. 종목명
-            result["name"] = self._kiwoom.get_stock_name(code)
-
-            # 3. 포지션 정보
+            # 포지션 정보
             pos = self._order_mgr.positions.get(code)
             result["position"] = pos
 
-            # 4. 전략 파라미터
+            # 전략 파라미터
             result["sl_pct"] = float(getattr(self._scan_cfg, "jdm_stop_loss_pct", -1.5))
 
-            # 5. 트레일 스탑가
+            # 트레일 스탑가
             if pos and hasattr(pos, "trail_stop_price"):
                 result["trail_price"] = pos.trail_stop_price
 
