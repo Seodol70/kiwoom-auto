@@ -357,26 +357,30 @@ class TradingController(QObject):
             now_time = datetime.now().time()
             is_trading_hours = time(9, 0) <= now_time < time(15, 30)
 
-            # 1. 캔들 데이터 (1분봉 100개, 없으면 일봉 40개)
+            # 1. 캔들 데이터 (1분봉 100개 우선)
             candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=100)
 
-            # 장 중 1분봉 실패 → 실시간 감시 데이터에서 현재가 보충
-            if not candles and is_trading_hours:
-                if hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
-                    snap = self._smart_scanner.store.get_snapshot(code)
-                    if snap and snap.current_price > 0:
-                        # 실시간 현재가를 기반으로 더미 캔들 생성 (최근 100분)
-                        candles = [{'close': snap.current_price, 'volume': 0} for _ in range(100)]
-                        logger.info("[차트데이터] %s 실시간 감시 데이터로 차트 구성 (현재가: %d원)",
-                                   code, snap.current_price)
-
-            # 여전히 없으면 일봉 사용
+            # 1분봉 없으면 일봉으로 대체
             if not candles:
                 candles = self._kiwoom.get_daily_candles(code, count=40)
+                if candles and is_trading_hours:
+                    logger.info("[차트데이터] %s 일봉 데이터로 차트 구성 (1분봉 로드 실패, 현재가 업데이트 필요)",
+                               code)
 
+            # 캔들이 있으면 데이터 추출
             if candles:
                 result["closes"] = [c['close'] for c in candles]
                 result["volumes"] = [c.get('volume', 0) for c in candles]
+
+                # 장 중 시간에 일봉을 사용 중이면, 현재가로 마지막 값을 덮어씀
+                if is_trading_hours and len(candles) <= 40:  # 40개 이하 = 일봉 데이터
+                    if hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
+                        snap = self._smart_scanner.store.get_snapshot(code)
+                        if snap and snap.current_price > 0:
+                            # 마지막 캔들(일봉)의 close를 현재가로 업데이트
+                            result["closes"][-1] = snap.current_price
+                            logger.info("[차트데이터] %s 일봉 종가 → 현재가 업데이트 (%d → %d원)",
+                                       code, candles[-1]['close'], snap.current_price)
 
             # 2. 종목명
             result["name"] = self._kiwoom.get_stock_name(code)
