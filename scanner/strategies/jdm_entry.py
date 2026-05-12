@@ -30,8 +30,11 @@ class JdmStrategy(BaseStrategy):
         """
         # 핵심 판정 로직 위임
         reason = check_jdm_entry(snap, cfg)
+        logger.warning("[JdmStrategy.evaluate] %s(%s) check_jdm_entry → reason=%s",
+                      snap.code, snap.name, "PASS" if reason else "None")
         if reason is None:
             return None
+        logger.warning("[JdmStrategy] %s(%s) check_jdm_entry PASS → ScanSignal 생성", snap.code, snap.name)
 
         # AI 피처 추출 (학습용 데이터 수집)
         ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
@@ -47,7 +50,7 @@ class JdmStrategy(BaseStrategy):
             ai_features["change_pct"] = change_pct
 
         return ScanSignal(
-            snap.code, snap.name, self.name, snap.current_price, reason,
+            snap.code, snap.name, self.name, reason, snap.current_price,
             is_warmup=is_warmup,
             values=ai_features
         )

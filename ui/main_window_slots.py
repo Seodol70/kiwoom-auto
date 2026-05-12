@@ -82,9 +82,13 @@ class MainWindowSlots:
             self._today_watch.pop(d.get("code", ""), None)
         else:
             line = f"✅ {d['side']} — {d['name']}({d['code']}) {d['filled_qty']}주 @{d['filled_price']:,}원"
-            
+
         self.append_log(line)
-        if self._tg: self._tg.send(line)
+        if self._tg:
+            try:
+                self._tg.send(line)
+            except Exception as e:
+                logger.warning("[텔레그램] 전송 실패: %s", e)
         
         self._on_portfolio_refresh({
             "cash": self.order_mgr.cash,

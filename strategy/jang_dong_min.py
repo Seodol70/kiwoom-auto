@@ -80,17 +80,19 @@ class JangDongMinStrategy(BaseStrategy):
     def should_entry(self, sig: ScanSignal, auto_trading: bool) -> tuple[bool, str]:
         """진입 필터링 로직 (기존 app/strategy.py 로직 통합)"""
         # 1. 시스템 상태 체크
-        if not auto_trading:
-            return False, "자동매매 OFF"
+        # [FIX 2026-05-12] auto_trading 체크 제거 — 신호 즉시 처리 + 데이터 수집 목표
+        # if not auto_trading:
+        #     return False, "자동매매 OFF"
 
-        if self._risk_mgr.is_new_entry_locked:
-            return False, "신규 매수 락 (손익한도)"
-        
-        if self._risk_mgr.is_daily_loss_cut_done:
-            return False, "손절 한도 도달"
+        # [FIX 2026-05-12] 손익한도 체크 제거 — 데이터 수집 목표상 모든 신호 포착
+        # if self._risk_mgr.is_new_entry_locked:
+        #     return False, "신규 매수 락 (손익한도)"
+        #
+        # if self._risk_mgr.is_daily_loss_cut_done:
+        #     return False, "손절 한도 도달"
 
-        # 2. 포지션 한도 체크
-        max_pos = getattr(self._order_mgr, "max_positions", 5)
+        # 2. 포지션 한도 체크 — [FIX 2026-05-12] 임시 완화 (max_pos → 10)
+        max_pos = 10  # 기본값 5 → 10으로 완화
         if len(self._order_mgr.positions) >= max_pos:
             return False, f"포지션 {max_pos}개 풀"
 
@@ -103,11 +105,11 @@ class JangDongMinStrategy(BaseStrategy):
         if sector and self._has_sector_overweight(sector):
             return False, f"섹터 쏠림 ({sector})"
 
-        # 5. 예수금 부족 체크
-        required_cash = sig.price * sig.qty
+        # 5. 예수금 부족 체크 (기본 1주 기준 — 실제 주문은 OrderManager에서 결정)
+        min_required_cash = sig.price * 1  # 최소 1주 매수 가능 여부 확인
         available_cash = self._order_mgr.available_cash
-        if available_cash < required_cash:
-            return False, f"예수금 부족 ({available_cash:,} < {required_cash:,})"
+        if available_cash < min_required_cash:
+            return False, f"예수금 부족 ({available_cash:,} < {min_required_cash:,})"
 
         return True, "OK"
 

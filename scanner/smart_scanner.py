@@ -185,12 +185,14 @@ class SmartScanner(QObject):
     index_updated = pyqtSignal(str, float, float) # [NEW] (idx_name, price, pct) — 실시간 지수 갱신
     watch_list_updated = pyqtSignal(list) # [NEW] UI 갱신용 종목 리스트 (list[dict])
 
-    def __init__(self, kiwoom, cfg: Optional[SmartScannerConfig] = None, 
-                 notification_mgr: Optional["NotificationManager"] = None) -> None:
+    def __init__(self, kiwoom, cfg: Optional[SmartScannerConfig] = None,
+                 notification_mgr: Optional["NotificationManager"] = None,
+                 on_signal_callback: Optional[callable] = None) -> None:
         super().__init__()
         self._kiwoom = kiwoom
         self.cfg     = cfg or SmartScannerConfig()
         self.notif_mgr = notification_mgr
+        self._on_signal_callback = on_signal_callback  # 크로스 스레드 signal 대체용
 
 
         # ① DataFrame 캐시
@@ -433,6 +435,7 @@ class SmartScanner(QObject):
         try:
             if self._ui_queue:
                 ui_rows = self._ui_queue.pop()
+                logger.warning("[UI큐] %d개 행 emit", len(ui_rows))
                 self.watch_list_updated.emit(ui_rows)
         except Exception as e:
             logger.debug("UI 큐 처리 오류: %s", e)
@@ -634,16 +637,12 @@ class SmartScanner(QObject):
                     for code, row in top_df.iterrows():
                         snap = self.store.get_snapshot(code)
                         if not snap: continue
-                        
-                        # [NEW] 마이너스 종목 필터링 (사용자 요청)
-                        if snap.change_pct < 0:
-                            continue
-                        
+
                         # 감시 대상인 경우에만 전략 평가 실행
                         sig_type = None
                         if code in subscribed:
                             sig_type = self._evaluate(snap)
-                        
+
                         # UI 행 데이터 생성
                         ui_row = self._build_ui_row(snap, sig_type)
                         # [DEBUG] 거래대금 추적 (UI 행 생성 시점)
@@ -798,12 +797,17 @@ class SmartScanner(QObject):
 
             # [NEW] AI 피처용 지수 히스토리 추출
             idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
-            sig = strat_obj.evaluate(snap, self.cfg, index_history=idx_hist)
-            if sig is not None:
-                sig.trend_level = int(getattr(snap, "trend_level", 0))
-                sig.trend_prev_level = int(getattr(snap, "trend_prev_level", 0))
-                self._emit(sig)
-                return strategy_name
+            try:
+                sig = strat_obj.evaluate(snap, self.cfg, index_history=idx_hist)
+                logger.warning("[_evaluate] %s(%s) [%s] sig=%s", snap.code, snap.name, strategy_name, sig)
+                if sig is not None:
+                    sig.trend_level = int(getattr(snap, "trend_level", 0))
+                    sig.trend_prev_level = int(getattr(snap, "trend_prev_level", 0))
+                    logger.warning("[_evaluate] _emit() 호출: %s(%s)", snap.code, snap.name)
+                    self._emit(sig)
+                    return strategy_name
+            except Exception as e:
+                logger.error("[_evaluate 오류] %s(%s) [%s] %s", snap.code, snap.name, strategy_name, e)
         
         return None
         if not getattr(self.cfg, "exploration_mode", False):
@@ -873,6 +877,19 @@ class SmartScanner(QObject):
 
         # ④ 시그널 발행 (주문 엔진/UI 전송)
         self.signal_detected.emit(sig)
+
+        # ④-1 크로스 스레드 workaround: TradingController에 직접 콜백 호출 (2026-05-12)
+        logger.warning("[_emit 진단] callback=%s, sig_code=%s",
+                      hasattr(self, '_on_signal_callback'), sig.code)
+        if hasattr(self, '_on_signal_callback') and self._on_signal_callback:
+            logger.warning("[_emit] callback 호출 시작: %s(%s)", sig.name, sig.code)
+            try:
+                self._on_signal_callback(sig)
+                logger.warning("[_emit] callback 호출 완료: %s(%s)", sig.name, sig.code)
+            except Exception as e:
+                logger.error("[신호콜백 오류] %s", e)
+        else:
+            logger.warning("[_emit] callback이 None! 신호 처리 불가")
 
 
     # -----------------------------------------------------------------------

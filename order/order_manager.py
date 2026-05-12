@@ -282,6 +282,11 @@ class OrderManager(QObject):
             logger.info("[OrderManager] AppState 세션 손익 복구: %s원", f"{self.daily_realized_pnl:,}")
         logger.info("[OrderManager] AppState 주입 완료")
 
+    def set_config(self, cfg):
+        """Config 주입 (TradingController에서 호출) — 2026-05-12"""
+        self._scan_cfg = cfg
+        logger.info("[OrderManager] Config 주입 완료")
+
     def set_health_monitor(self, monitor):
         """HealthMonitor 주입 (MainWindow에서 호출)"""
         self._health = monitor
@@ -604,7 +609,20 @@ class OrderManager(QObject):
         try:
             _RISK = cfg.RISK
             _mx = float(_RISK.get("max_change_pct", 15.0))
-            _info = self._kiwoom.get_stock_info(code)
+
+            # [FIX 2026-05-12] opt10001 타임아웃 문제 해결: snap store 캐시 사용
+            _info = None
+            if snap:
+                _info = {
+                    "current_price": snap.current_price,
+                    "change_pct": snap.change_pct,
+                    "sector": getattr(snap, "sector", ""),
+                }
+                logger.debug("[매수정보] snap store 캐시 사용: %s", code)
+
+            # fallback: opt10001 조회 (캐시 없을 때만)
+            if _info is None:
+                _info = self._kiwoom.get_stock_info(code)
 
             if _info is None:
                 logger.warning("[매수거절] %s(%s) 실시간 정보 조회 실패 (opt10001)", name, code)

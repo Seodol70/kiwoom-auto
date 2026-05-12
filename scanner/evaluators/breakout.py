@@ -73,31 +73,47 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
     """
     BREAKOUT 확인 후 진입 가능 여부를 검증하는 공통 게이트.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     now = datetime.now().time()
+    logger.warning("[check_breakout_gate] 시작: %s(%s) now=%s", snap.code, snap.name, now)
+
     if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
-        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_TIME",
-            f"진입 허용 시간 아님 ({cfg.entry_start_time}~{cfg.entry_end_time})")
+        msg = f"진입 허용 시간 아님 ({cfg.entry_start_time}~{cfg.entry_end_time})"
+        logger.warning("[check_breakout_gate] 시간필터 거절: %s", msg)
+        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_TIME", msg)
         return None
 
     _slot       = _resolve_time_slot(now, cfg)
     _eff_ch_max = _get_slot_value(_slot, cfg, "max_change_pct", cfg.max_change_pct)
     _snap_chg   = float(getattr(snap, "change_pct", 0) or 0)
+    logger.warning("[check_breakout_gate] 등락률 체크: snap=%s, max=%s, slot=%s",
+                  _snap_chg, _eff_ch_max, _slot)
     if _snap_chg >= _eff_ch_max:
-        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_CHGPCT",
-            f"[{_slot}] 등락률 {_snap_chg:.2f}% ≥ 구간 상한 {_eff_ch_max:.0f}%")
+        msg = f"[{_slot}] 등락률 {_snap_chg:.2f}% ≥ 구간 상한 {_eff_ch_max:.0f}%"
+        logger.warning("[check_breakout_gate] 등락률 거절: %s", msg)
+        ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_CHGPCT", msg)
         return None
 
     _eff_chejan = _get_slot_value(_slot, cfg, "min_chejan_strength", cfg.min_chejan_strength)
+    logger.warning("[check_breakout_gate] 체결강도 체크: snap=%s, min=%s, slot=%s",
+                  snap.chejan_strength, _eff_chejan, _slot)
     if snap.chejan_strength < _eff_chejan:
+        msg = f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%"
+        logger.warning("[check_breakout_gate] 체결강도 거절: %s", msg)
         ScannerLogger.near_miss(
             snap.code, snap.name, "BREAKOUT_CHEJAN",
             actual=snap.chejan_strength, threshold=_eff_chejan,
-            reason=f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%",
+            reason=msg,
         )
         return None
 
+    # BREAKOUT 체결강도 상한 — 슬롯별 차등화 (2026-05-12: OPENING 극단 완화)
     if _slot == "MORNING":
         _chejan_max = getattr(cfg, "breakout_chejan_max_morning", 950.0)
+    elif _slot == "OPENING":
+        _chejan_max = getattr(cfg, "breakout_chejan_max_opening", 1500.0)  # OPENING: 극한 완화
     else:
         _chejan_max = getattr(cfg, "breakout_chejan_max", 800.0)
     if snap.chejan_strength >= _chejan_max:
@@ -108,17 +124,20 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
         )
         return None
 
-    _rsi_max = getattr(cfg, "breakout_rsi_max", 80.0)
-    if snap.rsi > 0 and snap.rsi >= _rsi_max:
-        ScannerLogger.near_miss(
-            snap.code, snap.name, "BREAKOUT_RSI_MAX",
-            actual=snap.rsi, threshold=_rsi_max,
-            reason=f"[{_slot}] RSI 과매수 차단 — {snap.rsi:.1f} ≥ {_rsi_max:.1f}",
-        )
-        return None
+    # BREAKOUT RSI 상한 — OPENING 슬롯에서는 스킵 (2026-05-12: 극단 변동성 대응)
+    if _slot != "OPENING":
+        _rsi_max = getattr(cfg, "breakout_rsi_max", 80.0)
+        if snap.rsi > 0 and snap.rsi >= _rsi_max:
+            ScannerLogger.near_miss(
+                snap.code, snap.name, "BREAKOUT_RSI_MAX",
+                actual=snap.rsi, threshold=_rsi_max,
+                reason=f"[{_slot}] RSI 과매수 차단 — {snap.rsi:.1f} ≥ {_rsi_max:.1f}",
+            )
+            return None
 
-    r_vwap = check_vwap_filter(snap)
-    if r_vwap is None:
-        return None
+    # VWAP 필터 — 모든 슬롯에서 스킵 (2026-05-12: VWAP 지표 신뢰도 낮음)
+    r_vwap = "VWAP 필터 비활성화"
 
-    return f"[{_slot}] 체결강도 {snap.chejan_strength:.0f}% | 등락률 {_snap_chg:.1f}% | {r_vwap}"
+    result = f"[{_slot}] 체결강도 {snap.chejan_strength:.0f}% | 등락률 {_snap_chg:.1f}% | {r_vwap}"
+    logger.warning("[check_breakout_gate] 완료(통과): %s(%s) → %s", snap.code, snap.name, result)
+    return result

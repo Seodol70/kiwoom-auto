@@ -78,6 +78,7 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         # 상태 동기화 (AppContext에서 이미 _ctx 주입됨)
         self.order_mgr.set_state(self.state)
         self.order_mgr.set_health_monitor(self._health_monitor)
+        self.order_mgr.set_config(self._scan_cfg)  # [FIX 2026-05-12] config 주입
         self._tg = getattr(self.app_context, "tg_bot", None)
 
         # 서브 시스템 설정 (Mixin 및 로컬 메서드)
@@ -134,7 +135,7 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         # 60초(60,000) -> 120초(120,000)로 상향 조정 (config 연동)
         scan_interval = int(getattr(self._scan_cfg, "scan_interval", 120.0)) * 1000
         self._scan_refresh_timer.start(scan_interval)
-        
+
         # 2. 스마트 스캐너 시작 (백그라운드 루프 시동)
         if hasattr(self, "_smart_scanner"):
             self._smart_scanner.start()
@@ -142,6 +143,13 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
 
         # 초기 스캔 즉시 실행
         QTimer.singleShot(1000, self.trading_controller.run_periodic_scan)
+
+        # [NEW 2026-05-12] 자동매매 자동 시작
+        if not self.state.auto_trading:
+            self.state.auto_trading = True
+            self.header.set_auto_checked(True)
+            self.append_log("🟢 [자동시작] 자동매매 시스템이 자동으로 시작되었습니다.")
+
         self.append_log("🚀 [시스템] 로그인 후 자동 동기화 및 스캔 시작")
 
     def _run_feedback_loop(self) -> None:

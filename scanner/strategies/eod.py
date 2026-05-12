@@ -43,7 +43,7 @@ class EODStrategy(BaseStrategy):
         ai_features["eod_trade"] = True
 
         return ScanSignal(
-            snap.code, snap.name, self.name, snap.current_price, eod_reason,
+            snap.code, snap.name, self.name, eod_reason, snap.current_price,
             is_warmup="[WARMUP]" in eod_reason,
             values=ai_features
         )

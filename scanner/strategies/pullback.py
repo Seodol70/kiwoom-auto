@@ -61,7 +61,7 @@ class PullbackStrategy(BaseStrategy):
             ai_features["change_pct"] = change_pct
 
         return ScanSignal(
-            snap.code, snap.name, self.name, snap.current_price, reason,
+            snap.code, snap.name, self.name, reason, snap.current_price,
             is_warmup=False,
             values=ai_features
         )

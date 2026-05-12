@@ -106,6 +106,8 @@ class TradingController(QObject):
         # [NEW] SmartScanner 신호를 주문 모듈과 연결 (2026-05-07 수정)
         if self._smart_scanner:
             self._smart_scanner.signal_detected.connect(self._on_signal_from_scanner)
+            # [FIX 2026-05-12] 크로스 스레드 signal emit 문제 해결: callback 직접 등록
+            self._smart_scanner._on_signal_callback = self._on_signal_from_scanner
 
     def _on_signal_from_scanner(self, sig) -> None:
         """SmartScanner에서 발생한 신호를 처리하여 주문 실행"""
@@ -232,6 +234,9 @@ class TradingController(QObject):
         passed, reason = self._strategy.should_entry(sig, self._auto_trading)
 
         if not passed:
+            msg = f"[진입거절] {sig.name}({sig.code}) {reason}"
+            logger.warning(msg)
+            self.log_message.emit(f"❌ {msg}")
             self.signal_rejected.emit(f"{sig.code}: {reason}")
             self._record_signal(sig)
             return False
@@ -248,7 +253,9 @@ class TradingController(QObject):
             
             msg = f"🤖 [AI분석] {sig.name}({sig.code}) 예상승률 {win_rate*100:.1f}%"
             if not ai_passed:
-                self.log_message.emit(f"{msg} → 진입 부적합 (거절, 기준 {ai_thr*100:.0f}%)")
+                reject_msg = f"[진입거절] {sig.name}({sig.code}) AI필터 거절 (예상승률 {win_rate*100:.1f}% < 기준 {ai_thr*100:.0f}%)"
+                logger.warning(reject_msg)
+                self.log_message.emit(f"❌ {reject_msg}")
                 self.signal_rejected.emit(f"{sig.code}: AI 거절 ({win_rate*100:.0f}%)")
                 return False
             
@@ -263,7 +270,9 @@ class TradingController(QObject):
             rs_score = snap.rs_score
             rs_thr = float(getattr(self._scan_cfg, "rs_threshold", 0.0))
             if rs_score < rs_thr:
-                self.log_message.emit(f"📉 [RS필터] {sig.name} RS={rs_score:.2f} (기준 {rs_thr:.2f}) → 거절")
+                reject_msg = f"[진입거절] {sig.name}({sig.code}) RS필터 거절 (RS={rs_score:.2f} < 기준 {rs_thr:.2f})"
+                logger.warning(reject_msg)
+                self.log_message.emit(f"❌ {reject_msg}")
                 self.signal_rejected.emit(f"{sig.code}: RS 필터 거절 ({rs_score:.2f})")
                 return False
             else:
@@ -645,8 +654,8 @@ class TradingController(QObject):
             self._scan_cfg.kospi_chg_pct = self._kospi_chg_pct
             self._scan_cfg.kosdaq_chg_pct = self._kosdaq_chg_pct
 
-        # 급락 여부 판단 (기준: -2.0%)
-        crash_limit = -2.0
+        # 급락 여부 판단 (기준: -3.0% — 2026-05-12: -2.0→-3.0, 학습 데이터 축적)
+        crash_limit = -3.0
         is_crash = (self._kospi_chg_pct <= crash_limit or self._kosdaq_chg_pct <= crash_limit)
 
         # 급락 감지 시 신호 발행 (이미 중지된 상태면 중복 발행 방지)
@@ -662,11 +671,9 @@ class TradingController(QObject):
 
     @pyqtSlot(float, float)
     def _on_market_crash_detected(self, kospi_pct: float, kosdaq_pct: float) -> None:
-        """지수 급락 신호 수신 — 자동매매 긴급 정지"""
-        if self._market_crash_off: return # 중복 처리 방지
-        self._market_crash_off = True
-        self._auto_trading = False
-        self.log_message.emit(f"🔴 [지수급락] 코스피 {kospi_pct}% / 코스닥 {kosdaq_pct}% — 자동매매 긴급 정지")
+        """지수 급락 신호 수신 — 학습 데이터 수집 중이므로 무시 (2026-05-12)"""
+        # 2026-05-12: 지수 급락 자동 정지 비활성화 (손해 감수하면서 데이터 수집)
+        return
 
     def check_eod_daytime_targets(self) -> None:
         """EOD 포지션 당일 수익률 목표 확인 (Stage 2)"""
