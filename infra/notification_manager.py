@@ -24,10 +24,10 @@ class NotificationManager:
     def info(self, title: str, message: str, telegram: bool = False, sound: bool = False) -> None:
         self.notify("INFO", title, message, telegram, sound)
 
-    def warning(self, title: str, message: str, telegram: bool = True, sound: bool = True) -> None:
+    def warning(self, title: str, message: str, telegram: bool = True, sound: bool = False) -> None:
         self.notify("WARNING", title, message, telegram, sound)
 
-    def critical(self, title: str, message: str, telegram: bool = True, sound: bool = True) -> None:
+    def critical(self, title: str, message: str, telegram: bool = True, sound: bool = False) -> None:
         self.notify("CRITICAL", title, message, telegram, sound)
 
     def notify(self, level: str, title: str, message: str, 
@@ -58,20 +58,3 @@ class NotificationManager:
         if telegram and self.telegram_bot:
             self.telegram_bot.send(full_msg)
 
-        # 3. 사운드 알림 (Windows 전용)
-        if sound and self._sound_enabled:
-            self._play_system_sound(level)
-
-    def _play_system_sound(self, level: str) -> None:
-        try:
-            import winsound
-            if level == "CRITICAL":
-                winsound.PlaySound("SystemHand", winsound.SND_ALIAS | winsound.SND_ASYNC)
-            elif level == "WARNING":
-                winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS | winsound.SND_ASYNC)
-            else:
-                winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
-        except ImportError:
-            pass # Windows 가 아닐 경우 무시
-        except Exception as e:
-            logger.debug("[Notification] 사운드 재생 실패: %s", e)
