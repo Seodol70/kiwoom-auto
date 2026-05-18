@@ -135,8 +135,11 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
             )
             return None
 
-    # VWAP 필터 — 모든 슬롯에서 스킵 (2026-05-12: VWAP 지표 신뢰도 낮음)
-    r_vwap = "VWAP 필터 비활성화"
+    # VWAP 필터 — 활성화 (2026-05-13: 거짓 신호 필터링)
+    r_vwap = check_vwap_filter(snap)
+    if not r_vwap:
+        logger.warning("[check_breakout_gate] VWAP 거절: %s(%s)", snap.code, snap.name)
+        return None
 
     result = f"[{_slot}] 체결강도 {snap.chejan_strength:.0f}% | 등락률 {_snap_chg:.1f}% | {r_vwap}"
     logger.warning("[check_breakout_gate] 완료(통과): %s(%s) → %s", snap.code, snap.name, result)

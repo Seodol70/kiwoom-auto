@@ -694,7 +694,6 @@ class KiwoomManager(KiwoomProtocol):
                 "pnl_pct": float,     수익률(%)
             }
         """
-        logger.info("get_balance 호출 - 계좌: '%s'", self._account)
         if not self._account:
             logger.warning("get_balance 계좌번호 없음 - 스킵")
             return {}   # sync_balance가 if not balance: 로 스킵
@@ -706,21 +705,32 @@ class KiwoomManager(KiwoomProtocol):
         # 3초 이내 응답 안 오면 빠른 포기 -> _tr_busy 점유 시간 단축 -> scan TR 충돌 최소화
         ok = self._comm_rq(TR_ACCOUNT, "balance", "2000", timeout_ms=3_000)
         if not ok:
-            logger.warning("get_balance TR 차단됨 - 잔고 동기화 스킵 (기존값 유지)")
+            logger.warning("[get_balance] TR 차단됨 (opw00001) - 잔고 동기화 스킵")
             return {}   # 빈 dict -> sync_balance가 if not balance: 로 스킵, 기존 self.cash 유지
+
+        logger.info("[get_balance] opw00001 응답 수신 완료")
 
         d = self._tr_data
         # 타임아웃으로 _tr_data가 비어 있으면(응답 미도착) 스킵 - 0원으로 덮어쓰기 방지
-        if not d.get("예수금"):
-            logger.warning("get_balance 응답 없음 또는 예수금 필드 비어 있음 - 스킵 (서버 응답 지연)")
+        if not d:
+            logger.warning("get_balance _tr_data가 완전히 비어 있음 (응답 미도착) - 스킵")
             return {}
-        cash = safe_int(d.get("예수금"))
+
+        # 예수금 필드명 차용: 주 필드("예수금") + 대체 필드들 시도
+        cash_raw = d.get("예수금") or d.get("주식예수금") or d.get("수표예수금")
+        if not cash_raw:
+            logger.warning(
+                "get_balance 예수금 필드 전부 비어 있음 - 응답 진단: %s (서버 응답 지연 또는 필드명 불일치)",
+                list(d.keys())
+            )
+            return {}
+        cash = safe_int(cash_raw)
 
         # 총평가금액,총매입금액은 opw00001 필드명이 서버마다 다를 수 있음
-        # -> 못 가져오면 holdings에서 직접 계산
-        total       = safe_int(d.get("총평가금액"))
-        invest      = safe_int(d.get("총매입금액"))
-        stock_value = safe_int(d.get("유가잔고평가액") or d.get("주식평가금액"))
+        # -> 못 가져오면 대체 필드명들 시도
+        total       = safe_int(d.get("총평가금액") or d.get("계좌총자산"))
+        invest      = safe_int(d.get("총매입금액") or d.get("주식매입금액"))
+        stock_value = safe_int(d.get("유가잔고평가액") or d.get("주식평가금액") or d.get("주식현재가총액"))
 
         # total/invest가 0이어도 holdings TR 추가 호출 금지 - _tr_busy 연장으로 8s 프리징 유발
         # -> 값이 없으면 cash만으로 대체 (다음 30s 갱신 시 정상화됨)
@@ -1121,10 +1131,16 @@ class KiwoomManager(KiwoomProtocol):
         logger.info("[CircuitBreaker] 모든 TR 차단 해제 완료 (%d건)", cnt)
 
     def _get_comm_data(self, tr_code: str, rq_name: str, index: int, field: str) -> str:
-        return self._ocx.dynamicCall(
-            "GetCommData(QString, QString, int, QString)",
-            tr_code, rq_name, index, field,
-        ).strip()
+        try:
+            result = self._ocx.dynamicCall(
+                "GetCommData(QString, QString, int, QString)",
+                tr_code, rq_name, index, field,
+            )
+            return (result or "").strip()
+        except Exception as e:
+            logger.debug("GetCommData 호출 오류: tr=%s rq=%s idx=%d field=%s - %s",
+                        tr_code, rq_name, index, field, e)
+            return ""
 
     def _get_repeat_cnt(self, tr_code: str, rq_name: str) -> int:
         return self._ocx.dynamicCall(
@@ -1298,11 +1314,19 @@ class KiwoomManager(KiwoomProtocol):
 
     def _parse_single(self, tr_code: str, rq_name: str, fields: list[str]) -> dict:
         result = {}
+        missing = []
         for f in fields:
             val = self._get_comm_data(tr_code, rq_name, 0, f)
             result[f] = val
             if not val:
-                logger.debug("필드 미획득: tr=%s rq=%s field=%s (무시)", tr_code, rq_name, f)
+                missing.append(f)
+        if missing and rq_name == "balance":
+            logger.warning(
+                "[%s] 필드 미획득: tr=%s fields=%s (미획득: %s)",
+                rq_name, tr_code, fields, missing
+            )
+        elif missing:
+            logger.debug("필드 미획득: tr=%s rq=%s missing=%s", tr_code, rq_name, missing)
         return result
 
     def _parse_candle_rows(self, tr_code: str, rq_name: str) -> list[dict]:

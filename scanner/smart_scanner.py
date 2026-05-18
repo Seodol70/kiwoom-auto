@@ -379,6 +379,7 @@ class SmartScanner(QObject):
         market_start = self.cfg.pre_filter_time  # 이미 dtime 타입
         market_end = dtime(15, 30, 0)
 
+        logger.warning("🔍 [SmartScanner] Pre-Filter 스케줄 확인 — 현재 %s, 예약 %s~%s", now, market_start, market_end)
 
         if market_start <= now <= market_end:
             logger.info("현재 시각이 장시간(%s~%s) — Pre-Filter 즉시 실행",
@@ -389,7 +390,12 @@ class SmartScanner(QObject):
             t = threading.Timer(secs, self._run_pre_filter)
             t.daemon = True
             t.start()
-            logger.info("Pre-Filter %.0f초 후 실행 예약", secs)
+            logger.warning("⏳ [SmartScanner] Pre-Filter %.0f초(= %s) 후 실행 예약", secs, (datetime.now() + timedelta(seconds=secs)).time())
+            # [FIX] Pre-Filter 대기 중에도 _prefiltered=True로 가정하고 실시간 루프 진행
+            # → UI에는 기존 캐시된 종목 표시, 09:00에 다시 갱신
+            if not self._prefiltered and secs <= 300:  # 5분 내라면 임시 활성화
+                self._prefiltered = True
+                logger.info("[2단계] Pre-Filter 대기 중(%.0f초)이지만 UI 먼저 활성화", secs)
 
 
         # 2단계 루프
@@ -609,9 +615,14 @@ class SmartScanner(QObject):
 
     def _realtime_loop(self) -> None:
         logger.info("▶ [2단계] Real-time Scan 시작")
+        _prefilter_logged = False
         while self._running:
             t0 = time.monotonic()
             if self._prefiltered:
+                if not getattr(self, "_loop_mode_logged", False):
+                    mode = "WATCH" if self._universe_paused else "SEARCH"
+                    logger.warning("[2단계 모드] %s 모드로 진입 (포지션 수: %d)", mode, len(self.order_mgr.positions) if hasattr(self, 'order_mgr') else "?")
+                    self._loop_mode_logged = True
                 if self._universe_paused:
                     # ====== WATCH 모드 ======
                     # Tier 1(보유 5개): 현재가 갱신은 _on_receive_real_data + order_manager 처리
@@ -629,6 +640,10 @@ class SmartScanner(QObject):
                     # [NEW] UI 갱신을 위해 상위 120종목 획득 (ScannerWorker 기존 동작 유지)
                     _top_n = max(120, int(getattr(self.cfg, "display_top_n", 50)))
                     top_df = self.store.top_by_trade_amount(_top_n)
+                    if top_df.empty:
+                        logger.warning("[2단계] SEARCH 모드인데 top_df가 비어 있음 (store에 데이터 없음)")
+                    elif len(top_df) < 10:
+                        logger.warning("[2단계] SEARCH 모드인데 종목 수 부족: %d개", len(top_df))
                     
                     ui_rows = []
                     subscribed = set(self.watch_q.subscribed)

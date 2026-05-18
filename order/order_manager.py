@@ -358,23 +358,31 @@ class OrderManager(QObject):
         try:
             self._roll_daily_state_if_needed()
             balance = self._kiwoom.get_balance()
-            server_cash = balance.get("cash", 0)
+            server_cash = balance.get("cash", 0) if balance else 0
+            balance_available = bool(balance)  # opw00001 응답 여부
 
-            # TR이 차단된 경우(재진입 방지) balance가 빈 dict → 잔고 갱신 스킵
-            if not balance:
-                import logging as _lg
-                _lg.getLogger(__name__).debug("sync_balance: TR 처리 중 — 잔고 동기화 스킵")
+            # opw00001 미응답 시에도 opw00018은 진행 (포지션 갱신)
+            holdings = self._kiwoom.get_holdings()
+
+            # 홀딩도 응답 없으면 스킵
+            if not holdings and not balance:
+                logger.debug("sync_balance: opw00001/opw00018 모두 응답 없음 — 동기화 스킵")
                 return self.cash
 
-            holdings = self._kiwoom.get_holdings()
+            # opw00018만 응답 있고 opw00001 미응답 시 (현재 상황)
+            if not balance_available and holdings:
+                logger.warning("sync_balance: opw00001 미응답 (예수금 불명) — opw00018만으로 포지션 갱신")
+                # 기존 예수금 유지하고 포지션만 갱신
+                server_cash = self.cash  # 기존값 유지
+                balance_available = True  # 이후 로직 실행
 
             # 홀딩 조회도 차단된 경우 — 포지션을 빈 목록으로 덮어쓰지 않음
             if not holdings and self.positions:
-                import logging as _lg
-                _lg.getLogger(__name__).debug("sync_balance: TR 처리 중 — 포지션 동기화 스킵")
+                logger.debug("sync_balance: opw00018 응답 없음 — 포지션 동기화 스킵")
                 # 예수금만 최신화
-                invested = sum(p.avg_price * p.qty for p in self.positions.values())
-                self.cash = max(0, server_cash - invested)
+                if balance_available:
+                    invested = sum(p.avg_price * p.qty for p in self.positions.values())
+                    self.cash = max(0, server_cash - invested)
                 return self.cash
 
             # opw00018 모의투자 서버는 매입가 필드를 반환하지 않음 → 기존 메모리값 보존
@@ -417,13 +425,16 @@ class OrderManager(QObject):
 
             # 모의투자 서버는 opw00001 "예수금"을 투자금 차감 없이 반환한다.
             # 실전투자 서버는 이미 차감된 "예수금" 또는 "D+2추정예수금"을 반환하므로 차감하지 않는다.
-            if self._kiwoom.is_mock:
-                invested = sum(p.avg_price * p.qty for p in self.positions.values())
+            invested = sum(p.avg_price * p.qty for p in self.positions.values())
+            if balance_available and self._kiwoom.is_mock:
                 self.cash = max(0, server_cash - invested)
-            else:
+            elif balance_available:
                 self.cash = server_cash
-            logger.info("잔고 동기화 완료 — 예수금 %s원 (서버=%s / 투자=%s) / 보유 %d종목",
-                        f"{self.cash:,}", f"{server_cash:,}", f"{invested:,}",
+            # else: balance_available=False이면 self.cash는 기존값 유지됨
+
+            status = "정상" if balance_available else "opw00001_미응답"
+            logger.info("잔고 동기화 완료(%s) — 예수금 %s원 (서버=%s / 투자=%s) / 보유 %d종목",
+                        status, f"{self.cash:,}", f"{server_cash:,}", f"{invested:,}",
                         len(self.positions))
             
             # [NEW] AppState 직접 업데이트 (Single Source of Truth)

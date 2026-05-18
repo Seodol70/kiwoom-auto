@@ -4,6 +4,7 @@ pullback.py — 눌림목(Pullback) 전략 신호 평가
 from typing import Optional, TYPE_CHECKING
 from scanner.scanner_logger import ScannerLogger
 from scanner.indicator_service import IndicatorService
+from .common import check_vwap_filter
 
 if TYPE_CHECKING:
     from scanner.models import StockSnapshot
@@ -29,13 +30,13 @@ def check_pullback_entry(
     if ema20 is None or rsi is None:
         return None
 
-    # 1. EMA20 근처 확인 (0% ~ +0.8% 이내)
+    # 1. EMA20 근처 확인 (0% ~ +2.0% 이내) — 2026-05-13: 0.8→2.0 (상승 추세 폭 확대)
     dist = (snap.current_price - ema20) / ema20 * 100
-    if not (0.0 <= dist <= 0.8):
+    if not (0.0 <= dist <= 2.0):
         return None
 
-    # 2. RSI 과열 해소 확인 (40 ~ 58)
-    if not (40.0 <= rsi <= 58.0):
+    # 2. RSI 상승 모멘텀 확인 (50 ~ 70) — 2026-05-13: 40~58→50~70 (강한 상승만 진입)
+    if not (50.0 <= rsi <= 70.0):
         return None
 
     # 3. 거래량 확인 (일시적 거래 감소 확인)
@@ -45,6 +46,11 @@ def check_pullback_entry(
         if vols[-1] > avg_v5 * 1.5:
              return None
 
-    reason = f"[PULLBACK] EMA20지지({dist:.2f}%) | RSI {rsi:.1f} | 추세Lv{tlv}"
+    # 4. VWAP 필터 — 활성화 (2026-05-13: 거짓 신호 필터링)
+    r_vwap = check_vwap_filter(snap)
+    if not r_vwap:
+        return None
+
+    reason = f"[PULLBACK] EMA20지지({dist:.2f}%) | RSI {rsi:.1f} | 추세Lv{tlv} | {r_vwap}"
     ScannerLogger.passed(snap.code, snap.name, "PULLBACK", reason)
     return reason
