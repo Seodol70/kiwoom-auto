@@ -1223,6 +1223,18 @@ class KiwoomManager(KiwoomProtocol):
         _msg: str,
         _spl_msg: str,
     ) -> None:
+        # [FIX 2026-05-19] rq_name 한글 인코딩 보정 (CP949 문제)
+        # opt10030("거래대금상위") 등 한글 rq_name이 깨지는 현상 해결
+        def _fix_enc(s: str) -> str:
+            try:
+                if any(ord(c) > 255 for c in s): return s
+                return s.encode('latin-1').decode('cp949')
+            except Exception: return s
+
+        rq_name = _fix_enc(rq_name)
+        tr_code = _fix_enc(tr_code)
+        record_name = _fix_enc(record_name)
+
         self._tr_prev_next = str(prev_next).strip()
         logger.info("[TR 수신 진입] rq=%s tr=%s prev_next=%s — 콜백 실행됨", rq_name, tr_code, self._tr_prev_next)
         logger.debug("[TR 수신] rq=%s tr=%s prev_next=%s screen=%s", rq_name, tr_code, self._tr_prev_next, screen_no)

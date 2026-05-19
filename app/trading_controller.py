@@ -453,6 +453,8 @@ class TradingController(QObject):
                 self.log_message.emit(f"🚀 [청산] {pos.name}({pos.code}) {reason}")
                 if any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑"]):
                     self._order_mgr.mark_stop_loss(pos.code)
+                    # [NEW 2026-05-19] 손절 종목 재진입 방지 (20분 냉각)
+                    self._strategy.mark_loss_exit(pos)
                 self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
                 count += 1
                 continue
@@ -471,6 +473,7 @@ class TradingController(QObject):
         now_min = now.hour * 60 + now.minute
         _is_opening = (9 * 60) <= now_min < (9.5 * 60)
         _is_midday = (11 * 60) <= now_min < (13 * 60)
+        _is_afternoon = (13 * 60) <= now_min < (14.5 * 60)  # 13:00~14:30
 
 
         partial_profit_pct = float(getattr(self._scan_cfg, "partial_profit_pct", 0.0))
@@ -516,6 +519,28 @@ class TradingController(QObject):
                 time_cut_min=int(
                     getattr(
                         self._scan_cfg, "time_cut_minutes_midday", self._scan_cfg.time_cut_minutes
+                    )
+                ),
+                partial_profit_pct=partial_profit_pct,
+                atr_trail_enabled=atr_trail_enabled,
+            )
+        elif _is_afternoon:
+            # 오후(13:00~14:30) — 변동성 높음, 더 보수적인 청산 정책
+            return ExitContext(
+                sl_pct=float(
+                    getattr(self._scan_cfg, "stop_loss_pct_afternoon", -1.0)
+                ),
+                trail_activation=self._scan_cfg.trail_activation_pct,
+                trail_tier1=float(
+                    getattr(
+                        self._scan_cfg, "trail_pct_tier1", 0.8
+                    )
+                ),
+                trail_tier2=self._scan_cfg.trail_pct_tier2,
+                trail_tier3=self._scan_cfg.trail_pct_tier3,
+                time_cut_min=int(
+                    getattr(
+                        self._scan_cfg, "time_cut_minutes_afternoon", 15
                     )
                 ),
                 partial_profit_pct=partial_profit_pct,

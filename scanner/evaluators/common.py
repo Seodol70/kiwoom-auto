@@ -51,6 +51,43 @@ def check_volume_surge(
     
     return None
 
+def check_trade_amount_surge(
+    snap: "StockSnapshot",
+    accel_mult: float = 2.0,
+    lookback: int = 5,
+) -> Optional[str]:
+    """
+    거래대금 급증 확인: 현재 봉 거래대금 >= 최근 N봉 평균 × accel_mult
+    거래대금 = 종가 × 거래량 (근사)
+
+    거래량 급증과 달리 '금액 기준'이므로 소형주 속임수 필터 효과가 큼.
+    """
+    closes  = list(snap.closes_1min  or [])
+    volumes = list(snap.volumes_1min or [])
+
+    need = lookback + 1
+    if len(closes) < need or len(volumes) < need:
+        return None
+
+    # 현재 봉 거래대금
+    curr_amount = closes[-1] * volumes[-1]
+
+    # 직전 lookback개 봉 평균 거래대금
+    past_amounts = [
+        closes[-(i + 1)] * volumes[-(i + 1)]
+        for i in range(1, lookback + 1)
+    ]
+    avg_amount = sum(past_amounts) / len(past_amounts)
+
+    if avg_amount <= 0:
+        return None
+
+    ratio = curr_amount / avg_amount
+    if ratio >= accel_mult:
+        return f"거래대금급증({ratio:.1f}배)"
+
+    return None
+
 def check_chejan_strength(
     snap: "StockSnapshot",
     min_strength: float,

@@ -77,6 +77,9 @@ class JangDongMinStrategy(BaseStrategy):
         super().__init__(order_mgr, risk_mgr, scan_cfg)
         self._snap_store = snap_store
 
+        # 손절 종목 추적 (동일 종목 재진입 방지): {code: loss_exit_time}
+        self._loss_exit_dict: dict[str, datetime] = {}
+
     def should_entry(self, sig: ScanSignal, auto_trading: bool) -> tuple[bool, str]:
         """진입 필터링 로직 (기존 app/strategy.py 로직 통합)"""
         # 1. 시스템 상태 체크
@@ -100,12 +103,24 @@ class JangDongMinStrategy(BaseStrategy):
         if sig.code in self._order_mgr.positions:
             return False, "이미 보유 중"
 
-        # 4. 섹터 쏠림 확인
+        # 4. [NEW 2026-05-19] 손절 종목 복구 대기 (동일 종목 재진입 방지 — 20분 냉각)
+        loss_exit_time = self._loss_exit_dict.get(sig.code)
+        if loss_exit_time:
+            elapsed_min = (datetime.now() - loss_exit_time).total_seconds() / 60.0
+            loss_cooldown_min = float(getattr(self._scan_cfg, "loss_exit_cooldown_minutes", 20.0))
+            if elapsed_min < loss_cooldown_min:
+                remaining = loss_cooldown_min - elapsed_min
+                return False, f"손절 복구 대기 ({remaining:.0f}분)"
+            else:
+                # 냉각 기간 종료 → 기록 삭제
+                del self._loss_exit_dict[sig.code]
+
+        # 5. 섹터 쏠림 확인
         sector = getattr(sig, "sector", "")
         if sector and self._has_sector_overweight(sector):
             return False, f"섹터 쏠림 ({sector})"
 
-        # 5. 예수금 부족 체크 (기본 1주 기준 — 실제 주문은 OrderManager에서 결정)
+        # 6. 예수금 부족 체크 (기본 1주 기준 — 실제 주문은 OrderManager에서 결정)
         min_required_cash = sig.price * 1  # 최소 1주 매수 가능 여부 확인
         available_cash = self._order_mgr.available_cash
         if available_cash < min_required_cash:
@@ -119,6 +134,16 @@ class JangDongMinStrategy(BaseStrategy):
             if getattr(pos, "sector", "") == sector
         )
         return sector_count >= 3
+
+    def mark_loss_exit(self, pos: Any) -> None:
+        """손절 종목을 기록하여 동일 종목 재진입 방지 (20분 냉각)"""
+        if not pos:
+            return
+        # 손절 (손익 < 0)일 때만 기록
+        if float(getattr(pos, "price_change_pct_vs_avg", 0.0)) < 0:
+            self._loss_exit_dict[pos.code] = datetime.now()
+            from logging_config import order_log
+            order_log.info("[전략] %s(%s) 손절 기록 — 20분간 재진입 차단", pos.code, pos.name)
 
     def update_state(self, pos: Any) -> None:
         """현재가 기반 peak_price 갱신 (기존 ExitStrategy.update_peak_price 통합)"""

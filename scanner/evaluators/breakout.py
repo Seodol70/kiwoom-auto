@@ -135,6 +135,24 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
             )
             return None
 
+    # [Phase A 2026-05-19] 거래대금 가속도 필터 (BREAKOUT에도 적용)
+    if getattr(cfg, "trade_amount_surge_enabled", True):
+        surge_mult = float(getattr(cfg, "trade_amount_surge_mult", 2.0))
+        # OPENING 슬롯: 거래대금 기준 완화
+        if _slot == "OPENING":
+            surge_mult = 1.2
+
+        from scanner.evaluators.common import check_trade_amount_surge
+        ta_result = check_trade_amount_surge(snap, accel_mult=surge_mult)
+        if ta_result is None:
+            logger.warning("[check_breakout_gate] 거래대금 미달: %s(%s) < %.1f배",
+                          snap.code, snap.name, surge_mult)
+            ScannerLogger.near_miss(
+                snap.code, snap.name, "BREAKOUT_TRADE_AMOUNT",
+                reason=f"거래대금 미달 — 현재 < 최근 5봉 평균 × {surge_mult:.1f}배",
+            )
+            return None
+
     # VWAP 필터 — 활성화 (2026-05-13: 거짓 신호 필터링)
     r_vwap = check_vwap_filter(snap)
     if not r_vwap:

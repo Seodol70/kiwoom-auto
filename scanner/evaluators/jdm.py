@@ -52,6 +52,77 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
             f"거래량 미달 (volume={snap.volume:,}, 기준={min_volume:,})")
         return None
 
+    # [NEW 2026-05-19] 최근 상승도 차단 — 뒤늦은 진입 방지
+    # 문제: "이미 오른 종목"에 뒤늦게 진입 → 직후 손절
+    # 해결: 최근 1분/5분 상승도가 크면 진입 거절
+    if len(snap.closes_1min) >= 6 and snap.closes_1min[-2] > 0:
+        recent_1min_chg = (snap.closes_1min[-1] - snap.closes_1min[-2]) / snap.closes_1min[-2] * 100
+        recent_5min_chg = (snap.closes_1min[-1] - snap.closes_1min[-6]) / snap.closes_1min[-6] * 100
+
+        recent_1min_max = float(getattr(cfg, "recent_candle_max_1min_pct", 2.0))
+        recent_5min_max = float(getattr(cfg, "recent_candle_max_5min_pct", 5.0))
+
+        if recent_1min_chg >= recent_1min_max:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
+                f"1분 급등 차단 — 지난 1분봉 {recent_1min_chg:+.2f}% (상한 {recent_1min_max:.1f}%)")
+            return None
+
+        if recent_5min_chg >= recent_5min_max:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
+                f"5분 급등 차단 — 지난 5분봉 {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%)")
+            return None
+
+    # [Phase A 2026-05-19] 갭 리버설 패턴 감지
+    # 시가 갭 상승 + 첫 음봉 고점 돌파 확인
+    if getattr(cfg, "gap_reversal_enabled", True):
+        gap_min  = float(getattr(cfg, "gap_up_min_pct", 2.0))
+        gap_max  = float(getattr(cfg, "gap_up_max_pct", 8.0))
+
+        if snap.prev_close > 0 and snap.open_price > 0:
+            gap_pct = (snap.open_price - snap.prev_close) / snap.prev_close * 100
+
+            if gap_min <= gap_pct <= gap_max:
+                # 갭 상승 확인: 직전 캔들 고가(첫 음봉의 고점) 돌파 여부 체크
+                highs  = list(snap.highs_1min  or [])
+                closes = list(snap.closes_1min or [])
+                opens  = list(snap.opens_1min  or [])
+
+                if len(closes) >= 2 and len(highs) >= 2 and len(opens) >= 2:
+                    prev_high   = highs[-2]           # 직전 캔들(첫 음봉)의 고가
+                    curr_close  = closes[-1]          # 현재 봉 종가
+
+                    # 직전 봉이 음봉(고점 < 시가)인지 확인
+                    prev_is_bearish = closes[-2] < opens[-2]
+
+                    if prev_is_bearish and curr_close > prev_high:
+                        # 거래대금 검증
+                        from scanner.evaluators.common import check_trade_amount_surge
+                        surge_mult = float(getattr(cfg, "trade_amount_surge_mult", 2.0))
+                        ta_result = check_trade_amount_surge(snap, accel_mult=surge_mult)
+                        if ta_result is None:
+                            ScannerLogger.rejected(snap.code, snap.name, "JDM_GAP_NO_ENERGY",
+                                f"갭 리버설 패턴: 음봉 돌파 확인됐으나 거래대금 미달 "
+                                f"(갭 {gap_pct:.1f}%, 고점 {prev_high:,} → 현재 {curr_close:,})")
+                            return None
+                        # 갭 리버설 + 거래대금 모두 확인 → snap에 태그 저장
+                        snap._gap_reversal_tag = f"GAP_REVERSAL({gap_pct:.1f}%↑)"
+
+    # [Phase A 2026-05-19] 거래대금 가속도 필터 (갭 비관련 일반 신호)
+    if getattr(cfg, "trade_amount_surge_enabled", True):
+        surge_mult = float(getattr(cfg, "trade_amount_surge_mult", 2.0))
+        # OPENING 슬롯: 거래대금 기준 완화 (장 초반은 자연스럽게 높음)
+        now_for_slot = datetime.now().time()
+        slot_for_check = _resolve_time_slot(now_for_slot, cfg)
+        if slot_for_check == "OPENING":
+            surge_mult = 1.2  # OPENING은 완화 (2.0 → 1.2)
+
+        from scanner.evaluators.common import check_trade_amount_surge
+        ta_result = check_trade_amount_surge(snap, accel_mult=surge_mult)
+        if ta_result is None:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_TRADE_AMOUNT",
+                f"거래대금 미달 — 현재 봉 거래대금 < 최근 5봉 평균 × {surge_mult:.1f}배")
+            return None
+
     # ── 시가 대비 상승도 차단
     if snap.open_price > 0:
         surge_from_open = (snap.current_price - snap.open_price) / snap.open_price * 100

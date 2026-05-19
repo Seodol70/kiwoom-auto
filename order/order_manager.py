@@ -662,15 +662,16 @@ class OrderManager(QObject):
 
         # ── [Zone 2] 섹터 쏠림 방지 체크 + 섹터 확인 로그 ──────────────────
         if not _sector:
-            # OPENING 슬롯(09:00~09:30)에서 섹터 없음 = 시장 불안정 신호 → 거절 (일승 패턴 방지, 2026-04-30)
+            # [Phase A 2026-05-19] OPENING 슬롯(09:00~09:30)에서 섹터 없음 허용
+            # 이유: Phase A 거래대금 필터(1.2배)가 약한 신호를 이미 필터링함
             now_time = datetime.now().time()
             if datetime.strptime("09:00", "%H:%M").time() <= now_time <= datetime.strptime("09:30", "%H:%M").time():
-                msg = "매수 거절 — OPENING 슬롯 + 섹터 정보 없음 (개장 직후 시장 불안정 구간, 2026-04-30)"
-                order_log.warning("[섹터차단] %s(%s) — %s", name, code, msg)
-                logger.info(msg)
-                self.order_failed.emit(msg)
-                return
-            order_log.warning("[섹터확인] %s(%s) — 섹터 정보 없음 (opt10001 실패 또는 미제공)", name, code)
+                msg = f"[OPENING_GATE_ALLOWED] {name}({code}) 갭 상승 신호 진입 (Phase A 거래대금 필터 통과)"
+                order_log.warning("[OPENING진입] %s — %s", name, msg)
+                logger.warning(msg)
+                # 섹터 체크 스킵, 계속 진행
+            else:
+                order_log.warning("[섹터확인] %s(%s) — 섹터 정보 없음 (opt10001 실패 또는 미제공)", name, code)
         if _sector:
             try:
                 _RISK_s = cfg.RISK
