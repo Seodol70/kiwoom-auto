@@ -94,8 +94,8 @@ class JangDongMinStrategy(BaseStrategy):
         # if self._risk_mgr.is_daily_loss_cut_done:
         #     return False, "손절 한도 도달"
 
-        # 2. 포지션 한도 체크 — [FIX 2026-05-12] 임시 완화 (max_pos → 10)
-        max_pos = 10  # 기본값 5 → 10으로 완화
+        # 2. 포지션 한도 체크
+        max_pos = getattr(self._scan_cfg, "max_positions", getattr(self._order_mgr, "max_positions", 10))
         if len(self._order_mgr.positions) >= max_pos:
             return False, f"포지션 {max_pos}개 풀"
 
@@ -163,19 +163,26 @@ class JangDongMinStrategy(BaseStrategy):
         if chg <= self._scan_cfg.hard_stop_pct:
             return True, f"Hard Stop ({self._scan_cfg.hard_stop_pct:.1f}%)"
 
-        # 2. 트레일 스탑
+        # 2. 트레일 스탑 — 우선 순위 높음 (활성화되면 익절 무시)
+        trail_price = 0
         if not _is_eod_pre_gap:
             trail_price = self.get_trail_price(pos)
             if trail_price > 0 and pos.current_price <= trail_price:
                 return True, f"Trail Stop (Peak {pos.peak_price:,} -> {trail_price:,})"
 
-        # 3. 일반 손절 (EMA 보호 포함)
+        # 3. 익절 (Take Profit) — 트레일 스탑 미활성화 시에만
+        if trail_price <= 0:  # 트레일 스탑이 활성화되지 않은 경우만
+            _tp_pct = float(getattr(self._scan_cfg, "take_profit_pct", 2.5))
+            if chg >= _tp_pct:
+                return True, f"Take Profit ({_tp_pct:.1f}%)"
+
+        # 4. 일반 손절 (EMA 보호 포함)
         if not _is_eod_pre_gap and chg <= ctx.sl_pct:
             if self._check_ema_protection(pos):
                 return False, "EMA20 Support (Hold)"
             return True, f"Stop Loss ({ctx.sl_pct:.1f}%)"
 
-        # 4. 타임컷
+        # 5. 타임컷
         if ctx.time_cut_min > 0 and not getattr(pos, "eod_trade", False):
             strong_lv = int(getattr(self._scan_cfg, "strong_trend_hold_level", 3))
             exempt = (
@@ -189,23 +196,23 @@ class JangDongMinStrategy(BaseStrategy):
                     if elapsed >= ctx.time_cut_min:
                         return True, f"Time Cut ({elapsed:.1f}min)"
 
-        # 5. 본절가 스탑 (분할익절 후 평단 이탈)
+        # 6. 본절가 스탑 (분할익절 후 평단 이탈)
         if self._should_breakeven_stop(pos):
             return True, "본절가스탑"
 
-        # 6. EMA20 이탈 청산
+        # 7. EMA20 이탈 청산
         if self._should_ema20_exit(pos):
             return True, "EMA20이탈"
 
-        # 7. 추세소멸 익절
+        # 8. 추세소멸 익절
         if self._should_trend_decay(pos):
             return True, "추세소멸"
 
-        # 8. 클라이맥스 탑 (단기 과열 익절)
+        # 9. 클라이맥스 탑 (단기 과열 익절)
         if self._should_climax_exit(pos):
             return True, "Climax Top (과열)"
 
-        # 9. 거래량 실린 하락 (Distribution 차단)
+        # 10. 거래량 실린 하락 (Distribution 차단)
         if self._should_distribution_exit(pos):
             return True, "Distribution (세력이탈)"
 

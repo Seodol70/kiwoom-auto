@@ -236,7 +236,7 @@ class SmartScanner(QObject):
         self._lock        = threading.Lock()
 
         # [FIX] UI 업데이트 큐 (스레드 분리)
-        self._ui_queue: _Deque = _Deque(maxlen=1)  # 최신 데이터만 유지
+        self._ui_queue: _Deque = _Deque(maxlen=2)  # 최신 데이터 + 1개 버퍼 (손실 방지)
         self._ui_update_timer = None
 
         # 첫 스캔 시 전체 종목 1분봉 일괄 로딩 플래그
@@ -441,10 +441,15 @@ class SmartScanner(QObject):
         try:
             if self._ui_queue:
                 ui_rows = self._ui_queue.pop()
-                logger.warning("[UI큐] %d개 행 emit", len(ui_rows))
+                logger.warning("[✓UI큐-EMIT] %d개 행을 ScannerPanel로 전송 EMIT", len(ui_rows))
                 self.watch_list_updated.emit(ui_rows)
+            else:
+                # 큐가 비어있는 경우는 30초마다만 로깅 (과도한 로그 방지)
+                if time.monotonic() - getattr(self, "_last_queue_empty_log", 0) > 30.0:
+                    self._last_queue_empty_log = time.monotonic()
+                    logger.warning("[⚠UI큐] 큐가 비어있음 — 데이터 도착 대기 중")
         except Exception as e:
-            logger.debug("UI 큐 처리 오류: %s", e)
+            logger.warning("[✗UI큐-PROCESS-ERROR] %s", e)
 
     def _seconds_until(self, target_time: dtime) -> float:
         now = datetime.now().time()
@@ -556,7 +561,7 @@ class SmartScanner(QObject):
         # [NEW] TR 소모 없는 최종 기준가 복구 (0원 방어막)
         # opt10030 차단(-200) 상태에서도 로컬 OCX 메모리를 통해 기준가 복구 시도
         with self.store._lock:
-            for code in self.store._data.keys():
+            for code in self.store._df.index:
                 st = self.store._get_state(code)
                 if st.prev_close <= 0:
                     recovered = self._kiwoom.get_current_price(code)
@@ -596,12 +601,7 @@ class SmartScanner(QObject):
         self.watch_q.refresh(top_codes)
         self._prefiltered = True
 
-
-        ScannerLogger.pre_filter_summary(
-            total=len(rows), passed=len(top_codes),
-            top_n=self.cfg.watch_pool_max,
-        )
-        logger.info("▶ [1단계] Pre-Filter 완료 — %d→%d종목 선정", len(rows), len(top_codes))
+        logger.info("▶ [1단계] Pre-Filter 완료 — %d→%d종목 선정 (감시 상한: %d)", len(rows), len(top_codes), self.cfg.watch_pool_max)
         for i, code in enumerate(top_codes[:10], 1):
             snap = self.store.get_snapshot(code)
             if snap:
@@ -675,8 +675,11 @@ class SmartScanner(QObject):
                         # [FIX] UI 업데이트 큐에 저장 (스캔 스레드는 즉시 반환)
                         try:
                             self._ui_queue.append(ui_rows)
-                        except Exception:
-                            pass
+                            if time.monotonic() - getattr(self, "_last_queue_append_log", 0) > 5.0:
+                                self._last_queue_append_log = time.monotonic()
+                                logger.warning("[✓UI큐-APPEND] %d개 행을 큐에 저장", len(ui_rows))
+                        except Exception as e:
+                            logger.warning("[✗UI큐-APPEND-ERROR] %s", e)
                         # [FIX] UI 송신 주기를 5초로 제한 (메인 스레드 부하 최소화)
                         _last_ui_send = getattr(self, "_last_ui_send", 0)
                         if t0 - _last_ui_send > 5.0:

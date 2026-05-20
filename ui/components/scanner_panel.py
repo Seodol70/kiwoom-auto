@@ -109,9 +109,14 @@ class ScannerPanel(QWidget):
         # [FIX 2026-05-08] 증분 업데이트: 변경된 셀만 업데이트 (메인 스레드 블로킹 최소화)
 
         # [DEBUG] 데이터 수신 확인
-        if rows and time.time() - getattr(self, "_last_refresh_log", 0) > 10.0:
-            self._last_refresh_log = time.time()
-            logging.info("🖥 [ScannerPanel] UI 데이터 수신 완료 (%d종목)", len(rows))
+        if rows:
+            if time.time() - getattr(self, "_last_refresh_log", 0) > 5.0:
+                self._last_refresh_log = time.time()
+                logging.warning("[✓ScannerPanel.refresh] 슬롯 진입 — %d개 종목 테이블 업데이트 시작", len(rows))
+        else:
+            if time.time() - getattr(self, "_last_refresh_empty_log", 0) > 30.0:
+                self._last_refresh_empty_log = time.time()
+                logging.warning("[⚠ScannerPanel.refresh] 슬롯 진입했으나 rows=빈 리스트")
 
         # 이전 데이터 캐시 (변경 감지용)
         old_rows = getattr(self, "_cached_rows", {})

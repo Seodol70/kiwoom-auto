@@ -116,11 +116,11 @@ class TradingController(QObject):
 
         try:
             logger.warning(
-                "[신호처리] %s(%s) [%s] 신호 수신 — 매수 시도",
+                "[신호처리] %s(%s) [%s] 신호 수신 — 필터 검증 시작",
                 sig.name, sig.code, sig.signal_type
             )
-            # OrderManager.handle_signal()으로 신호 처리
-            self._order_mgr.handle_signal(sig)
+            # TradingController.handle_signal()을 호출하여 전체 필터 검증을 먼저 거치도록 수정
+            self.handle_signal(sig)
         except Exception as e:
             logger.error("[신호처리 오류] %s", e)
 
