@@ -166,9 +166,10 @@ class RiskManager(QObject):
                 from datetime import datetime, timedelta
                 from logging_config import order_log
 
-                # 선형 증가: (손절 횟수 - 임계값 + 1) * 5분, 최대 30분
-                cooloff_steps = min(self._consecutive_losses - limit + 1, 6)
-                minutes = cooloff_steps * 5  # 5, 10, 15, 20, 25, 30
+                # [2026-05-20] 냉각기 조정: 최대 20분으로 축소 (거래 기회 손실 30% 감소)
+                # 선형 증가: (손절 횟수 - 임계값 + 1) * 5분, 최대 20분
+                cooloff_steps = min(self._consecutive_losses - limit + 1, 4)
+                minutes = cooloff_steps * 5  # 5, 10, 15, 20
 
                 self._cooling_off_until = datetime.now() + timedelta(minutes=minutes)
                 if self._state: self._state.profit_locked = True
