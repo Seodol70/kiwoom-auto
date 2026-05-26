@@ -409,7 +409,7 @@ class SmartScanner(QObject):
             from PyQt5.QtCore import QTimer
             self._ui_update_timer = QTimer()
             self._ui_update_timer.timeout.connect(self._process_ui_queue)
-            self._ui_update_timer.start(500)  # 500ms마다 큐 확인
+            self._ui_update_timer.start(1000)  # [2026-05-21] 500→1000ms (UI 부하 감소, 변경 감지 로직과 시너지)
 
 
     def stop(self) -> None:
@@ -437,19 +437,38 @@ class SmartScanner(QObject):
         logger.info("SmartScanner 정지 완료")
 
     def _process_ui_queue(self) -> None:
-        """UI 큐에서 최신 데이터를 가져와서 emit (Qt 메인 스레드에서 호출)."""
+        """UI 큐에서 최신 데이터를 가져와서 emit (Qt 메인 스레드에서 호출).
+        [FIX 2026-05-21] 데이터 변경 감지 후에만 emit — 메인 스레드 부하 감소
+        """
         try:
-            if self._ui_queue:
-                ui_rows = self._ui_queue.pop()
-                logger.warning("[✓UI큐-EMIT] %d개 행을 ScannerPanel로 전송 EMIT", len(ui_rows))
-                self.watch_list_updated.emit(ui_rows)
-            else:
-                # 큐가 비어있는 경우는 30초마다만 로깅 (과도한 로그 방지)
-                if time.monotonic() - getattr(self, "_last_queue_empty_log", 0) > 30.0:
+            if not self._ui_queue:
+                # 큐가 비어있는 경우는 60초마다만 로깅
+                if time.monotonic() - getattr(self, "_last_queue_empty_log", 0) > 60.0:
                     self._last_queue_empty_log = time.monotonic()
-                    logger.warning("[⚠UI큐] 큐가 비어있음 — 데이터 도착 대기 중")
+                    logger.info("[UI큐] 큐가 비어있음 — 데이터 도착 대기 중")
+                return
+
+            ui_rows = self._ui_queue.pop()
+
+            # [FIX 2026-05-21] 변경 감지: 핵심 필드만 비교 (code, price, signal, change_pct)
+            # 변경이 없으면 emit 생략 (UI 부하 큰 폭 감소)
+            curr_sig = tuple(
+                (r.get("code"), r.get("price"), r.get("signal"), r.get("change_pct"))
+                for r in ui_rows
+            )
+            if curr_sig == getattr(self, "_last_ui_sig", None):
+                return  # 변경 없음 — emit 생략
+
+            self._last_ui_sig = curr_sig
+
+            # 10초마다 한 번만 로깅 (과도한 로그 방지)
+            if time.monotonic() - getattr(self, "_last_ui_emit_log", 0) > 10.0:
+                self._last_ui_emit_log = time.monotonic()
+                logger.info("[UI큐-EMIT] %d개 행 전송 (변경 감지됨)", len(ui_rows))
+
+            self.watch_list_updated.emit(ui_rows)
         except Exception as e:
-            logger.warning("[✗UI큐-PROCESS-ERROR] %s", e)
+            logger.warning("[UI큐-PROCESS-ERROR] %s", e)
 
     def _seconds_until(self, target_time: dtime) -> float:
         now = datetime.now().time()
@@ -675,9 +694,7 @@ class SmartScanner(QObject):
                         # [FIX] UI 업데이트 큐에 저장 (스캔 스레드는 즉시 반환)
                         try:
                             self._ui_queue.append(ui_rows)
-                            if time.monotonic() - getattr(self, "_last_queue_append_log", 0) > 5.0:
-                                self._last_queue_append_log = time.monotonic()
-                                logger.warning("[✓UI큐-APPEND] %d개 행을 큐에 저장", len(ui_rows))
+                            # [2026-05-21] 큐 append 진단 로그 제거 (에러만 유지)
                         except Exception as e:
                             logger.warning("[✗UI큐-APPEND-ERROR] %s", e)
                         # [FIX] UI 송신 주기를 5초로 제한 (메인 스레드 부하 최소화)
@@ -817,11 +834,10 @@ class SmartScanner(QObject):
             idx_hist = getattr(self.app_context.state, "index_history", None) if hasattr(self, "app_context") else None
             try:
                 sig = strat_obj.evaluate(snap, self.cfg, index_history=idx_hist)
-                logger.warning("[_evaluate] %s(%s) [%s] sig=%s", snap.code, snap.name, strategy_name, sig)
+                # [2026-05-22] _evaluate WARNING 로그 제거 (종목당 전략당 1건 = 초당 200건 발생)
                 if sig is not None:
                     sig.trend_level = int(getattr(snap, "trend_level", 0))
                     sig.trend_prev_level = int(getattr(snap, "trend_prev_level", 0))
-                    logger.warning("[_evaluate] _emit() 호출: %s(%s)", snap.code, snap.name)
                     self._emit(sig)
                     return strategy_name
             except Exception as e:
@@ -881,33 +897,23 @@ class SmartScanner(QObject):
         except Exception as e:
             logger.error("[SmartScanner] DB 신호 저장 실패: %s", e)
 
-        # ② 파일 로그
+        # ② 파일 로그 (ScannerLogger만 유지, WARNING 로그 제거)
         ScannerLogger.signal(sig)
-        logger.warning("🚨 [3단계] %s(%s) [%s] %s", sig.name, sig.code,
-                       sig.signal_type, sig.reason)
-        # [v3.0] 신호 발견 알림 (v3.0)
-        if self.notif_mgr:
-            self.notif_mgr.info(
-                f"🚨 {sig.signal_type} 발생",
-                f"{sig.name}({sig.code}) {sig.price:,}원 | {sig.reason}",
-                telegram=True, sound=True
-            )
+        # [2026-05-22] WARNING 🚨 [3단계] 로그 제거 (신호당 1건, 메인 스레드 부하)
+        # [2026-05-26] 신호 발생 텔레그램 알림 제거 — 체결 알림만 받기 위함
+        # 알림이 너무 많이 와서 정작 중요한 매수/매도 체결을 놓치는 문제 해결
+        # 시스템 로그는 ScannerLogger로 유지됨 (파일 기록)
 
         # ④ 시그널 발행 (주문 엔진/UI 전송)
         self.signal_detected.emit(sig)
 
         # ④-1 크로스 스레드 workaround: TradingController에 직접 콜백 호출 (2026-05-12)
-        logger.warning("[_emit 진단] callback=%s, sig_code=%s",
-                      hasattr(self, '_on_signal_callback'), sig.code)
+        # [2026-05-22] 진단 WARNING 로그 4건 제거 (신호당 4건, 메인 스레드 부하 심각)
         if hasattr(self, '_on_signal_callback') and self._on_signal_callback:
-            logger.warning("[_emit] callback 호출 시작: %s(%s)", sig.name, sig.code)
             try:
                 self._on_signal_callback(sig)
-                logger.warning("[_emit] callback 호출 완료: %s(%s)", sig.name, sig.code)
             except Exception as e:
                 logger.error("[신호콜백 오류] %s", e)
-        else:
-            logger.warning("[_emit] callback이 None! 신호 처리 불가")
 
 
     # -----------------------------------------------------------------------
@@ -935,10 +941,7 @@ class SmartScanner(QObject):
         except Exception:
             pass
 
-        # [진단] 실시간 틱 수신 확인 (5초 주기)
-        if self._last_real_tick_time - getattr(self, "_last_real_diag", 0) > 5.0:
-            self._last_real_diag = self._last_real_tick_time
-            logger.info("[실시간진단] 틱 수신 중 — 코드: %s, 타입: %s", code, real_type)
+        # [2026-05-21] 실시간 틱 수신 진단 로그 제거 (5초당 1건, 시간당 133건 부하)
 
         # 2. 지수 데이터 처리 (TR 차단 대비 상시 감시)
         if real_type == "업종지수":
@@ -1054,17 +1057,8 @@ class SmartScanner(QObject):
             raw_cum_amt = cum_amt
             real_trade_amt = cum_amt * 1_000 if cum_amt > 0 else price * cum_vol
 
-            # [진단] 60초에 한 번 거래량/거래대금 확인
-            _now_diag = time.monotonic()
-            _last_diag_map = getattr(self, "_last_diag_log", {})
-            if _now_diag - _last_diag_map.get(code, 0) > 60.0:
-                logger.warning(
-                    "[FID진단] %s | 가=%d | FID13(천원raw)=%d → 거래대금=%s | 역산거래량=%d주",
-                    code, price, cum_amt,
-                    TradeAmountHelper.to_korean(real_trade_amt), cum_vol
-                )
-                _last_diag_map[code] = _now_diag
-                self._last_diag_log = _last_diag_map
+            # [2026-05-21] FID진단 로그 제거 — FID 13 부정확 문제는 이미 해결됨,
+            # 실시간 거래에 사용되지 않으며 시간당 3,000건 메인 스레드 부하 유발
 
             # [FINAL RECOVERY] 기준가가 여전히 0이면 마스터 정보에서 가져옴
             if prev_close <= 0:

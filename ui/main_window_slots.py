@@ -54,6 +54,9 @@ class MainWindowSlots:
         self._already_started = True
         self._today_watch.clear()
         self._news_analyzer.reset_daily()
+        # [NEW 2026-05-26] NewsAnalyzer 백그라운드 스레드 시작 (idempotent)
+        # trading_controller가 신호 발생 시 get_cached_sentiment() 동기 조회로 활용
+        self._news_analyzer.start()
 
         # 손절·익절 보류 기간 시작 (RiskManager에서 관리)
         _wu = float(_RISK2.get("sl_tp_warmup_sec", 45.0))

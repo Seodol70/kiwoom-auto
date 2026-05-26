@@ -73,12 +73,17 @@ class JangDongMinStrategy(BaseStrategy):
     기술적 지표와 추세 분석을 결합한 단기 매매 전략입니다.
     """
 
+    # [NEW 2026-05-26] 손절 이력 디스크 저장 경로 (당일 재시작 시 복원용)
+    _LOSS_EXIT_FILE = "params/loss_exit_history.json"
+
     def __init__(self, order_mgr: OrderManager, risk_mgr: RiskManager, scan_cfg: Any, snap_store: Any = None):
         super().__init__(order_mgr, risk_mgr, scan_cfg)
         self._snap_store = snap_store
 
         # 손절 종목 추적 (동일 종목 재진입 방지): {code: loss_exit_time}
         self._loss_exit_dict: dict[str, datetime] = {}
+        # [NEW 2026-05-26] 시작 시 디스크에서 당일 손절 이력 복원
+        self._load_loss_exit_dict()
 
     def should_entry(self, sig: ScanSignal, auto_trading: bool) -> tuple[bool, str]:
         """진입 필터링 로직 (기존 app/strategy.py 로직 통합)"""
@@ -103,11 +108,12 @@ class JangDongMinStrategy(BaseStrategy):
         if sig.code in self._order_mgr.positions:
             return False, "이미 보유 중"
 
-        # 4. [NEW 2026-05-19] 손절 종목 복구 대기 (동일 종목 재진입 방지 — 20분 냉각)
+        # 4. [NEW 2026-05-19 / 강화 2026-05-26] 손절 종목 복구 대기 (동일 종목 재진입 방지 — 60분 냉각)
+        # 5/26 분석: 빛과전자/스피어 등 1차 손절 후 즉시 재진입 → 재손절 패턴 발견 → 20분 → 60분 연장
         loss_exit_time = self._loss_exit_dict.get(sig.code)
         if loss_exit_time:
             elapsed_min = (datetime.now() - loss_exit_time).total_seconds() / 60.0
-            loss_cooldown_min = float(getattr(self._scan_cfg, "loss_exit_cooldown_minutes", 20.0))
+            loss_cooldown_min = float(getattr(self._scan_cfg, "loss_exit_cooldown_minutes", 60.0))
             if elapsed_min < loss_cooldown_min:
                 remaining = loss_cooldown_min - elapsed_min
                 return False, f"손절 복구 대기 ({remaining:.0f}분)"
@@ -136,14 +142,62 @@ class JangDongMinStrategy(BaseStrategy):
         return sector_count >= 3
 
     def mark_loss_exit(self, pos: Any) -> None:
-        """손절 종목을 기록하여 동일 종목 재진입 방지 (20분 냉각)"""
+        """손절 종목을 기록하여 동일 종목 재진입 방지 (60분 냉각, 2026-05-26 강화)"""
         if not pos:
             return
         # 손절 (손익 < 0)일 때만 기록
         if float(getattr(pos, "price_change_pct_vs_avg", 0.0)) < 0:
             self._loss_exit_dict[pos.code] = datetime.now()
             from logging_config import order_log
-            order_log.info("[전략] %s(%s) 손절 기록 — 20분간 재진입 차단", pos.code, pos.name)
+            order_log.info("[전략] %s(%s) 손절 기록 — 60분간 재진입 차단", pos.code, pos.name)
+            # [NEW 2026-05-26] 디스크 저장 (재시작 시 복원용)
+            self._save_loss_exit_dict()
+
+    def _save_loss_exit_dict(self) -> None:
+        """[NEW 2026-05-26] 손절 이력 디스크 저장 — 프로그램 재시작 시 복원 가능
+
+        형식: {"date": "2026-05-26", "entries": {"010170": "2026-05-26T09:02:07", ...}}
+        """
+        try:
+            import json, os
+            os.makedirs(os.path.dirname(self._LOSS_EXIT_FILE), exist_ok=True)
+            data = {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "entries": {
+                    code: dt.isoformat() for code, dt in self._loss_exit_dict.items()
+                },
+            }
+            with open(self._LOSS_EXIT_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning("[손절이력저장실패] %s", e)
+
+    def _load_loss_exit_dict(self) -> None:
+        """[NEW 2026-05-26] 시작 시 디스크에서 당일 손절 이력 복원
+
+        당일 데이터만 유효 (날짜가 다르면 무시).
+        """
+        try:
+            import json, os
+            if not os.path.exists(self._LOSS_EXIT_FILE):
+                return
+            with open(self._LOSS_EXIT_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            saved_date = data.get("date", "")
+            today = datetime.now().strftime("%Y-%m-%d")
+            if saved_date != today:
+                logger.info("[손절이력로드] 날짜 불일치(%s ≠ %s) — 무시", saved_date, today)
+                return
+            entries = data.get("entries", {})
+            for code, iso_str in entries.items():
+                try:
+                    self._loss_exit_dict[code] = datetime.fromisoformat(iso_str)
+                except Exception:
+                    pass
+            if entries:
+                logger.info("[손절이력로드] 당일 %d종목 복원", len(self._loss_exit_dict))
+        except Exception as e:
+            logger.warning("[손절이력로드실패] %s", e)
 
     def update_state(self, pos: Any) -> None:
         """현재가 기반 peak_price 갱신 (기존 ExitStrategy.update_peak_price 통합)"""
@@ -160,8 +214,16 @@ class JangDongMinStrategy(BaseStrategy):
         chg = float(pos.price_change_pct_vs_avg)
 
         # 1. 하드 스탑 (절대 손절선)
-        if chg <= self._scan_cfg.hard_stop_pct:
-            return True, f"Hard Stop ({self._scan_cfg.hard_stop_pct:.1f}%)"
+        # [P0-2 2026-05-21] OPENING 슬롯(09:00~09:30 진입) 종목은 -1.5%로 강화
+        # 어제 성호전자(09:05 진입) -4.22% 손실 사례 방지
+        _hard_stop = float(self._scan_cfg.hard_stop_pct)
+        entry_time = getattr(pos, "entry_time", None)
+        if entry_time:
+            from datetime import time as _dtime
+            if _dtime(9, 0) <= entry_time.time() <= _dtime(9, 30):
+                _hard_stop = max(_hard_stop, -1.5)  # -1.5% (더 엄격)
+        if chg <= _hard_stop:
+            return True, f"Hard Stop ({_hard_stop:.1f}%)"
 
         # 2. 트레일 스탑 — 우선 순위 높음 (활성화되면 익절 무시)
         trail_price = 0

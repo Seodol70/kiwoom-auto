@@ -37,17 +37,12 @@ class TestSQLiteIntegration(unittest.TestCase):
             volumes_1min = [100, 150, 200]
 
         self.audit.log_signal(MockSignal(), MockSnap())
-        # Flush to DB (buffer may not auto-flush with just 1 row)
-        self.audit.flush_all()
 
-        # DB 확인
-        stats = self.db.get_summary_stats()
-        # COMPLETED가 아니므로 stats에는 안 잡히지만, 테이블에는 있어야 함
-        from contextlib import closing
-        with closing(self.db._get_connection()) as conn:
-            row = conn.execute("SELECT * FROM trades WHERE code='005930'").fetchone()
-            self.assertIsNotNone(row)
-            self.assertEqual(row[4], "삼성전자")
+        # [FIX 2026-05-26] 중간 flush_all 제거.
+        # log_signal은 즉시 _flush_row()를 호출하므로 _write_buffer에 SIGNAL_ONLY 행이 들어가지만,
+        # _pending_rows에서는 _flush_row()가 row를 유지한다 (sell_fill까지 누적 가능).
+        # 만약 여기서 flush_all() 호출 시 _pending_rows가 비워져 후속 buy_fill/sell_fill이 무력화됨.
+        # → 신호→매수→매도 전 과정 끝낸 뒤 한 번만 flush_all() 호출하는 게 올바른 시퀀스.
 
         # 2. Buy Fill
         self.audit.log_buy_fill("005930", 10, 70000)
@@ -58,15 +53,21 @@ class TestSQLiteIntegration(unittest.TestCase):
         # Flush all pending rows to DB
         self.audit.flush_all()
 
-        # 최종 DB 확인
+        # DB 확인 — name 검증
         from contextlib import closing
-        from trade_audit_logger import COLUMNS
         with closing(self.db._get_connection()) as conn:
-            row = conn.execute("SELECT * FROM trades WHERE code='005930'").fetchone()
-            realized_pnl_idx = COLUMNS.index("realized_pnl")
-            final_status_idx = COLUMNS.index("final_status")
-            self.assertEqual(row[realized_pnl_idx], 10000) # realized_pnl
-            self.assertEqual(row[final_status_idx], "COMPLETED") # final_status
+            row = conn.execute("SELECT name FROM trades WHERE code='005930'").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "삼성전자")
+
+        # 최종 DB 확인 — 컬럼명으로 직접 SELECT (위치 기반 인덱싱 회피)
+        from contextlib import closing
+        with closing(self.db._get_connection()) as conn:
+            row = conn.execute(
+                "SELECT realized_pnl, final_status FROM trades WHERE code='005930'"
+            ).fetchone()
+            self.assertEqual(row[0], 10000)        # realized_pnl
+            self.assertEqual(row[1], "COMPLETED")  # final_status
 
     def tearDown(self):
         if os.path.exists(self.test_db):

@@ -95,6 +95,8 @@ class NewsAnalyzer:
         self._pool: Optional[ThreadPoolExecutor] = None
         self._analyzed: set = set()     # 당일 분석 완료 종목 코드
         self._in_flight: Dict[str, Future] = {}  # 현재 처리 중인 종목
+        # [NEW 2026-05-26] 결과 캐시 — trading_controller에서 동기 조회용
+        self._results: Dict[str, NewsResult] = {}
         self._lock = threading.Lock()
 
     # -----------------------------------------------------------------------
@@ -152,7 +154,23 @@ class NewsAnalyzer:
         """로그인 시 호출 — 당일 분석 완료 캐시 초기화"""
         with self._lock:
             self._analyzed.clear()
+            self._results.clear()
         logger.info("[NewsAnalyzer] 당일 캐시 초기화")
+
+    def get_cached_result(self, code: str) -> Optional["NewsResult"]:
+        """동기 조회 — 캐시된 분석 결과 반환 (없으면 None).
+
+        trading_controller.handle_signal()에서 신호 발생 시점에 호출.
+        결과 없으면 None 반환 → 호출자가 analyze()로 백그라운드 분석 트리거.
+        """
+        with self._lock:
+            return self._results.get(code)
+
+    def get_cached_sentiment(self, code: str) -> str:
+        """동기 조회 — 감정만 반환 (NEUTRAL 기본값)"""
+        with self._lock:
+            r = self._results.get(code)
+            return r.sentiment if r else "NEUTRAL"
 
     # -----------------------------------------------------------------------
     # 디스패처 루프 (단일 스레드) — 큐에서 꺼내 스레드풀에 제출
@@ -191,8 +209,12 @@ class NewsAnalyzer:
             self._analyzed.add(code)
         try:
             result = future.result()
-            if result and self._on_result:
-                self._on_result(result)
+            if result:
+                # [NEW 2026-05-26] 결과 캐시 저장 (trading_controller 동기 조회용)
+                with self._lock:
+                    self._results[code] = result
+                if self._on_result:
+                    self._on_result(result)
         except Exception as e:
             logger.warning("[NewsAnalyzer] %s 처리 실패: %s", code, e)
 

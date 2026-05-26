@@ -119,7 +119,10 @@ def test_check_jdm_entry_gc_override(base_snap, base_config):
         # RSI 100 방지를 위해 미세한 등락 포함 (loss 발생)
         # ma_s(7) ≈ 10407, ma_l(15) ≈ 10373. Spread ≈ 0.33%
         base_snap.closes_1min = [10000] * 35 + [10300, 10350, 10300, 10400, 10450, 10400, 10450, 10500, 10450, 10500, 10550, 10500, 10550, 10600, 10550]
-        base_snap.volumes_1min = [10000] * 50 + [25000] # Surge
+        # [FIX 2026-05-26] Phase A 거래대금 필터 3.0배 통과 위해 마지막 봉 거래량 25000 → 35000
+        # (직전 5봉 평균의 3.5배 거래대금)
+        base_snap.volumes_1min = [10000] * 50 + [35000]
+        base_snap.opens_1min = [10000] * 100  # 갭 리버설 패턴 체크 위해 추가
         base_snap.current_price = 10550
         base_snap.high_price = 10600
         reason = check_jdm_entry(base_snap, base_config)

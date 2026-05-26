@@ -123,9 +123,10 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         logger.info("[MainWindow] 백그라운드 워커 설정 완료")
 
     def _setup_news_analyzer(self) -> None:
-        """뉴스 분석기 초기화"""
-        from scanner.news_analyzer import NewsAnalyzer
-        self._news_analyzer = NewsAnalyzer()
+        """뉴스 분석기 — ApplicationContext에서 생성된 인스턴스 참조
+        [2026-05-26] trading_controller와 동일 인스턴스 공유 (매매 결정에 활용)
+        """
+        self._news_analyzer = self.app_context.news_analyzer
 
     def start_after_login(self) -> None:
         """로그인 후 실질적 시스템 가동"""
@@ -176,8 +177,22 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
             if hasattr(self, "_scan_refresh_timer"): self._scan_refresh_timer.stop()
 
             # 2. 백그라운드 워커/스레드 안전 종료
-            # 2. 백그라운드 워커 종료
-            # self._port_worker.stop() # PortfolioWorker는 보통 MainWindow 생명주기 따름
+            # [NEW 2026-05-26] PriorityWatchQueue 워커 중지
+            # OCX 파괴 전에 워커를 멈춰야 SetRealRemove 'QAxWidget deleted' 에러 방지
+            if hasattr(self, "_smart_scanner") and hasattr(self._smart_scanner, "watch_q"):
+                try:
+                    self._smart_scanner.watch_q.stop()
+                    logger.info("[MainWindow] PriorityWatchQueue 워커 중지")
+                except Exception as _e:
+                    logger.warning("[MainWindow] watch_q.stop() 실패: %s", _e)
+
+            # [NEW 2026-05-26] NewsAnalyzer 백그라운드 스레드 중지
+            if hasattr(self, "_news_analyzer") and self._news_analyzer:
+                try:
+                    self._news_analyzer.stop()
+                    logger.info("[MainWindow] NewsAnalyzer 중지")
+                except Exception as _e:
+                    logger.warning("[MainWindow] news_analyzer.stop() 실패: %s", _e)
 
             # 4. 데이터 강제 Flush (Clean Exit)
             if hasattr(self, "_audit") and self._audit:

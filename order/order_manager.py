@@ -835,7 +835,10 @@ class OrderManager(QObject):
                 return
 
             # 2. 일반 손절 (-1.2% 등) — 3초 유예
-            if pos.pnl_pct <= _sl:
+            # [FIX 2026-05-22] 이미 블랙리스트에 등록된 종목은 매도 주문 진행 중 → 재시도 차단
+            if code in self._stop_loss_today:
+                pass  # 이미 손절 처리 중, 매 틱마다 로그 폭증 방지
+            elif pos.pnl_pct <= _sl:
                 if pos.sl_triggered_at is None:
                     pos.sl_triggered_at = datetime.now()
                     logger.info("⏳ [손절대기] %s(%s) 손절가 하회 (%.2f%%) — 3초 관찰 시작", pos.name, code, pos.pnl_pct)
@@ -843,7 +846,7 @@ class OrderManager(QObject):
                     elapsed = (datetime.now() - pos.sl_triggered_at).total_seconds()
                     if elapsed >= 3.0:
                         logger.warning("📉 [확정손절] %s(%s) 3초간 손절가 하회 — 매도 및 블랙리스트 등록", pos.name, code)
-                        self.mark_stop_loss(code)
+                        self.mark_stop_loss(code)  # 블랙리스트 등록 → 다음 틱부터 위 분기로 차단됨
                         self.force_exit(code, pos.name, pos.qty, "확정손절")
                     else:
                         logger.debug("⏳ [손절대기] %s 관찰 중... (%.1fs)", pos.name, elapsed)

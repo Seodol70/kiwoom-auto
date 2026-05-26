@@ -88,20 +88,16 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
     _slot       = _resolve_time_slot(now, cfg)
     _eff_ch_max = _get_slot_value(_slot, cfg, "max_change_pct", cfg.max_change_pct)
     _snap_chg   = float(getattr(snap, "change_pct", 0) or 0)
-    logger.warning("[check_breakout_gate] 등락률 체크: snap=%s, max=%s, slot=%s",
-                  _snap_chg, _eff_ch_max, _slot)
+    # [2026-05-21] 진단용 warning 로그 제거 (시간당 200~220건)
     if _snap_chg >= _eff_ch_max:
         msg = f"[{_slot}] 등락률 {_snap_chg:.2f}% ≥ 구간 상한 {_eff_ch_max:.0f}%"
-        logger.warning("[check_breakout_gate] 등락률 거절: %s", msg)
         ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_CHGPCT", msg)
         return None
 
     _eff_chejan = _get_slot_value(_slot, cfg, "min_chejan_strength", cfg.min_chejan_strength)
-    logger.warning("[check_breakout_gate] 체결강도 체크: snap=%s, min=%s, slot=%s",
-                  snap.chejan_strength, _eff_chejan, _slot)
+    # [2026-05-21] 진단용 warning 로그 제거 (시간당 200~210건)
     if snap.chejan_strength < _eff_chejan:
         msg = f"[{_slot}] 체결강도 미달 — {snap.chejan_strength:.0f}% < {_eff_chejan:.0f}%"
-        logger.warning("[check_breakout_gate] 체결강도 거절: %s", msg)
         ScannerLogger.near_miss(
             snap.code, snap.name, "BREAKOUT_CHEJAN",
             actual=snap.chejan_strength, threshold=_eff_chejan,

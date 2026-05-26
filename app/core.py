@@ -89,6 +89,10 @@ class ApplicationContext(QObject):
             on_reconnect=self.login_mgr.reconnect_silent
         )
 
+        # ── NewsAnalyzer (백그라운드 뉴스 감정 분석) ──
+        # [NEW 2026-05-26] trading_controller에서 매매 결정 가중치로 활용
+        self.news_analyzer = NewsAnalyzer()
+
         # ── Application Layer ──
         self.market_scheduler = MarketScheduler(self)
         self.risk_manager = RiskManager(self.order_mgr, self.scan_cfg, self, app_state=self.state)
@@ -97,6 +101,7 @@ class ApplicationContext(QObject):
             smart_scanner=self.smart_scanner,
             snap_store=self.snap_store,
             health_monitor=self.health_monitor,
+            news_analyzer=self.news_analyzer,
             parent=self
         )
 

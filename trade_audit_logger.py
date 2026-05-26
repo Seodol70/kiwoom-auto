@@ -415,8 +415,17 @@ class TradeAuditLogger:
         """
         미완 행 전부를 CSV에 저장한다.
         장 마감 또는 프로그램 종료 시(closeEvent) 호출.
+
+        [FIX 2026-05-26] _write_buffer (완료된 거래의 대기 행)도 함께 flush.
+        매도 체결까지 끝난 거래는 _pending_rows에서 _write_buffer로 옮겨지는데,
+        버퍼는 50건 누적 후에만 자동 flush됨. 종료 시 누락 방지를 위해 강제 flush.
         """
         try:
+            # [FIX 2026-05-26] write_buffer 먼저 flush — 완료된 거래 DB 누락 방지
+            with self._lock:
+                if self._write_buffer:
+                    self._do_batch_write()
+
             with self._lock:
                 if not self._pending_rows:
                     return

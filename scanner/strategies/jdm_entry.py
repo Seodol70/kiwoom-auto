@@ -30,11 +30,9 @@ class JdmStrategy(BaseStrategy):
         """
         # 핵심 판정 로직 위임
         reason = check_jdm_entry(snap, cfg)
-        logger.warning("[JdmStrategy.evaluate] %s(%s) check_jdm_entry → reason=%s",
-                      snap.code, snap.name, "PASS" if reason else "None")
+        # [2026-05-22] WARNING 로그 2건 제거 (종목당 1건 발생, 메인 스레드 부하)
         if reason is None:
             return None
-        logger.warning("[JdmStrategy] %s(%s) check_jdm_entry PASS → ScanSignal 생성", snap.code, snap.name)
 
         # AI 피처 추출 (학습용 데이터 수집)
         ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)

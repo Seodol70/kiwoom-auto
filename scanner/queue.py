@@ -95,8 +95,16 @@ class PriorityWatchQueue:
             # SetRealRemove 처리
             if pending_remove:
                 for code in pending_remove:
+                    if self._stop_worker:
+                        break  # 종료 요청 시 즉시 빠져나옴 (OCX 파괴 후 호출 방지)
                     try:
                         self._unsub_impl(code)
+                    except RuntimeError as e:
+                        # 'wrapped C/C++ object has been deleted' — Qt 객체 파괴됨
+                        # 종료 시점 자연스러운 현상이므로 워커 즉시 종료
+                        logger.debug("[PriorityWatchQueue] OCX 파괴 감지 — 워커 종료: %s", code)
+                        self._stop_worker = True
+                        break
                     except Exception as e:
                         logger.warning("[PriorityWatchQueue] SetRealRemove 실패: %s - %s", code, e)
 
@@ -170,3 +178,18 @@ class PriorityWatchQueue:
     @property
     def subscribed(self) -> set[str]:
         return self._subscribed.copy()
+
+    def stop(self) -> None:
+        """[NEW 2026-05-26] 워커 스레드 정상 종료 — closeEvent에서 호출.
+
+        OCX 파괴 전에 워커를 멈춰 'QAxWidget has been deleted' 에러를 방지한다.
+        대기 중인 SetRealReg/Remove는 폐기 (어차피 종료 중이라 의미 없음).
+        """
+        self._stop_worker = True
+        # 남은 큐 비우기 — 어차피 처리해도 OCX 파괴되면 에러
+        with self._lock:
+            self._pending_add.clear()
+            self._pending_remove.clear()
+        # 워커 스레드 종료 대기 (최대 1초)
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=1.0)

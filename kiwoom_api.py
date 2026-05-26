@@ -1111,11 +1111,12 @@ class KiwoomManager(KiwoomProtocol):
             self._tr_timeout_timer.timeout.connect(_on_timeout)
 
             self._tr_timeout_timer.start(timeout_ms)
-            logger.info("[CommRqData] exec_() 진입 - rq=%s tr=%s screen=%s, timeout=%dms",
-                       rq_name, tr_code, screen_no, timeout_ms)
+            # [2026-05-22] TR 통신 진입/복귀 로그를 INFO → DEBUG 강등 (분당 60건, LogPanel 부하 주범)
+            logger.debug("[CommRqData] exec_() 진입 - rq=%s tr=%s screen=%s, timeout=%dms",
+                        rq_name, tr_code, screen_no, timeout_ms)
             self._tr_loop.exec_()
-            logger.info("[CommRqData] exec_() 복귀 - rq=%s, timed_out=%s, _tr_data keys=%s, prev_next=%s",
-                       rq_name, self._tr_timed_out, list(self._tr_data.keys()) if self._tr_data else "EMPTY", self._tr_prev_next)
+            logger.debug("[CommRqData] exec_() 복귀 - rq=%s, timed_out=%s, _tr_data keys=%s, prev_next=%s",
+                        rq_name, self._tr_timed_out, list(self._tr_data.keys()) if self._tr_data else "EMPTY", self._tr_prev_next)
             self._tr_timeout_timer.stop()
             self._tr_timeout_timer = None
             self._tr_loop = None
@@ -1231,72 +1232,79 @@ class KiwoomManager(KiwoomProtocol):
                 return s.encode('latin-1').decode('cp949')
             except Exception: return s
 
-        rq_name = _fix_enc(rq_name)
-        tr_code = _fix_enc(tr_code)
-        record_name = _fix_enc(record_name)
+        try:
+            rq_name = _fix_enc(rq_name)
+            tr_code = _fix_enc(tr_code)
+            record_name = _fix_enc(record_name)
 
-        self._tr_prev_next = str(prev_next).strip()
-        logger.info("[TR 수신 진입] rq=%s tr=%s prev_next=%s — 콜백 실행됨", rq_name, tr_code, self._tr_prev_next)
-        logger.debug("[TR 수신] rq=%s tr=%s prev_next=%s screen=%s", rq_name, tr_code, self._tr_prev_next, screen_no)
+            self._tr_prev_next = str(prev_next).strip()
+            # [2026-05-22] TR 수신 진입 로그 INFO → DEBUG 강등 (분당 30건, LogPanel 부하)
+            logger.debug("[TR 수신 진입] rq=%s tr=%s prev_next=%s — 콜백 실행됨", rq_name, tr_code, self._tr_prev_next)
+            logger.debug("[TR 수신] rq=%s tr=%s prev_next=%s screen=%s", rq_name, tr_code, self._tr_prev_next, screen_no)
 
-        if rq_name == "stock_info":
-            self._tr_data = self._parse_single(tr_code, rq_name, [
-                "종목명", "현재가", "기준가", "전일종가", "전일대비", "등락률", "시가", "고가", "저가", "거래량", "시가총액",
-            ])
+            if rq_name == "stock_info":
+                self._tr_data = self._parse_single(tr_code, rq_name, [
+                    "종목명", "현재가", "기준가", "전일종가", "전일대비", "등락률", "시가", "고가", "저가", "거래량", "시가총액",
+                ])
 
-        elif rq_name == "multi_stock_info":
-            self._tr_data = {"rows": self._parse_multi_stock_info(tr_code, rq_name)}
+            elif rq_name == "multi_stock_info":
+                self._tr_data = {"rows": self._parse_multi_stock_info(tr_code, rq_name)}
 
-        elif rq_name == "min_candle":
-            self._tr_data = {"rows": self._parse_candle_rows(tr_code, rq_name)}
+            elif rq_name == "min_candle":
+                self._tr_data = {"rows": self._parse_candle_rows(tr_code, rq_name)}
 
-        elif rq_name == "daily_candle":
-            self._tr_data = {"rows": self._parse_daily_candle_rows(tr_code, rq_name)}
+            elif rq_name == "daily_candle":
+                self._tr_data = {"rows": self._parse_daily_candle_rows(tr_code, rq_name)}
 
-        elif rq_name == "balance":
-            self._tr_data = self._parse_single(tr_code, rq_name, [
-                "예수금", "유가잔고평가액", "주식평가금액", "총평가금액", "총매입금액",
-            ])
+            elif rq_name == "balance":
+                self._tr_data = self._parse_single(tr_code, rq_name, [
+                    "예수금", "유가잔고평가액", "주식평가금액", "총평가금액", "총매입금액",
+                ])
 
-        elif rq_name == "daily_realized":
-            # 싱글: 총매수금액, 총매도금액, 실현손익, 매매수수료, 매매세금
-            self._tr_data = {}
-            for f in (
-                "총매수금액",
-                "총매도금액",
-                "실현손익",
-                "매매수수료",
-                "매매세금",
-            ):
-                self._tr_data[f] = self._get_comm_data(tr_code, rq_name, 0, f)
+            elif rq_name == "daily_realized":
+                # 싱글: 총매수금액, 총매도금액, 실현손익, 매매수수료, 매매세금
+                self._tr_data = {}
+                for f in (
+                    "총매수금액",
+                    "총매도금액",
+                    "실현손익",
+                    "매매수수료",
+                    "매매세금",
+                ):
+                    self._tr_data[f] = self._get_comm_data(tr_code, rq_name, 0, f)
 
-        elif rq_name == "index_info":
-            self._tr_data = self._parse_single(tr_code, rq_name, [
-                "현재가", "기준가", "대비", "등락률",
-            ])
+            elif rq_name == "index_info":
+                self._tr_data = self._parse_single(tr_code, rq_name, [
+                    "현재가", "기준가", "대비", "등락률",
+                ])
 
-        elif rq_name == "holdings":
-            self._tr_data = {"rows": self._parse_holdings_rows(tr_code, rq_name)}
+            elif rq_name == "holdings":
+                self._tr_data = {"rows": self._parse_holdings_rows(tr_code, rq_name)}
 
-        elif rq_name in ("거래대금상위", "전일거래량상위"):
-            logger.info("[opt10030콜백진입] rq=%s 경로 진입 확인", rq_name)
-            rows = self._parse_top_volume_rows(tr_code, rq_name)
-            logger.info("[%s분석] 파싱 결과: %d행, prev_next=%s, tr_code=%s",
-                       rq_name, len(rows), self._tr_prev_next, tr_code)
-            if rows:
-                logger.info("[%s샘플] 첫 행: %s", rq_name, str(rows[0])[:300])
+            elif rq_name in ("거래대금상위", "전일거래량상위"):
+                logger.info("[opt10030콜백진입] rq=%s 경로 진입 확인", rq_name)
+                rows = self._parse_top_volume_rows(tr_code, rq_name)
+                logger.info("[%s분석] 파싱 결과: %d행, prev_next=%s, tr_code=%s",
+                           rq_name, len(rows), self._tr_prev_next, tr_code)
+                if rows:
+                    logger.info("[%s샘플] 첫 행: %s", rq_name, str(rows[0])[:300])
+                else:
+                    # 0개인 경우 원본 데이터 확인
+                    logger.warning("[%s분석] 0개 반환 — RecordCnt=%s", rq_name,
+                                  self._get_comm_data(tr_code, rq_name, 0, "RecordCnt") if hasattr(self, '_get_comm_data') else "?")
+                self._tr_data = {"rows": rows}
+                logger.info("[opt10030설정완료] _tr_data={'rows': %d개 행}", len(rows))
+
             else:
-                # 0개인 경우 원본 데이터 확인
-                logger.warning("[%s분석] 0개 반환 — RecordCnt=%s", rq_name,
-                              self._get_comm_data(tr_code, rq_name, 0, "RecordCnt") if hasattr(self, '_get_comm_data') else "?")
-            self._tr_data = {"rows": rows}
-            logger.info("[opt10030설정완료] _tr_data={'rows': %d개 행}", len(rows))
+                logger.warning("[TR 수신] 알 수 없는 rq_name='%s' 처리 스킵 (opt10030 예상했음)", rq_name)
 
-        else:
-            logger.warning("[TR 수신] 알 수 없는 rq_name='%s' 처리 스킵 (opt10030 예상했음)", rq_name)
+        except Exception as e:
+            logger.error("[_on_receive_tr_data] 예외 발생 (rq=%s, tr=%s): %s", rq_name, tr_code, e, exc_info=True)
+            self._tr_data = {}
 
-        if self._tr_loop and self._tr_loop.isRunning():
-            self._tr_loop.quit()
+        finally:
+            if self._tr_loop and self._tr_loop.isRunning():
+                self._tr_loop.quit()
 
     def _on_receive_msg(self, _screen: str, rq_name: str, tr_code: str, msg: str) -> None:
         # 키움 메시지(msg) 및 요청명(rq_name) 한글 깨짐(CP949) 보정
@@ -1347,14 +1355,22 @@ class KiwoomManager(KiwoomProtocol):
         for i in range(cnt):
             def g(f, _i=i):
                 return self._get_comm_data(tr_code, rq_name, _i, f)
-            rows.append({
-                "time":   g("체결시간").strip(),
-                "open":   safe_int(g("시가")),
-                "high":   safe_int(g("고가")),
-                "low":    safe_int(g("저가")),
-                "close":  safe_int(g("현재가")),
-                "volume": safe_int(g("거래량")),
-            })
+            try:
+                time_str = g("체결시간").strip()
+                if not time_str:
+                    logger.debug("[_parse_candle_rows] 체결시간 없음 — 행 스킵 (i=%d, tr=%s)", i, tr_code)
+                    continue
+                rows.append({
+                    "time":   time_str,
+                    "open":   safe_int(g("시가")),
+                    "high":   safe_int(g("고가")),
+                    "low":    safe_int(g("저가")),
+                    "close":  safe_int(g("현재가")),
+                    "volume": safe_int(g("거래량")),
+                })
+            except Exception as e:
+                logger.warning("[_parse_candle_rows] 데이터 파싱 실패 (i=%d, tr=%s): %s", i, tr_code, e)
+                continue
         rows.reverse()  # [최신->과거] 를 [과거->최신] 으로 변경 (IndicatorService 표준)
         return rows
 
@@ -1412,9 +1428,8 @@ class KiwoomManager(KiwoomProtocol):
             raw_amt = safe_int(g("거래대금") or "0")
             amt_val = _resolve_trade_amount(raw_amt, price_v, volume_v)
 
-            if i < 20:  # 상위 20개 진단 (거래대금 검증용)
-                logger.warning("[opt10030 거래대금] 행[%d] %s raw_amt=%d (백만원 단위?) → amt_val=%d원 = %.2f억",
-                           i, code, raw_amt, amt_val, amt_val / 100_000_000)
+            # [2026-05-21] 거래대금 검증용 진단 로그 제거 (호출당 20건, 메인 스레드 부하)
+            # _resolve_trade_amount의 단위 변환 로직은 검증 완료됨
 
             # 현재가 필드 추출 (부호 제거는 safe_int가 처리)
             raw_p = g("현재가") or g("현재가(원)") or g("종가") or "0"
