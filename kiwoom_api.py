@@ -386,41 +386,37 @@ class KiwoomManager(KiwoomProtocol):
             self._set_input("관리종목포함", "1")  # 1=포함 (모의투자에서 데이터 부족 시 필요)
             self._set_input("신용구분", "0")  # 0=전체 (현물+신용)
 
-            # 페이지 간 5초 간격
+            # [PERF FIX 2026-05-27] 페이지 간 sleep 5초 → 2초 단축
+            # 원인: run_periodic_scan이 메인 스레드 동기 실행 → 5초×3페이지=15초 UI 블로킹
+            # 2026-05-27 09:35:50 주기 스캔 시작 후 09:36:00 UI 멈춤 사건의 직접 원인
+            # 키움 TR 호출 빈도 제한은 1초당 5건이므로 2초면 충분히 안전
             if page > 0:
-                logger.debug("[opt10030] 페이지 %d 전 5초 대기", page + 1)
-                time.sleep(5.0)
+                logger.debug("[opt10030] 페이지 %d 전 2초 대기", page + 1)
+                time.sleep(2.0)
 
             ok = self._comm_rq("opt10030", "거래대금상위", screen_no, prev_next=prev_next)
             if not ok:
                 logger.warning("[opt10030] TR 요청 실패 (페이지 %d)", page + 1)
                 break
 
-            # 응답 상세 분석 로그
+            # [CLEANUP 2026-05-26] 진단 로그 격하 — opt10030 응답 0개 문제 해결 후 더 이상 INFO 불필요
             chunk = self._tr_data.get("rows", [])
-            tr_data_keys = list(self._tr_data.keys())
-            logger.info("[opt10030분석] 페이지 %d TR응답: _tr_data 키=%s, rows길이=%d, prev_next=%s",
-                       page + 1, tr_data_keys, len(chunk), self._tr_prev_next)
+            logger.debug("[opt10030] 페이지 %d TR응답: rows길이=%d, prev_next=%s",
+                         page + 1, len(chunk), self._tr_prev_next)
 
             page += 1
             if not chunk:
-                logger.warning("[opt10030분석] 페이지 %d 데이터 없음 — _tr_data 내용 상세: %s",
+                logger.warning("[opt10030] 페이지 %d 데이터 없음 — 응답: %s",
                               page, str(self._tr_data)[:500])
                 break
 
             all_rows.extend(chunk)
-            logger.debug("[opt10030] 페이지 %d 수신 (%d행, 누적 %d)", page, len(chunk), len(all_rows))
-
-            # 첫 행 샘플 출력
-            if chunk and len(chunk) > 0:
-                first_row = chunk[0]
-                logger.debug("[opt10030샘플] 첫 행: %s", str(first_row)[:200])
 
             if len(all_rows) >= max_rows or self._tr_prev_next != "2":
                 break
             prev_next = 2
 
-        logger.info("[opt10030] 조회 완료: %d개 (max %d)", len(all_rows), max_rows)
+        logger.debug("[opt10030] 조회 완료: %d개 (max %d)", len(all_rows), max_rows)
         return all_rows[:max_rows]
 
     def fetch_opt10004_top_volume(self, max_rows: int = 200) -> list[dict]:
@@ -716,15 +712,35 @@ class KiwoomManager(KiwoomProtocol):
             logger.warning("get_balance _tr_data가 완전히 비어 있음 (응답 미도착) - 스킵")
             return {}
 
-        # 예수금 필드명 차용: 주 필드("예수금") + 대체 필드들 시도
-        cash_raw = d.get("예수금") or d.get("주식예수금") or d.get("수표예수금")
+        # [BUG FIX 2026-05-26] 예수금 vs 주문가능금액 구분
+        # opw00001 응답 필드 의미 (T+2 결제 체계):
+        #   - 예수금:             지금 시점 현금 (당일 매도대금 미반영)
+        #   - 주문가능금액:       지금 매수 주문 가능한 금액 (당일 매도대금 + 미체결 매수 차감 반영) ⭐
+        #   - D+1추정예수금:      익일 결제 후 잔액
+        #   - D+2추정예수금:      D+2 결제 완료 후 잔액 (실제 출금 가능 시점)
+        #   - 출금가능금액:       지금 출금 가능한 금액
+        # → 자동매매에 가장 적합한 것은 '주문가능금액'. 없으면 D+2추정예수금, 그래도 없으면 예수금.
+        cash_raw = (
+            d.get("주문가능금액") or
+            d.get("d2_estimate") or d.get("D+2추정예수금") or d.get("D+2 추정예수금") or
+            d.get("예수금") or d.get("주식예수금") or d.get("수표예수금")
+        )
         if not cash_raw:
             logger.warning(
-                "get_balance 예수금 필드 전부 비어 있음 - 응답 진단: %s (서버 응답 지연 또는 필드명 불일치)",
+                "get_balance 예수금/주문가능금액 필드 전부 비어 있음 - 응답 진단: %s",
                 list(d.keys())
             )
             return {}
         cash = safe_int(cash_raw)
+
+        # 진단 로그 — 어떤 필드가 어떤 값인지 한 번에 확인
+        # (운영 중 키움 HTS 화면과 우리 시스템 값 차이 추적용)
+        _diag_fields = ("주문가능금액", "D+2추정예수금", "출금가능금액", "예수금",
+                        "주식예수금", "수표예수금", "D+1추정예수금")
+        _diag = {k: safe_int(d.get(k, 0)) for k in _diag_fields if d.get(k) is not None}
+        if _diag:
+            logger.info("[get_balance] 잔고 필드 진단: %s → 사용=%s원",
+                        {k: f"{v:,}" for k, v in _diag.items()}, f"{cash:,}")
 
         # 총평가금액,총매입금액은 opw00001 필드명이 서버마다 다를 수 있음
         # -> 못 가져오면 대체 필드명들 시도
@@ -1282,18 +1298,14 @@ class KiwoomManager(KiwoomProtocol):
                 self._tr_data = {"rows": self._parse_holdings_rows(tr_code, rq_name)}
 
             elif rq_name in ("거래대금상위", "전일거래량상위"):
-                logger.info("[opt10030콜백진입] rq=%s 경로 진입 확인", rq_name)
+                # [CLEANUP 2026-05-26] 진단 로그 격하 — 응답 0개 문제 해결 후 INFO 불필요
                 rows = self._parse_top_volume_rows(tr_code, rq_name)
-                logger.info("[%s분석] 파싱 결과: %d행, prev_next=%s, tr_code=%s",
-                           rq_name, len(rows), self._tr_prev_next, tr_code)
-                if rows:
-                    logger.info("[%s샘플] 첫 행: %s", rq_name, str(rows[0])[:300])
-                else:
-                    # 0개인 경우 원본 데이터 확인
-                    logger.warning("[%s분석] 0개 반환 — RecordCnt=%s", rq_name,
+                logger.debug("[%s] 파싱 결과: %d행, prev_next=%s", rq_name, len(rows), self._tr_prev_next)
+                if not rows:
+                    # 0개인 경우만 경고
+                    logger.warning("[%s] 0개 반환 — RecordCnt=%s", rq_name,
                                   self._get_comm_data(tr_code, rq_name, 0, "RecordCnt") if hasattr(self, '_get_comm_data') else "?")
                 self._tr_data = {"rows": rows}
-                logger.info("[opt10030설정완료] _tr_data={'rows': %d개 행}", len(rows))
 
             else:
                 logger.warning("[TR 수신] 알 수 없는 rq_name='%s' 처리 스킵 (opt10030 예상했음)", rq_name)

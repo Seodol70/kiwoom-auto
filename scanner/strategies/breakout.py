@@ -39,30 +39,20 @@ class BreakoutStrategy(BaseStrategy):
             return None
 
         # 2. 진입 게이트 체크 (공통 필터) — OPENING 슬롯에서는 스킵 (2026-05-12: 학습 데이터 수집)
+        # [CLEANUP 2026-05-26] breakout_debug.log 디스크 IO + WARNING 로그 전부 제거
+        # — 매 신호 평가마다 4회 파일 flush + 2회 WARNING → UI 큐 폭주 / 디스크 부하 원인
+        # — 2026-05-26 14:15:00 UI 프리징 사건이 이 로그 폭주로 발생
         from datetime import datetime
         from scanner.evaluators.common import _resolve_time_slot
         now = datetime.now().time()
         slot = _resolve_time_slot(now, cfg)
 
-        # 진단 로그를 파일에 직접 저장
-        with open("d:\\prj\\kiwoom-auto\\logs\\breakout_debug.log", "a", encoding="utf-8") as f:
-            f.write(f"[{now}] PASS 신호 도달: {snap.code}({snap.name}) slot={slot}\n")
-            f.flush()
-
         if slot == "OPENING":
             gate_reason = "[OPENING_GATE_SKIP]"
         else:
             gate_reason = check_breakout_gate(snap, cfg)
-            # 진단 로그 (파일 + 시스템 로그)
-            with open("d:\\prj\\kiwoom-auto\\logs\\breakout_debug.log", "a", encoding="utf-8") as f:
-                f.write(f"[{now}] gate_reason={gate_reason} for {snap.code}({snap.name})\n")
-                f.flush()
-            logger.warning("[BREAKOUT 진단] %s(%s) gate_reason=%s", snap.code, snap.name, gate_reason or "FAIL")
             if not gate_reason:
-                with open("d:\\prj\\kiwoom-auto\\logs\\breakout_debug.log", "a", encoding="utf-8") as f:
-                    f.write(f"[{now}] BLOCKED by gate: {snap.code}({snap.name})\n")
-                    f.flush()
-                logger.warning("[BREAKOUT 차단] %s(%s) gate 필터 실패", snap.code, snap.name)
+                # 차단 사유는 evaluators 내부에서 이미 ScannerLogger.rejected로 기록됨
                 return None
 
         # 3. AI 피처 및 신호 생성
@@ -76,12 +66,8 @@ class BreakoutStrategy(BaseStrategy):
         if change_pct != 0:
             ai_features["change_pct"] = change_pct
 
-        sig = ScanSignal(
+        return ScanSignal(
             snap.code, snap.name, self.name, reason, snap.current_price,
             is_warmup="[WARMUP]" in reason,
             values=ai_features
         )
-        with open("d:\\prj\\kiwoom-auto\\logs\\breakout_debug.log", "a", encoding="utf-8") as f:
-            f.write(f"[{now}] ScanSignal 생성: {snap.code}({snap.name}) sig={sig}\n")
-            f.flush()
-        return sig

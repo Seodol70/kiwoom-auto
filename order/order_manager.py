@@ -50,6 +50,7 @@ class PendingOrderMeta:
     sector: str = ""                        # 업종명 (섹터 쏠림 방지용)
     eod_trade: bool = False                 # EOD 거래 플래그
     entry_phase: int = 0                    # 진입 페이즈 (1=모닝스캘핑, 2=메인)
+    entry_gap_pct: float = 0.0             # [2026-05-26] 진입 시 갭 상승 % (동적 손절선 산출용)
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,7 @@ class Position:
     trend_prev_level: int = 0             # 직전 추세 단계(Strong→No Trend 감시)
     near_daily_high: bool = False         # 진입 시 25일 신고가 근처 → TP 상향 적용
     custom_tp_pct:   float = 0.0          # 종목별 익절 목표 (0 = 전역 설정값 사용)
+    entry_gap_pct:   float = 0.0          # [2026-05-26] 진입 시 갭 상승 % (동적 손절선 산출용)
     # 종가매매(EOD) 플래그
     eod_trade:       bool = False         # True → 당일 15:19 강제청산 제외, 익일 관리
     overnight_held:  bool = False         # True → 익일 장 시작 후 갭 체크 관리 중
@@ -298,8 +300,31 @@ class OrderManager(QObject):
 
     @property
     def available_cash(self) -> int:
-        """가용 예수금 (TradingController 호환 프로퍼티)."""
-        return self.cash
+        """
+        가용 예수금 = self.cash - 미체결 매수 주문 추정 금액.
+
+        [BUG FIX 2026-05-26] 이전엔 self.cash만 반환했음. 그러나 self.cash는 매수 체결
+        콜백에서 비로소 차감되므로 주문 접수~체결 사이(수 초~수십 초)에 동일 예수금이
+        후속 진입 사이징에 중복 사용되는 버그가 있었음.
+        (예: 09:23:00 SFA반도체 사이징=2,137,868원, 09:23:02 케이씨에스 사이징=2,137,868원)
+        → 미체결 매수의 예상 금액(잔여수량 × 주문가)을 차감해 진짜 가용액 반환.
+
+        주의: 실전투자 서버는 opw00001 응답에서 '주문가능금액'을 사용하는데, 이 값은
+        이미 서버에서 미체결 매수를 차감한 값임. 30초마다 sync_balance가 호출되어 self.cash가
+        갱신되므로, 이중 차감 회피를 위해 sync 직후의 미체결만 차감해야 하나, sync 후
+        새 매수가 발생할 수 있어 가장 안전한 방식은 다음과 같다:
+          - sync_balance에서 마지막으로 캐치된 시각 이후에 접수된 매수만 차감
+          - 단순화를 위해 현재는 self.cash 기반으로 미체결을 모두 차감 (보수적)
+            → sync 직후 잠시 과소 추정 가능하나, 매수 차단(안전) 방향이라 무해
+        """
+        pending_amt = 0
+        for code, rem_qty in self._app_pending_buys.items():
+            info = self._pending_buy_info.get(code, {})
+            p = int(info.get("price", 0) or 0)
+            if p > 0 and rem_qty > 0:
+                # 수수료 약 0.015% 포함해 보수적으로 추정
+                pending_amt += int(rem_qty * p * 1.0002)
+        return max(0, self.cash - pending_amt)
 
     @property
     def total_equity(self) -> int:
@@ -420,6 +445,13 @@ class OrderManager(QObject):
                     trend_prev_level  = old.trend_prev_level  if old else 0,
                     entry_phase       = old.entry_phase       if old else 0,
                     sector            = old.sector            if old else "",
+                    # [BUG FIX 2026-05-26] sync_balance 시 누락됐던 메타 필드 복사
+                    # — EOD/갭/익절 메타가 서버 동기화 후에도 유지되도록 보존
+                    near_daily_high   = old.near_daily_high   if old else False,
+                    custom_tp_pct     = old.custom_tp_pct     if old else 0.0,
+                    eod_trade         = old.eod_trade         if old else False,
+                    overnight_held    = old.overnight_held    if old else False,
+                    entry_gap_pct     = old.entry_gap_pct     if old else 0.0,
                 )
             self.positions = new_positions
 
@@ -501,6 +533,12 @@ class OrderManager(QObject):
                     trend_prev_level  = old.trend_prev_level  if old else 0,
                     entry_phase       = old.entry_phase       if old else 0,
                     sector            = old.sector            if old else "",
+                    # [BUG FIX 2026-05-26] sync_balance 시 누락됐던 메타 필드 복사
+                    near_daily_high   = old.near_daily_high   if old else False,
+                    custom_tp_pct     = old.custom_tp_pct     if old else 0.0,
+                    eod_trade         = old.eod_trade         if old else False,
+                    overnight_held    = old.overnight_held    if old else False,
+                    entry_gap_pct     = old.entry_gap_pct     if old else 0.0,
                 )
             self.positions = new_positions
             if self._kiwoom.is_mock:
@@ -594,10 +632,15 @@ class OrderManager(QObject):
         price = signal.price
 
         # ── [Zone 1] 신호수신 로그 ──────────────────────────────────────────
+        # [FIX 2026-05-26] exec_velocity_ratio는 ScanSignal에 없음 → snap_store에서 조회
         _sig_type  = getattr(signal, "signal_type", "?")
         _trend_lv  = int(getattr(signal, "trend_level", 0) or 0)
-        _vel_ratio = float(getattr(signal, "exec_velocity_ratio", 0.0) or 0.0)
         _phase_nm  = getattr(signal, "entry_phase", 0)
+        _vel_ratio = 0.0
+        if self._snap_store:
+            _snap_vr = self._snap_store.get_snapshot(code)
+            if _snap_vr:
+                _vel_ratio = float(getattr(_snap_vr, "exec_velocity_ratio", 0.0) or 0.0)
         order_log.info(
             "[신호수신] %s(%s) 가격=%d 유형=%s trend_lv=%d vel_ratio=%.2f phase=%s",
             name, code, price, _sig_type, _trend_lv, _vel_ratio, _phase_nm,
@@ -725,6 +768,13 @@ class OrderManager(QObject):
             return
 
         # ── 수량 계산 (Dynamic Sizing) ───────────────────────────────────
+        # [GUARD 2026-05-26] price 0 또는 음수면 사이징 진행 불가 — 즉시 거절
+        if price <= 0:
+            msg = f"매수 거절 — 진입가 비정상 ({price}) — {name}({code})"
+            logger.warning(msg)
+            self.order_failed.emit(msg)
+            return
+
         mode = getattr(self._scan_cfg, "position_sizing_mode", "EQUAL").upper()
         qty = 0
 
@@ -753,12 +803,15 @@ class OrderManager(QObject):
             )
 
         else:
-            # 3. EQUAL (기존 방식): 예수금 / 남은 슬롯
+            # 3. EQUAL (기존 방식): 가용 예수금 / 남은 슬롯
+            # [BUG FIX 2026-05-26] self.cash → self.available_cash (미체결 매수 차감)
+            # remaining_slots에서 _pending(매수+매도 주문 대기)을 빼므로 슬롯 측에서도 중복 방지
+            _cash_avail = self.available_cash
             remaining_slots = self.max_positions - len(self.positions) - len(self._pending)
             remaining_slots = max(remaining_slots, 1)
-            budget = self.cash // remaining_slots
+            budget = _cash_avail // remaining_slots
             qty = budget // price if price > 0 else 0
-            order_log.info("[사이징:EQUAL] 가용예수금=%s원 슬롯=%d -> %d주", f"{self.cash:,}", remaining_slots, qty)
+            order_log.info("[사이징:EQUAL] 가용예수금=%s원 슬롯=%d -> %d주", f"{_cash_avail:,}", remaining_slots, qty)
 
         # ── 가용 자금 및 주문 한도 체크 ─────────────────────────────────────────
         # 1회 주문 한도(max_order_amount) 적용
@@ -767,10 +820,11 @@ class OrderManager(QObject):
             order_log.info("[사이징] 주문한도 초과 조정: %d -> %d주 (상한 %s원)", qty, max_qty, f"{self.max_order_amount:,}")
             qty = max_qty
 
-        # 가용 예수금(cash) 초과 방지
-        can_buy_qty = self.cash // price if price > 0 else 0
+        # 가용 예수금 초과 방지 (미체결 매수 차감 후 기준)
+        _cash_avail = self.available_cash
+        can_buy_qty = _cash_avail // price if price > 0 else 0
         if qty > can_buy_qty:
-            order_log.info("[사이징] 예수금 부족 조정: %d -> %d주 (가용 %s원)", qty, can_buy_qty, f"{self.cash:,}")
+            order_log.info("[사이징] 예수금 부족 조정: %d -> %d주 (가용 %s원)", qty, can_buy_qty, f"{_cash_avail:,}")
             qty = can_buy_qty
 
         if qty <= 0:
@@ -780,15 +834,34 @@ class OrderManager(QObject):
             return
 
         # 진입 메타데이터 임시 보관 → 체결 콜백에서 Position에 반영 (Phase G-1)
+        # [BUG FIX 2026-05-26] ScanSignal의 ai_features는 .values dict에 저장됨.
+        # 이전엔 getattr(signal, "eod_trade", ...) 형태로 직접 속성 찾았는데 ScanSignal엔
+        # 그런 필드가 없어서 항상 기본값(False/0/"")만 반환 → EOD/candle_stop/near_daily_high 등 미작동.
+        # → signal.values.get(...) 로 수정. 단 trend_level/trend_prev_level/entry_phase는
+        #   smart_scanner._evaluate / trading_controller.handle_signal에서 동적 속성으로 할당되므로 그대로 유지.
+        _vals = getattr(signal, "values", None) or {}
+
+        # entry_gap_pct: 갭 상승 % (동적 손절선 산출에 활용)
+        # snap에서 prev_close/open_price로 계산, fallback으로 values["gap_pct"] 사용
+        _gap_pct = float(_vals.get("gap_pct", 0.0) or 0.0)
+        if _gap_pct == 0.0 and self._snap_store:
+            _snap_gap = self._snap_store.get_snapshot(code)
+            if _snap_gap:
+                _pc = float(getattr(_snap_gap, "prev_close", 0) or 0)
+                _op = float(getattr(_snap_gap, "open_price", 0) or 0)
+                if _pc > 0 and _op > 0:
+                    _gap_pct = (_op - _pc) / _pc * 100
+
         self._pending_meta[code] = PendingOrderMeta(
-            candle_stop=int(getattr(signal, "entry_candle_low", 0) or 0),
+            candle_stop=int(_vals.get("entry_candle_low", 0) or 0),
             trend_level=int(getattr(signal, "trend_level", 0) or 0),
             trend_prev_level=int(getattr(signal, "trend_prev_level", 0) or 0),
-            near_daily_high=bool(getattr(signal, "near_daily_high", False)),
-            custom_tp_pct=float(getattr(signal, "custom_tp_pct", 0.0)),
+            near_daily_high=bool(_vals.get("near_daily_high", False)),
+            custom_tp_pct=float(_vals.get("custom_tp_pct", 0.0) or 0.0),
             sector=_sector,
-            eod_trade=bool(getattr(signal, "eod_trade", False)),
-            entry_phase=int(getattr(signal, "entry_phase", 0)),
+            eod_trade=bool(_vals.get("eod_trade", False)),
+            entry_phase=int(getattr(signal, "entry_phase", 0) or 0),
+            entry_gap_pct=_gap_pct,
         )
 
         # ✅ 피라미딩인 경우 수량 조절 (기본 50%)
@@ -1377,8 +1450,11 @@ class OrderManager(QObject):
         if order_type == OrderType.BUY:
             self._app_pending_buys[code] = qty
             # [P2] 매수 접수 시각·정보 기록 — 10초 미체결 감지용
+            # [BUG FIX 2026-05-26] price 추가 저장 — available_cash 계산에 사용
             self._pending_buy_time[code] = datetime.now()
-            self._pending_buy_info[code] = {"qty": qty, "name": name, "order_no": rq_name}
+            self._pending_buy_info[code] = {
+                "qty": qty, "name": name, "order_no": rq_name, "price": price,
+            }
             if self._audit:
                 self._audit.log_buy_order(code, qty, price)
         else:
@@ -1533,6 +1609,7 @@ class OrderManager(QObject):
                 eod_trade=meta.eod_trade,
                 entry_phase=meta.entry_phase,
                 sector=meta.sector,
+                entry_gap_pct=meta.entry_gap_pct,
             )
             position_log.info(
                 "[포지션생성] %s(%s) 체결가=%d 수량=%d 섹터=[%s] trend_lv=%d phase=%d",

@@ -106,12 +106,18 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         # 1. 포트폴리오 동기화 (10초)
         self._port_refresh_timer = QTimer(self)
         self._port_refresh_timer.timeout.connect(self._port_worker.sync)
-        
+
         # 2. 스캐너 주기적 스캔 (60초)
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.timeout.connect(self.trading_controller.run_periodic_scan)
 
         # 3. 장 종료 후 분석은 MarketScheduler의 feedback_triggered 신호로 처리됨
+
+        # 4. [Option A 2026-05-27] 청산 평가 독립 타이머 (5초 주기)
+        # — 잔고 동기화 워커와 분리. 잔고 워커가 멈춰도 손절/익절 정상 작동
+        # — 빛과전자 -52,211원 사례(잔고 워커 11분 침묵) 재발 방지
+        self._exit_check_timer = QTimer(self)
+        self._exit_check_timer.timeout.connect(self.trading_controller.tick_exit_check)
 
     def _setup_background_workers(self) -> None:
         """백그라운드 워커 설정 및 시작"""
@@ -136,6 +142,8 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         # 60초(60,000) -> 120초(120,000)로 상향 조정 (config 연동)
         scan_interval = int(getattr(self._scan_cfg, "scan_interval", 120.0)) * 1000
         self._scan_refresh_timer.start(scan_interval)
+        # [Option A 2026-05-27] 청산 평가 5초 타이머 시작 (잔고 워커와 독립)
+        self._exit_check_timer.start(5_000)
 
         # 2. 스마트 스캐너 시작 (백그라운드 루프 시동)
         if hasattr(self, "_smart_scanner"):
@@ -175,6 +183,7 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
             if hasattr(self, "_log_timer"): self._log_timer.stop()
             if hasattr(self, "_port_refresh_timer"): self._port_refresh_timer.stop()
             if hasattr(self, "_scan_refresh_timer"): self._scan_refresh_timer.stop()
+            if hasattr(self, "_exit_check_timer"): self._exit_check_timer.stop()
 
             # 2. 백그라운드 워커/스레드 안전 종료
             # [NEW 2026-05-26] PriorityWatchQueue 워커 중지

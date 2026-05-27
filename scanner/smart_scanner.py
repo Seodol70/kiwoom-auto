@@ -640,7 +640,8 @@ class SmartScanner(QObject):
             if self._prefiltered:
                 if not getattr(self, "_loop_mode_logged", False):
                     mode = "WATCH" if self._universe_paused else "SEARCH"
-                    logger.warning("[2단계 모드] %s 모드로 진입 (포지션 수: %d)", mode, len(self.order_mgr.positions) if hasattr(self, 'order_mgr') else "?")
+                    _pos_cnt = len(self.order_mgr.positions) if hasattr(self, 'order_mgr') and self.order_mgr else -1
+                    logger.warning("[2단계 모드] %s 모드로 진입 (포지션 수: %d)", mode, _pos_cnt)
                     self._loop_mode_logged = True
                 if self._universe_paused:
                     # ====== WATCH 모드 ======
@@ -857,9 +858,12 @@ class SmartScanner(QObject):
 
 
     def _emit(self, sig: ScanSignal) -> None:
-        # ✅ 2026-05-11: 신호 발생 진단
-        logger.warning("[신호발생] %s(%s) [%s] 가격=%d 사유=%s",
-                      sig.name, sig.code, sig.signal_type, int(sig.price), sig.reason)
+        # [CLEANUP 2026-05-27] WARNING → INFO 격하
+        # — 5/11 진단용 WARNING이었음. WARNING은 UI LogPanel에서 강조 처리되어 부하 큼.
+        # — 09:36:00 같은 동시 다발 신호 시 WARNING 폭주로 UI 멈춤 재발 (2026-05-27 09:36:00)
+        # — [신호수신] / [진입거절] 등 후속 INFO로 충분히 추적 가능
+        logger.info("[신호발생] %s(%s) [%s] 가격=%d 사유=%s",
+                    sig.name, sig.code, sig.signal_type, int(sig.price), sig.reason)
 
         # 동일 종목/신호 재발행 쿨다운
         now_ts = time.monotonic()
@@ -1340,16 +1344,11 @@ class SmartScanner(QObject):
         # 2. 거래대금 상위 데이터 확보
         _prog("거래대금 상위 조회", 0, self.cfg.collect_raw_top_n, "데이터 수집 중...")
         rows = self._get_top_volume_data(_prog)
-
-        # ✅ 2026-05-11: 진단 로그
-        logger.warning("[진단] _get_top_volume_data 반환: %d행", len(rows) if rows else 0)
-        if rows:
-            for i, r in enumerate(rows[:3]):
-                logger.warning("[진단] rows[%d] = code=%s, name=%s, change_pct=%.2f%%",
-                             i, r.get("code"), r.get("name"), r.get("change_pct", 0))
+        # [CLEANUP 2026-05-26] 평소 정상 작동 시 INFO 로그 불필요 — 실패 시에만 WARNING
+        logger.debug("[주기 스캔] _get_top_volume_data 반환: %d행", len(rows) if rows else 0)
 
         if not rows:
-            logger.critical("[진단] 종목 데이터 없음 - 신호 발생 불가능")
+            logger.warning("[주기 스캔] 종목 데이터 없음 - 신호 발생 불가능")
             return []
 
         # 3. 유니버스 필터링 및 스코어링
@@ -1362,13 +1361,9 @@ class SmartScanner(QObject):
 
         # 5. 실시간 구독 갱신 (상위 N종목)
         top_codes = [r["code"] for r in rows]
-        logger.warning("[진단] SetRealReg 구독 예정 종목: %d개", len(top_codes))
-        if len(top_codes) <= 5:
-            for code in top_codes:
-                logger.warning("[진단]   - %s", code)
+        logger.debug("[주기 스캔] SetRealReg 구독: %d종목", len(top_codes))
         self._refresh_realtime_watch(top_codes)
         self._prefiltered = True  # [NEW] 실시간 루프 가동 플래그 활성화
-        logger.warning("[진단] SetRealReg 구독 완료")
 
         # 6. 부족한 분봉 데이터 비동기 로딩
         self._ensure_candle_data(top_codes)
@@ -1415,13 +1410,7 @@ class SmartScanner(QObject):
         
         logger.info("[주기 스캔] opt10030 즉시 조회 (캐시나이 %.1fs)", cache_age)
         rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, on_progress=prog_cb)
-
-        # [DEBUG] 실시간 fallback rows 로깅
-        if rows:
-            for i, r in enumerate(rows[:10]):
-                name = r.get("name", "?")
-                logger.warning("[_get_top_volume_data 결과] #%d: code=%s name=%s volume=%s trade_amount=%s",
-                             i, r.get("code"), name, r.get("volume"), r.get("trade_amount"))
+        # [CLEANUP 2026-05-26] 상위 10건 디버그 로그 제거 (호출당 10건 WARNING → UI 부하)
 
         if not rows:
             # ✅ 2026-05-11: 모의투자 환경 대응
@@ -1433,7 +1422,7 @@ class SmartScanner(QObject):
             with self.store._lock:
                 realtime_codes = list(self.store._states.keys())
 
-            logger.warning("[진단] 실시간 데이터에서 %d개 종목 감지", len(realtime_codes))
+            logger.debug("[폴백] 실시간 데이터에서 %d개 종목 감지", len(realtime_codes))
 
             # 실시간 데이터도 없으면 GetCodeListByMarket으로 전체 종목 조회
             if not realtime_codes:

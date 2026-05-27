@@ -213,6 +213,17 @@ class TradingController(QObject):
     def handle_signal(self, sig: ScanSignal) -> bool:
         """신호 필터링 (Phase1 태깅 + EntryStrategy 위임)"""
 
+        # [BUG FIX 2026-05-26] MagicMock 단위테스트 신호가 실운영에 침투하는 버그 차단
+        # 10:14, 10:29에 code=000003, name=MagicMock 신호가 실운영 logger에 기록된 사례 발생
+        if (sig.code == "000003"
+                or "mock" in str(sig.name).lower()
+                or "MagicMock" in str(sig.name)):
+            logger.warning(
+                "[진입거절] %s(%s) 테스트 신호 차단 — 실운영 환경에서 Mock 신호 감지",
+                sig.name, sig.code
+            )
+            return False
+
         # [P0-1 2026-05-21 / 확대 2026-05-22] 개장 직후 1시간(09:00~10:00) 분당 1건 진입 제한
         # 5/22 데이터: 10:00~11:00에 -4.26% 신규 손실 발생 → 시간 확대
         from datetime import datetime as _dt, timedelta as _td
@@ -228,20 +239,21 @@ class TradingController(QObject):
                 self._record_signal(sig)
                 return False
 
-            # [NEW 2026-05-26] 09:30~10:00 강한 신호만 통과 (trend_lv >= 2)
-            # 5/26 분석: 09:30 이후 진입 9건 중 익절 1건(11%), 09:30 이전 5건 중 익절 2건(40%)
-            # 잔파동 시간대 약한 신호 차단 → 손실 누적 방지
-            if _now.time() >= _dt.strptime("09:30", "%H:%M").time():
-                _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
-                _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
-                if _trend_lv < 2:
-                    logger.info(
-                        "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
-                        sig.name, sig.code, _trend_lv
-                    )
-                    self.signal_rejected.emit(f"{sig.code}: 09:30+ 약한신호 (trend_lv={_trend_lv})")
-                    self._record_signal(sig)
-                    return False
+        # [FIX 2026-05-26] 09:30+ 약한신호 차단 — 블록 범위를 09:00~10:00 밖으로 이동
+        # 버그: 이전에 09:00~10:00 블록 안에 nested → 10:00 이후 오후 신호에 미작동
+        # 5/26 분석: 13:16 라온시큐어(trend_lv=0), 13:17 우리로(trend_lv=0) 오후 진입 발생
+        # → 09:30 이후 전 시간대에 적용 (09:00~09:30 OPENING 제외)
+        if _now.time() >= _dt.strptime("09:30", "%H:%M").time():
+            _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
+            _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
+            if _trend_lv < 2:
+                logger.info(
+                    "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
+                    sig.name, sig.code, _trend_lv
+                )
+                self.signal_rejected.emit(f"{sig.code}: 09:30+ 약한신호 (trend_lv={_trend_lv})")
+                self._record_signal(sig)
+                return False
 
         # Phase1 태깅 및 한도 체크
         if sig.signal_type == "OPENING_SCALP":
@@ -542,9 +554,42 @@ class TradingController(QObject):
 
     # ─── 포지션 청산 판정 ──────────────────────────────────────────────
 
+    @pyqtSlot()
+    def tick_exit_check(self) -> None:
+        """
+        [Option A 2026-05-27] 독립 5초 타이머에서 호출되는 청산 평가.
+
+        기존엔 update_portfolio_prices() → check_and_exit_all() 흐름이 잔고 워커
+        (opw00001 60초 주기)에 종속됐음. 잔고 워커가 멈추면 청산도 멈춰서
+        2026-05-27 빛과전자 -52,211원 사례 발생 (11분간 청산 평가 0회).
+
+        이 메서드는:
+        1. SnapshotStore 실시간 가격으로 보유 포지션 current_price 갱신
+        2. check_and_exit_all() 직접 호출 (손절/익절 트리거)
+        3. AppState 갱신 (UI에 현재가/평가손익 반영)
+        — 잔고 동기화와 완전히 분리되어 독립적으로 작동.
+        """
+        if not self._order_mgr or not self._order_mgr.positions:
+            return
+        try:
+            # 1. 보유 포지션 가격만 빠르게 갱신 (잔고 동기화 X, 가벼움)
+            for pos in self._order_mgr.positions.values():
+                if self._snap_store:
+                    snap = self._snap_store.get_snapshot(pos.code)
+                    if snap and snap.current_price > 0 and pos.current_price != snap.current_price:
+                        pos.current_price = snap.current_price
+
+            # 2. AppState 갱신 (UI에 평가손익 반영)
+            if self._ctx:
+                self._ctx.update_portfolio(self._order_mgr.cash, dict(self._order_mgr.positions))
+
+            # 3. 청산 평가 (가장 중요한 부분 — 손절/익절 트리거)
+            self.check_and_exit_all()
+        except Exception as e:
+            logger.warning("[tick_exit_check] 오류: %s", e)
 
     def check_and_exit_all(self) -> None:
-        """모든 포지션 청산 판정 (매분 호출)"""
+        """모든 포지션 청산 판정 (5초 주기 호출)"""
         count = 0
         # 현재 시간 슬롯 감지
         now = datetime.now()

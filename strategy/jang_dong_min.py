@@ -208,20 +208,72 @@ class JangDongMinStrategy(BaseStrategy):
         if pos.current_price >= activation and pos.current_price > pos.peak_price:
             pos.peak_price = pos.current_price
 
+    def _get_gap_dynamic_sl_tp(self, pos: Any) -> tuple[float, float]:
+        """
+        [2026-05-26] 갭 상승 크기에 비례한 동적 손절/익절 반환.
+        장 초반(09:00~10:00) 진입 + 갭 ≥ 2% + gap_dynamic_sl_enabled=True 시 적용.
+        반환: (sl_pct, tp_pct) — (0, 0)은 적용 안 함 (일반 ctx.sl_pct 사용).
+        """
+        if not getattr(self._scan_cfg, "gap_dynamic_sl_enabled", True):
+            return 0.0, 0.0
+
+        entry_time = getattr(pos, "entry_time", None)
+        if not entry_time:
+            return 0.0, 0.0
+
+        from datetime import time as _t
+        # 장 초반 갭 변동성 구간 (09:00~10:00) 진입 종목에 적용
+        # 근거: 오늘(2026-05-26) 손절 12건 중 11건이 09:00~10:10 사이에 집중
+        if not (_t(9, 0) <= entry_time.time() < _t(10, 0)):
+            return 0.0, 0.0
+
+        gap_pct = float(getattr(pos, "entry_gap_pct", 0.0) or 0.0)
+        if gap_pct < 2.0:
+            return 0.0, 0.0  # 갭 2% 미만은 일반 손절 적용
+
+        tier1 = float(getattr(self._scan_cfg, "gap_sl_tier1_pct", 5.0))
+        tier2 = float(getattr(self._scan_cfg, "gap_sl_tier2_pct", 10.0))
+
+        if gap_pct < tier1:          # 갭 2~5%
+            sl = float(getattr(self._scan_cfg, "gap_sl_tier1_stop", -2.0))
+            tp = float(getattr(self._scan_cfg, "gap_tp_tier1_pct", 3.5))
+        elif gap_pct < tier2:        # 갭 5~10%
+            sl = float(getattr(self._scan_cfg, "gap_sl_tier2_stop", -2.5))
+            tp = float(getattr(self._scan_cfg, "gap_tp_tier2_pct", 4.5))
+        else:                        # 갭 10%+
+            sl = float(getattr(self._scan_cfg, "gap_sl_tier3_stop", -3.0))
+            tp = float(getattr(self._scan_cfg, "gap_tp_tier3_pct", 5.5))
+
+        return sl, tp
+
     def should_exit(self, pos: Any, ctx: ExitContext) -> tuple[bool, str]:
         """청산 판정 로직 (기존 app/strategy.py 로직 통합)"""
         _is_eod_pre_gap = getattr(pos, "eod_trade", False) and not getattr(pos, "overnight_held", False)
         chg = float(pos.price_change_pct_vs_avg)
-
-        # 1. 하드 스탑 (절대 손절선)
-        # [P0-2 2026-05-21] OPENING 슬롯(09:00~09:30 진입) 종목은 -1.5%로 강화
-        # 어제 성호전자(09:05 진입) -4.22% 손실 사례 방지
-        _hard_stop = float(self._scan_cfg.hard_stop_pct)
+        # entry_time은 Hard Stop과 Time Cut에서 모두 참조하므로 함수 시작부에서 1회만 조회
         entry_time = getattr(pos, "entry_time", None)
+
+        # [2026-05-26] 갭 동적 손절/익절 계산
+        # 오늘 HPSP(-1.7% 손절 → 이후 +4.3%), 빛과전자(-1.1% 손절 → +3.9%), 대우건설(-1.3% → +4.6%)
+        # 갭 종목은 장중 변동성이 크므로 고정 -1.5% 손절은 너무 좁음 → 갭 비례 확대
+        _gap_sl, _gap_tp = self._get_gap_dynamic_sl_tp(pos)
+        _use_gap_dynamic = _gap_sl != 0.0
+
+        # 1. 하드 스탑 (절대 손절선) — EOD 포지션도 적용 (절대 손실 방어선 역할)
+        # [P0-2 2026-05-21] OPENING 슬롯(09:00~09:30 진입) 종목은 -1.5%로 강화
+        # [2026-05-26] 갭 동적 손절이 활성화된 경우 갭 기준 손절 사용 (더 넓은 여유 허용)
+        # 갭 동적 시간 범위(09:00~10:00)와 OPENING 강화 범위(09:00~09:30)가 다름에 주의
+        _hard_stop = float(self._scan_cfg.hard_stop_pct)
         if entry_time:
             from datetime import time as _dtime
-            if _dtime(9, 0) <= entry_time.time() <= _dtime(9, 30):
-                _hard_stop = max(_hard_stop, -1.5)  # -1.5% (더 엄격)
+            _et = entry_time.time()
+            if _use_gap_dynamic:
+                # 갭 동적 활성 (09:00~10:00 갭 종목): Hard Stop = gap_sl × 1.5
+                # 예: gap_sl=-2.5% → hard_stop=-3.75% (음수 비교, min으로 더 깊은 값 선택)
+                _hard_stop = min(_hard_stop, _gap_sl * 1.5)
+            elif _dtime(9, 0) <= _et <= _dtime(9, 30):
+                # 갭 비활성(갭<2%) + OPENING 진입: 기존 -1.5% 강화 유지
+                _hard_stop = max(_hard_stop, -1.5)
         if chg <= _hard_stop:
             return True, f"Hard Stop ({_hard_stop:.1f}%)"
 
@@ -234,15 +286,26 @@ class JangDongMinStrategy(BaseStrategy):
 
         # 3. 익절 (Take Profit) — 트레일 스탑 미활성화 시에만
         if trail_price <= 0:  # 트레일 스탑이 활성화되지 않은 경우만
-            _tp_pct = float(getattr(self._scan_cfg, "take_profit_pct", 2.5))
+            if _use_gap_dynamic:
+                # 갭 동적 익절 목표 사용
+                _tp_pct = _gap_tp
+                logger.debug("[갭동적익절] %s 갭%.1f%% → 손절%.1f%%/익절+%.1f%%",
+                             getattr(pos, "name", "?"),
+                             float(getattr(pos, "entry_gap_pct", 0.0)),
+                             _gap_sl, _gap_tp)
+            else:
+                _tp_pct = float(getattr(self._scan_cfg, "take_profit_pct", 2.5))
             if chg >= _tp_pct:
                 return True, f"Take Profit ({_tp_pct:.1f}%)"
 
         # 4. 일반 손절 (EMA 보호 포함)
-        if not _is_eod_pre_gap and chg <= ctx.sl_pct:
+        # 갭 동적 활성 시 sl_pct를 갭 기준으로 교체
+        _sl_pct = _gap_sl if _use_gap_dynamic else ctx.sl_pct
+        if not _is_eod_pre_gap and chg <= _sl_pct:
             if self._check_ema_protection(pos):
                 return False, "EMA20 Support (Hold)"
-            return True, f"Stop Loss ({ctx.sl_pct:.1f}%)"
+            tag = f"GAP동적({float(getattr(pos,'entry_gap_pct',0.0)):.0f}%갭)" if _use_gap_dynamic else ""
+            return True, f"Stop Loss{' '+tag if tag else ''} ({_sl_pct:.1f}%)"
 
         # 5. 타임컷
         if ctx.time_cut_min > 0 and not getattr(pos, "eod_trade", False):
@@ -252,7 +315,7 @@ class JangDongMinStrategy(BaseStrategy):
                 and int(getattr(pos, "trend_level", 0)) >= strong_lv
             )
             if not exempt:
-                entry_time = getattr(pos, "entry_time", None)
+                # entry_time은 L264에서 이미 정의됨 (재할당 불필요)
                 if entry_time:
                     elapsed = (datetime.now() - entry_time).total_seconds() / 60
                     if elapsed >= ctx.time_cut_min:
