@@ -77,11 +77,11 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
     logger = logging.getLogger(__name__)
 
     now = datetime.now().time()
-    logger.warning("[check_breakout_gate] 시작: %s(%s) now=%s", snap.code, snap.name, now)
+    logger.debug("[check_breakout_gate] 시작: %s(%s) now=%s", snap.code, snap.name, now)
 
     if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
         msg = f"진입 허용 시간 아님 ({cfg.entry_start_time}~{cfg.entry_end_time})"
-        logger.warning("[check_breakout_gate] 시간필터 거절: %s", msg)
+        logger.debug("[check_breakout_gate] 시간필터 거절: %s", msg)
         ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_TIME", msg)
         return None
 
@@ -141,8 +141,8 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
         from scanner.evaluators.common import check_trade_amount_surge
         ta_result = check_trade_amount_surge(snap, accel_mult=surge_mult)
         if ta_result is None:
-            logger.warning("[check_breakout_gate] 거래대금 미달: %s(%s) < %.1f배",
-                          snap.code, snap.name, surge_mult)
+            logger.debug("[check_breakout_gate] 거래대금 미달: %s(%s) < %.1f배",
+                         snap.code, snap.name, surge_mult)
             ScannerLogger.near_miss(
                 snap.code, snap.name, "BREAKOUT_TRADE_AMOUNT",
                 reason=f"거래대금 미달 — 현재 < 최근 5봉 평균 × {surge_mult:.1f}배",
@@ -152,9 +152,9 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
     # VWAP 필터 — 활성화 (2026-05-13: 거짓 신호 필터링)
     r_vwap = check_vwap_filter(snap)
     if not r_vwap:
-        logger.warning("[check_breakout_gate] VWAP 거절: %s(%s)", snap.code, snap.name)
+        logger.debug("[check_breakout_gate] VWAP 거절: %s(%s)", snap.code, snap.name)
         return None
 
     result = f"[{_slot}] 체결강도 {snap.chejan_strength:.0f}% | 등락률 {_snap_chg:.1f}% | {r_vwap}"
-    logger.warning("[check_breakout_gate] 완료(통과): %s(%s) → %s", snap.code, snap.name, result)
+    logger.debug("[check_breakout_gate] 완료(통과): %s(%s) → %s", snap.code, snap.name, result)
     return result
