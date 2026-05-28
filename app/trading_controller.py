@@ -213,6 +213,15 @@ class TradingController(QObject):
     def handle_signal(self, sig: ScanSignal) -> bool:
         """신호 필터링 (Phase1 태깅 + EntryStrategy 위임)"""
 
+        # [Phase 3 2026-05-28] OVERHEAT_PULLBACK — 수동 확인 모드 (자동매수 미연결)
+        # 대시보드에 'OP:눌림목' 태그로만 표시, 직접 수동 매수 유도
+        # 1~2주 데이터 축적 후 승률 검증 완료 시 이 블록 제거하여 자동매수 활성화
+        if sig.signal_type == "OVERHEAT_PULLBACK":
+            logger.info("[OVERHEAT_PULLBACK] %s(%s) 눌림목 신호 감지 — 수동 확인 필요 (자동매수 대기 중)",
+                        sig.name, sig.code)
+            self.signal_rejected.emit(f"{sig.code}: OP눌림목(수동확인)")
+            return False
+
         # [BUG FIX 2026-05-26] MagicMock 단위테스트 신호가 실운영에 침투하는 버그 차단
         # 10:14, 10:29에 code=000003, name=MagicMock 신호가 실운영 logger에 기록된 사례 발생
         if (sig.code == "000003"

@@ -199,8 +199,21 @@ class ScannerPanel(QWidget):
             self._table.setItem(r, 6, it_amt)
 
             # 7: 신호
-            it_sig = QTableWidgetItem(str(row.get("signal", "")))
+            raw_sig = str(row.get("signal", ""))
+            # OVERHEAT_PULLBACK은 수동 확인 유도용 태그로 표시 (Phase 3: 자동매수 미연결)
+            if raw_sig == "OVERHEAT_PULLBACK":
+                display_sig = "OP:눌림목"
+            else:
+                display_sig = raw_sig
+            it_sig = QTableWidgetItem(display_sig)
             it_sig.setTextAlignment(Qt.AlignCenter)
+            if raw_sig == "OVERHEAT_PULLBACK":
+                it_sig.setForeground(QColor("#cba6f7"))   # 보라색 (수동 확인 요청)
+                it_sig.setBackground(QColor("#2d1e3e"))   # 어두운 보라 배경
+            elif raw_sig in ("BREAKOUT", "JDM_ENTRY"):
+                it_sig.setForeground(QColor("#f38ba8"))   # 빨강 (강한 신호)
+            elif raw_sig == "PULLBACK":
+                it_sig.setForeground(QColor("#89dceb"))   # 하늘색
             self._table.setItem(r, 7, it_sig)
 
             # 8: 추세

@@ -26,6 +26,7 @@ from .evaluators.surge import check_pre_surge, check_opening_surge, check_openin
 from .evaluators.eod import check_eod_entry
 from .evaluators.testa import check_testa_alignment
 from .evaluators.pullback import check_pullback_entry
+from .evaluators.overheat_pullback import check_overheat_pullback_entry
 
 # TYPE_CHECKING용 임포트 (런타임 순환참조 방지)
 if TYPE_CHECKING:
@@ -44,6 +45,7 @@ __all__ = [
     'check_eod_entry',
     'check_testa_alignment',
     'check_pullback_entry',
+    'check_overheat_pullback_entry',
     'check_volume_surge',
     'check_chejan_strength',
     'check_vwap_filter',

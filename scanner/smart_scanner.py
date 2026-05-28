@@ -222,11 +222,13 @@ class SmartScanner(QObject):
         from scanner.strategies.jdm_entry import JdmStrategy
         from scanner.strategies.pullback import PullbackStrategy
         from scanner.strategies.eod import EODStrategy
+        from scanner.strategies.overheat_pullback import OverheatPullbackStrategy
         self.strategy_map = {
             "BREAKOUT": BreakoutStrategy(),
             "JDM_ENTRY": JdmStrategy(),
             "PULLBACK": PullbackStrategy(),
             "EOD": EODStrategy(),
+            "OVERHEAT_PULLBACK": OverheatPullbackStrategy(),
         }
 
 
@@ -411,6 +413,12 @@ class SmartScanner(QObject):
             self._ui_update_timer.timeout.connect(self._process_ui_queue)
             self._ui_update_timer.start(1000)  # [2026-05-21] 500→1000ms (UI 부하 감소, 변경 감지 로직과 시너지)
 
+        # [2026-05-28] opt10030 갱신 전용 타이머 — run_periodic_scan과 분리
+        # run_periodic_scan은 캐시만 읽고, opt10030 조회는 이 타이머가 단독으로 담당
+        self._opt10030_refresh_timer = QTimer()
+        self._opt10030_refresh_timer.timeout.connect(self._bg_fetch_opt10030)
+        self._opt10030_refresh_timer.start(5 * 60 * 1000)  # 5분마다 갱신
+
 
     def stop(self) -> None:
         self._running = False
@@ -428,6 +436,10 @@ class SmartScanner(QObject):
             logger.info("SmartScanner 실시간 감시 해제 완료")
         except Exception as e:
             logger.warning("SmartScanner 감시 해제 실패: %s", e)
+
+        # opt10030 갱신 타이머 정지
+        if hasattr(self, "_opt10030_refresh_timer"):
+            self._opt10030_refresh_timer.stop()
 
         # 디스플레이 정지
         self.display.stop()
@@ -1402,15 +1414,26 @@ class SmartScanner(QObject):
         return True
 
     def _get_top_volume_data(self, prog_cb: Callable) -> list[dict]:
-        """거래대금 상위 데이터를 확보한다 (캐시 우선, 실패 시 fallback)."""
+        """거래대금 상위 데이터를 확보한다 (캐시 전용 — 동기 TR 조회 금지).
+
+        opt10030 갱신은 _opt10030_refresh_timer (5분 주기) 또는 _bg_fetch_opt10030이 담당.
+        이 메서드는 캐시를 반환하기만 한다 — 절대로 블로킹 TR 호출 금지.
+        """
         cache_age = time.monotonic() - self._last_volume_updated
-        if self._last_volume_rows and cache_age < 300.0:
-            logger.info("[주기 스캔] 캐시된 opt10030 결과 사용 (나이 %.1fs, %d종목)", cache_age, len(self._last_volume_rows))
+        if self._last_volume_rows:
+            if cache_age >= 300.0:
+                # 캐시 만료 — 백그라운드 갱신 예약 후 이전 캐시로 스캔 계속
+                logger.info("[주기 스캔] 캐시 만료 (%.1fs) → 백그라운드 갱신 예약, 이전 캐시 사용 (%d종목)",
+                            cache_age, len(self._last_volume_rows))
+                QTimer.singleShot(100, self._bg_fetch_opt10030)
+            else:
+                logger.debug("[주기 스캔] 캐시 재사용 (나이 %.1fs, %d종목)", cache_age, len(self._last_volume_rows))
             return self._last_volume_rows[:]
-        
-        logger.info("[주기 스캔] opt10030 즉시 조회 (캐시나이 %.1fs)", cache_age)
-        rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, on_progress=prog_cb)
-        # [CLEANUP 2026-05-26] 상위 10건 디버그 로그 제거 (호출당 10건 WARNING → UI 부하)
+
+        # 캐시 자체가 없는 경우 (최초 기동 직후 또는 완전 초기화 후)
+        logger.info("[주기 스캔] 캐시 없음 → 백그라운드 갱신 예약 (이번 스캔은 빈 데이터)")
+        QTimer.singleShot(100, self._bg_fetch_opt10030)
+        rows = []
 
         if not rows:
             # ✅ 2026-05-11: 모의투자 환경 대응

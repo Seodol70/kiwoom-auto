@@ -310,11 +310,12 @@ def _jdm_check_trend_and_ma(
                 f"MA 이격 부족 ({spread_pct:.2f}% < 최소 {eff_ma_spread:.2f}%)")
             return None
         max_ma_spread = float(getattr(cfg, f"jdm_ma_spread_max_pct_{ctx.slot.lower()}", cfg.jdm_ma_spread_max_pct))
-        
-        # [NEW] OPENING 갭상승 또는 GC_OVERRIDE 강세 종목은 SMA 이격 상한을 완화
-        # (과거 데이터가 포함된 SMA 한계 보완. 실제 과열은 이후 EMA 이격에서 필터링됨)
+
+        # [FIX 2026-05-27] MA 이격 상한 100% 무력화 제거 — 5/27 정점 진입 원인.
+        # 이전엔 OPENING/GC_OVERRIDE 시 100%까지 허용 → 나무기술 +96.57% 이격 진입 등 사고.
+        # 완화는 약하게만(1.5배), 100% 무력화는 안 함.
         if is_gc_override or ctx.slot == "OPENING":
-            max_ma_spread = max(max_ma_spread, 100.0)
+            max_ma_spread *= 1.5  # 1.5배까지만 완화 (100% 무력화 X)
 
         if spread_pct > max_ma_spread:
             ScannerLogger.rejected(snap.code, snap.name, "JDM",
@@ -369,38 +370,46 @@ def _jdm_check_execution_quality(
             f"[{ctx.slot}] 체결강도 과열 차단 — {snap.chejan_strength:.0f}% ≥ {jdm_chejan_max:.0f}%")
         return None
 
-    # ── EMA 이격 과열 체크 — OPENING 슬롯에서는 스킵 (2026-05-12: 극단 변동성 대응)
-    if ctx.slot != "OPENING":
-        ema_s_period      = getattr(cfg, "ema_disp_short",         10)
-        ema_l_period      = getattr(cfg, "ema_disp_long",          20)
-        ema_disp_max      = getattr(cfg, "ema_disp_max_pct",       3.0)
-        price_ema_disp_max = getattr(cfg, "price_ema_disp_max_pct", 3.0)
-        if ctx.trend_lv >= ctx.candle_skip_lv:
-            ema_disp_max       = float(getattr(cfg, "ema_disp_max_pct_trend",       7.0))
-            price_ema_disp_max = float(getattr(cfg, "price_ema_disp_max_pct_trend", 6.0))
-        if ctx.is_warmup:
-            ema_disp_max *= 1.5
-            price_ema_disp_max *= 1.5
+    # ── EMA 이격 과열 체크
+    # [FIX 2026-05-27] OPENING 스킵 제거 — 5/12 학습용 임시였으나 정점 진입 원인.
+    # 5/27 빛과전자 RSI86/MA7+14.72% 이격에서 진입 → -3.89% 손실. EMA 이격도 정상 검증 필요.
+    # OPENING엔 trend 분기로 약간 완화하되 완전 무력화는 안 함.
+    ema_s_period      = getattr(cfg, "ema_disp_short",         10)
+    ema_l_period      = getattr(cfg, "ema_disp_long",          20)
+    ema_disp_max      = getattr(cfg, "ema_disp_max_pct",       3.0)
+    price_ema_disp_max = getattr(cfg, "price_ema_disp_max_pct", 3.0)
+    if ctx.trend_lv >= ctx.candle_skip_lv:
+        ema_disp_max       = float(getattr(cfg, "ema_disp_max_pct_trend",       7.0))
+        price_ema_disp_max = float(getattr(cfg, "price_ema_disp_max_pct_trend", 6.0))
+    if ctx.is_warmup:
+        ema_disp_max *= 1.5
+        price_ema_disp_max *= 1.5
+    # OPENING은 변동성이 크니 상한을 1.3배까지만 완화 (이전엔 완전 스킵)
+    if ctx.slot == "OPENING":
+        ema_disp_max *= 1.3
+        price_ema_disp_max *= 1.3
 
-        if len(closes) >= ema_l_period:
-            ema_s = IndicatorService.calc_ema(closes, ema_s_period)
-            ema_l = IndicatorService.calc_ema(closes, ema_l_period)
-            if ema_s is not None and ema_l is not None and ema_l > 0:
-                ema_disp_pct = (ema_s - ema_l) / ema_l * 100
-                if ema_disp_pct >= ema_disp_max:
-                    ScannerLogger.rejected(snap.code, snap.name, "JDM_EMA",
-                        f"EMA10/EMA20 이격 과열 — {ema_disp_pct:.2f}% ≥ {ema_disp_max:.1f}%")
+    if len(closes) >= ema_l_period:
+        ema_s = IndicatorService.calc_ema(closes, ema_s_period)
+        ema_l = IndicatorService.calc_ema(closes, ema_l_period)
+        if ema_s is not None and ema_l is not None and ema_l > 0:
+            ema_disp_pct = (ema_s - ema_l) / ema_l * 100
+            if ema_disp_pct >= ema_disp_max:
+                ScannerLogger.rejected(snap.code, snap.name, "JDM_EMA",
+                    f"EMA10/EMA20 이격 과열 — {ema_disp_pct:.2f}% ≥ {ema_disp_max:.1f}%")
+                return None
+            if ema_s > 0:
+                price_ema_disp = (snap.current_price - ema_s) / ema_s * 100
+                if price_ema_disp >= price_ema_disp_max:
+                    ScannerLogger.rejected(snap.code, snap.name, "JDM_PRICE_EMA",
+                        f"현재가/EMA{ema_s_period} 이격 과열 — {price_ema_disp:.2f}% ≥ {price_ema_disp_max:.1f}%")
                     return None
-                if ema_s > 0:
-                    price_ema_disp = (snap.current_price - ema_s) / ema_s * 100
-                    if price_ema_disp >= price_ema_disp_max:
-                        ScannerLogger.rejected(snap.code, snap.name, "JDM_PRICE_EMA",
-                            f"현재가/EMA{ema_s_period} 이격 과열 — {price_ema_disp:.2f}% ≥ {price_ema_disp_max:.1f}%")
-                        return None
 
-    # ── RSI 체크 — OPENING 슬롯에서는 상한 스킵 (2026-05-12: 극단 변동성 대응)
+    # ── RSI 체크
+    # [FIX 2026-05-27] OPENING 스킵 제거 — 5/12 학습용 임시였으나 정점 진입 원인.
+    # 5/27 진입 종목 RSI 평균 90+ (한온시스템 93, 네이처셀 94, 에이팩트 99) → 모두 손실.
     rsi = getattr(ctx, "_rsi", None)
-    if not ctx.lite_mode and rsi is not None and ctx.slot != "OPENING":
+    if not ctx.lite_mode and rsi is not None:
         eff_rsi_high = cfg.jdm_rsi_high
         if ctx.trend_lv >= ctx.candle_skip_lv:
             eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_trend", 80.0))

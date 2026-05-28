@@ -386,13 +386,9 @@ class KiwoomManager(KiwoomProtocol):
             self._set_input("관리종목포함", "1")  # 1=포함 (모의투자에서 데이터 부족 시 필요)
             self._set_input("신용구분", "0")  # 0=전체 (현물+신용)
 
-            # [PERF FIX 2026-05-27] 페이지 간 sleep 5초 → 2초 단축
-            # 원인: run_periodic_scan이 메인 스레드 동기 실행 → 5초×3페이지=15초 UI 블로킹
-            # 2026-05-27 09:35:50 주기 스캔 시작 후 09:36:00 UI 멈춤 사건의 직접 원인
-            # 키움 TR 호출 빈도 제한은 1초당 5건이므로 2초면 충분히 안전
-            if page > 0:
-                logger.debug("[opt10030] 페이지 %d 전 2초 대기", page + 1)
-                time.sleep(2.0)
+            # [PERF FIX 2026-05-28] sleep 완전 제거
+            # 페이지 간 대기는 TRRateLimiter.acquire()가 MIN_INTERVAL(0.25s)로 자동 조절
+            # time.sleep은 Qt 이벤트 루프를 정지시키는 블로킹 — 제거
 
             ok = self._comm_rq("opt10030", "거래대금상위", screen_no, prev_next=prev_next)
             if not ok:
@@ -1307,15 +1303,30 @@ class KiwoomManager(KiwoomProtocol):
                                   self._get_comm_data(tr_code, rq_name, 0, "RecordCnt") if hasattr(self, '_get_comm_data') else "?")
                 self._tr_data = {"rows": rows}
 
+            elif rq_name.startswith("investor_"):
+                # opt10059 동적 rq_name (investor_{code}) — 첫 번째 행(당일)만 파싱
+                row_d = {}
+                for f in ("외국인순매수", "외국계순매수", "기관계순매수", "기관순매수"):
+                    v = self._get_comm_data(tr_code, rq_name, 0, f)
+                    if v:
+                        row_d[f] = v
+                self._tr_data = {"rows": [row_d] if row_d else []}
+
+            elif rq_name.startswith(("매수_", "매도_", "주문_")):
+                # SendOrder 응답 — 체결은 OnReceiveChejanData로 오므로 여기선 무시
+                logger.debug("[TR 수신] 주문 응답 rq='%s' — ChejanData에서 처리", rq_name)
+
             else:
-                logger.warning("[TR 수신] 알 수 없는 rq_name='%s' 처리 스킵 (opt10030 예상했음)", rq_name)
+                logger.warning("[TR 수신] 알 수 없는 rq_name='%s' — 처리 스킵", rq_name)
 
         except Exception as e:
             logger.error("[_on_receive_tr_data] 예외 발생 (rq=%s, tr=%s): %s", rq_name, tr_code, e, exc_info=True)
             self._tr_data = {}
 
         finally:
-            if self._tr_loop and self._tr_loop.isRunning():
+            # 현재 대기 중인 rq_name과 일치할 때만 루프 종료
+            # 다른 TR 응답(매수_, investor_ 등)이 끼어들어 엉뚱한 루프를 깨지 않도록
+            if self._tr_loop and self._tr_loop.isRunning() and self._tr_current_rq == rq_name:
                 self._tr_loop.quit()
 
     def _on_receive_msg(self, _screen: str, rq_name: str, tr_code: str, msg: str) -> None:
