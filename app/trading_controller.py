@@ -248,20 +248,21 @@ class TradingController(QObject):
                 self._record_signal(sig)
                 return False
 
-        # [FIX 2026-05-28] 약한신호(trend_lv<2) 차단 — 전 시간대 적용
-        # 이전(5/26): 09:30+ 만 적용 → OPENING 09:00~09:30에 trend_lv=0 진입 다수 발생
-        # 5/28 분석: LG디스플레이/삼화콘덴서/현대차 등 trend_lv=0인데 진입 → 7건 손실
-        # → OPENING_GATE_SKIP 제거와 함께 전 시간대 trend_lv 필터 강제
-        _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
-        _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
-        if _trend_lv < 2:
-            logger.info(
-                "[진입거절] %s(%s) 약한신호 차단 — trend_lv=%d (요구: ≥2)",
-                sig.name, sig.code, _trend_lv
-            )
-            self.signal_rejected.emit(f"{sig.code}: 약한신호 (trend_lv={_trend_lv})")
-            self._record_signal(sig)
-            return False
+        # [FIX 2026-05-29] 약한신호(trend_lv<2) 차단 — 09:30 이후만 적용
+        # 5/28에 전 시간대로 확대했더니 OPENING(09:00~09:30)에서 1분봉 22개 미만으로
+        # trend_lv 항상 0 → 6건 신호 모두 차단 (어보브반도체, 티에이치엔 등).
+        # OPENING은 BREAKOUT/PULLBACK 게이트의 일봉 락(MA20 우상향 + 현재가≥MA20)이 대신 보호.
+        if _now.time() >= _dt.strptime("09:30", "%H:%M").time():
+            _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
+            _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
+            if _trend_lv < 2:
+                logger.info(
+                    "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
+                    sig.name, sig.code, _trend_lv
+                )
+                self.signal_rejected.emit(f"{sig.code}: 약한신호 (trend_lv={_trend_lv})")
+                self._record_signal(sig)
+                return False
 
         # Phase1 태깅 및 한도 체크
         if sig.signal_type == "OPENING_SCALP":
@@ -306,23 +307,28 @@ class TradingController(QObject):
             inst_net = int(getattr(snap, "inst_net_buy", 0) or 0)
 
             # Phase 1: 둘 다 0이면 데이터가 아직 안 들어온 것 → 즉시 갱신
+            # [FIX 2026-05-29] TR 이미 진행 중이면 skip — 메인 스레드 블로킹 방지
+            # 11:06:00 파워넷 신호 후 멈춤 원인: 신호마다 opt10059 동기 TR → UI freeze
             if foreign_net == 0 and inst_net == 0:
-                try:
-                    inv_data = self._kiwoom.get_investor_trend(sig.code)
-                    self._snap_store.update_investor(
-                        sig.code, inv_data["foreign_net"], inv_data["inst_net"]
-                    )
-                    # 갱신된 snap 재로드
-                    snap = self._snap_store.get_snapshot(sig.code)
-                    if snap:
-                        foreign_net = int(getattr(snap, "foreign_net_buy", 0) or 0)
-                        inst_net = int(getattr(snap, "inst_net_buy", 0) or 0)
-                    logger.info(
-                        "[수급즉시갱신] %s(%s) 외인=%+d 기관=%+d",
-                        sig.name, sig.code, foreign_net, inst_net
-                    )
-                except Exception as e:
-                    logger.warning("[수급갱신실패] %s(%s): %s — 기존 데이터로 진행", sig.name, sig.code, e)
+                _tr_busy = getattr(self._kiwoom, "_tr_busy", False)
+                if _tr_busy:
+                    logger.debug("[수급즉시갱신 스킵] %s — TR 사용 중, 기존 데이터로 진행", sig.code)
+                else:
+                    try:
+                        inv_data = self._kiwoom.get_investor_trend(sig.code)
+                        self._snap_store.update_investor(
+                            sig.code, inv_data["foreign_net"], inv_data["inst_net"]
+                        )
+                        snap = self._snap_store.get_snapshot(sig.code)
+                        if snap:
+                            foreign_net = int(getattr(snap, "foreign_net_buy", 0) or 0)
+                            inst_net = int(getattr(snap, "inst_net_buy", 0) or 0)
+                        logger.info(
+                            "[수급즉시갱신] %s(%s) 외인=%+d 기관=%+d",
+                            sig.name, sig.code, foreign_net, inst_net
+                        )
+                    except Exception as e:
+                        logger.warning("[수급갱신실패] %s(%s): %s — 기존 데이터로 진행", sig.name, sig.code, e)
 
             # Phase 2: 외인+기관 둘 다 1,000주 이상 순매도면 차단
             # 안전장치: 둘 다 0이면 데이터 없음 → 통과 (false negative 방지)

@@ -89,6 +89,9 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
     # [FIX 2026-05-28] 일봉 정배열 락 (추세의 뼈대) — 미니 제미니 조언 반영
     # 1분봉이 우상향해도 일봉 차트가 역배열이면 상단 매물대에 맞고 즉시 밀린다.
     # → 일봉 MA20 우상향 + 현재가 ≥ MA20 조건이 충족된 종목만 진입 허용.
+    # [FIX 2026-05-29] 일봉 데이터 부족(0개)이면 차단하지 않고 통과 — 차단 시 신호 전무
+    # daily_refresh_requested 시그널이 슬롯에 미연결 → 일봉 갱신 미작동이 근본 원인
+    # 일봉 있으면 정배열 검증, 없으면 다른 필터(trade_amount, RSI, trend_lv 등)에 의존
     if len(snap.daily_closes) >= 23:
         _daily_ctx = IndicatorService.get_daily_context(snap.daily_closes, snap.current_price)
         if getattr(cfg, "daily_ma20_filter_enabled", True):

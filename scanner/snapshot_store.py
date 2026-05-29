@@ -131,10 +131,10 @@ class SnapshotStore:
             logger.warning("[SnapshotStore.bulk_update] rows 빈 리스트 — 적재 스킵")
             return
 
-        # [NEW] 들어오는 rows 데이터 샘플 로그 (첫 1개만)
+        # [CLEANUP 2026-05-29] 매 주기 스캔마다 WARNING 1건 → DEBUG 격하
         if rows:
             sample = rows[0]
-            logger.warning("[bulk_update 입력] rows[0]: code=%s name=%s volume=%s trade_amount=%s",
+            logger.debug("[bulk_update 입력] rows[0]: code=%s name=%s volume=%s trade_amount=%s",
                          sample.get("code"), sample.get("name"), sample.get("volume"), sample.get("trade_amount"))
 
         rows, _dropped = filter_equity_rows(rows)
@@ -463,18 +463,8 @@ class SnapshotStore:
                         st.exec_vel_cached = _v10 / _avg10 if _avg10 > 0 else 0.0
             _vel_ratio = st.exec_vel_cached
 
-        # [DEBUG] 거래대금 값 추적 (get_snapshot 단계 - 반환 전)
+        # [CLEANUP 2026-05-29] get_snapshot 진단 WARNING 제거 (UI 멈춤 위험) — st_amt 정의는 유지
         st_amt = st.trade_amount if st and st.trade_amount > 0 else safe_int_cell("trade_amount", 0)
-        if not getattr(self, "_snap_debug_log", None):
-            self._snap_debug_log = set()
-        if code not in self._snap_debug_log and len(self._snap_debug_log) < 5:
-            self._snap_debug_log.add(code)
-            logger.warning(
-                "[get_snapshot] %s: st.trade_amount=%d | safe_int_cell=%d | df원본=%s",
-                code, st.trade_amount if st else -1,
-                safe_int_cell("trade_amount", 0),
-                row_copy.get("trade_amount", "N/A")
-            )
 
         return StockSnapshot(
             code          = code,

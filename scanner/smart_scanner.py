@@ -578,12 +578,7 @@ class SmartScanner(QObject):
 
         logger.info("  📊 감시 후보 %d종목 (순수 주식·hybrid스코어 상위·등락률 < %.1f%%)", len(rows), mc)
 
-        # [DEBUG] 첫 5개 종목의 거래대금 값을 로그 (bulk_update 직전)
-        if rows:
-            for i, r in enumerate(rows[:5]):
-                ta = int(r.get("trade_amount", 0))
-                logger.warning("[bulk_update 직전] %s: trade_amount=%d | 포맷=%s",
-                             r.get("code"), ta, r.get("trade_amount", "N/A"))
+        # [CLEANUP 2026-05-29] 주기 스캔마다 5건 WARNING 폭주 → 제거
 
         # ① DataFrame 에 일괄 적재
         self.top_mgr.clear()
@@ -652,8 +647,9 @@ class SmartScanner(QObject):
             if self._prefiltered:
                 if not getattr(self, "_loop_mode_logged", False):
                     mode = "WATCH" if self._universe_paused else "SEARCH"
-                    _pos_cnt = len(self.order_mgr.positions) if hasattr(self, 'order_mgr') and self.order_mgr else -1
-                    logger.warning("[2단계 모드] %s 모드로 진입 (포지션 수: %d)", mode, _pos_cnt)
+                    _has_om = hasattr(self, 'order_mgr') and self.order_mgr
+                    _pos_str = str(len(self.order_mgr.positions)) if _has_om else "N/A(order_mgr 미연결)"
+                    logger.info("[2단계 모드] %s 모드로 진입 (포지션: %s)", mode, _pos_str)
                     self._loop_mode_logged = True
                 if self._universe_paused:
                     # ====== WATCH 모드 ======
@@ -673,9 +669,9 @@ class SmartScanner(QObject):
                     _top_n = max(120, int(getattr(self.cfg, "display_top_n", 50)))
                     top_df = self.store.top_by_trade_amount(_top_n)
                     if top_df.empty:
-                        logger.warning("[2단계] SEARCH 모드인데 top_df가 비어 있음 (store에 데이터 없음)")
+                        logger.info("[2단계] SEARCH 모드 시작 — store에 아직 데이터 없음 (부팅 초기 정상)")
                     elif len(top_df) < 10:
-                        logger.warning("[2단계] SEARCH 모드인데 종목 수 부족: %d개", len(top_df))
+                        logger.info("[2단계] SEARCH 모드 — 종목 수 부족: %d개 (부팅 직후)", len(top_df))
                     
                     ui_rows = []
                     subscribed = set(self.watch_q.subscribed)
@@ -692,13 +688,7 @@ class SmartScanner(QObject):
 
                         # UI 행 데이터 생성
                         ui_row = self._build_ui_row(snap, sig_type)
-                        # [DEBUG] 거래대금 추적 (UI 행 생성 시점)
-                        if not getattr(self, "_ui_row_debug", None):
-                            self._ui_row_debug = set()
-                        if code not in self._ui_row_debug and len(self._ui_row_debug) < 5:
-                            self._ui_row_debug.add(code)
-                            logger.warning("[_build_ui_row] %s: snap.trade_amount=%d | ui_row['trade_amount']=%d",
-                                         code, snap.trade_amount, ui_row.get("trade_amount"))
+                        # [CLEANUP 2026-05-29] 진단용 WARNING 제거 (UI 멈춤 위험)
                         ui_rows.append(ui_row)
                     
                     if ui_rows:
@@ -1023,51 +1013,35 @@ class SmartScanner(QObject):
 
             # 등락률·기준가 계산
             # FID 11(전일대비 금액)은 실시간으로 항상 제공되며 부호가 정확함
+            # [CLEANUP 2026-05-29] 147830 진단용 WARNING 8개 제거 (UI 멈춤 위험)
             if change_amt != 0.0 and price > 0:
                 prev_close = price - int(change_amt)
-                if code == "147830":
-                    logger.warning("[147830] 기준가① FID11 사용: change_amt=%r → prev_close=%d", change_amt, prev_close)
             else:
                 # FID 11도 없는 경우 — 기존 snapshot의 prev_close 재사용
                 st_temp = self.store.get_snapshot(code)
                 prev_close = st_temp.prev_close if st_temp else 0
-                if code == "147830":
-                    logger.warning("[147830] 기준가② Snapshot 사용: prev_close=%d (change_amt=%r)", prev_close, change_amt)
 
             # [FINAL FALLBACK] 여전히 기준가가 0이라면 OCX 강제 동원 (2단계)
             if prev_close <= 0:
                 prev_close_ocx = self._kiwoom.get_current_price(code)
-                if code == "147830":
-                    logger.warning("[147830] 기준가③ OCX get_current_price: %d", prev_close_ocx)
                 if prev_close_ocx > 0:
                     prev_close = prev_close_ocx
             if prev_close <= 0:
                 prev_close_master = self._kiwoom.get_master_price(code)
-                if code == "147830":
-                    logger.warning("[147830] 기준가④ OCX get_master_price: %d", prev_close_master)
                 if prev_close_master > 0:
                     prev_close = prev_close_master
 
             # [NEW] 기준가가 여전히 0이면 시가로 역산 (장 초기 대비)
             if prev_close <= 0 and open_ > 0:
                 prev_close = open_
-                if code == "147830":
-                    logger.warning("[147830] 기준가⑤ 시가 역산: open_=%d", open_)
 
             # [ULTIMATE FALLBACK] 정말로 0이라면... 현재가를 기준가로 임시 세팅
             if prev_close <= 0 and price > 0:
                 prev_close = price
-                if code == "147830":
-                    logger.warning("[147830] 기준가⑥ 현재가 사용 (최후수단): price=%d", price)
 
             if prev_close > 0 and (pct == 0.0 or abs(pct) < 0.001):
                 # 기준가는 있는데 등락률이 0이면 직접 계산 (FID 12 지연 대응)
                 pct = round((price - prev_close) / prev_close * 100, 2)
-                if code == "147830":
-                    logger.warning("[147830] 등락률 직접 계산: prev_close=%d, price=%d → pct=%.2f%%",
-                                 prev_close, price, pct)
-            elif code == "147830":
-                logger.warning("[147830] 등락률 계산 불가: prev_close=%d, pct=%.2f", prev_close, pct)
 
             # 거래대금 = FID 13 × 1,000 (천원 → 원)
             raw_cum_amt = cum_amt

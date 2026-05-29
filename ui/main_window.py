@@ -111,6 +111,12 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self._scan_refresh_timer = QTimer(self)
         self._scan_refresh_timer.timeout.connect(self.trading_controller.run_periodic_scan)
 
+        # [FIX 2026-05-29] 일봉 갱신 시그널 연결 — daily_refresh_requested → refresh_daily_candles
+        # 미연결 상태로 일봉 데이터가 전혀 로딩되지 않아 BREAKOUT_NO_DAILY로 모든 신호 차단됐던 문제
+        self.trading_controller.daily_refresh_requested.connect(
+            lambda codes: self.trading_controller.refresh_daily_candles(codes, 0)
+        )
+
         # 3. 장 종료 후 분석은 MarketScheduler의 feedback_triggered 신호로 처리됨
 
         # 4. [Option A 2026-05-27] 청산 평가 독립 타이머 (5초 주기)
@@ -144,6 +150,14 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
         self._scan_refresh_timer.start(scan_interval)
         # [Option A 2026-05-27] 청산 평가 5초 타이머 시작 (잔고 워커와 독립)
         self._exit_check_timer.start(5_000)
+
+        # [NEW 2026-05-29] 시스템 자체 진단기 — 5분 후 자동 1회 실행
+        if not hasattr(self, "_diagnostics"):
+            from infra.diagnostics import SystemDiagnostics
+            self._diagnostics = SystemDiagnostics(parent=self)
+            self._diagnostics.critical_finding.connect(self.append_log)
+            self._diagnostics.schedule_initial_run(delay_sec=300)
+            self.append_log("🩺 [진단] 시스템 진단기 가동 — 5분 후 자동 점검")
 
         # 2. 스마트 스캐너 시작 (백그라운드 루프 시동)
         if hasattr(self, "_smart_scanner"):
