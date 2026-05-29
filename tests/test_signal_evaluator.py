@@ -109,22 +109,26 @@ def test_check_jdm_entry_midday_strict(base_snap, base_config):
 
 def test_check_jdm_entry_gc_override(base_snap, base_config):
     # 점심 시간이라도 추세 Lv3이면 GC 없이 진입 허용
+    # adaptive_params.json이 candle_skip_trend_level=99로 설정하므로 테스트에서 2로 명시
+    base_config.jdm_candle_skip_trend_level = 2
     with patch("scanner.evaluators.jdm.datetime") as mock_dt:
         mock_dt.now.return_value.time.return_value = dtime(12, 0)
         base_snap.trend_level = 3
-        # R2 필터 통과를 위해 전일 변동성 축소
-        base_snap.daily_high_prev = 10200
-        base_snap.daily_low_prev = 9800
-        
-        # RSI 100 방지를 위해 미세한 등락 포함 (loss 발생)
-        # ma_s(7) ≈ 10407, ma_l(15) ≈ 10373. Spread ≈ 0.33%
-        base_snap.closes_1min = [10000] * 35 + [10300, 10350, 10300, 10400, 10450, 10400, 10450, 10500, 10450, 10500, 10550, 10500, 10550, 10600, 10550]
-        # [FIX 2026-05-26] Phase A 거래대금 필터 3.0배 통과 위해 마지막 봉 거래량 25000 → 35000
-        # (직전 5봉 평균의 3.5배 거래대금)
+        # R2 필터 통과를 위해 전일 변동성 축소 (R2=10100 < current_price=10350)
+        base_snap.daily_high_prev = 10050
+        base_snap.daily_low_prev = 9950
+
+        # RSI < 70 유지를 위해 완만한 상승 패턴 사용
+        # ma_s(7) ≈ 10329, ma_l(15) ≈ 10257, spread ≈ 0.70%, RSI ≈ 67
+        base_snap.closes_1min = [10000] * 35 + [10100, 10150, 10100, 10200, 10250, 10200, 10250, 10300, 10250, 10300, 10350, 10300, 10350, 10400, 10350]
+        # Phase A 거래대금 필터 3.0배 통과 (직전 5봉 평균의 3.5배 거래대금)
         base_snap.volumes_1min = [10000] * 50 + [35000]
         base_snap.opens_1min = [10000] * 100  # 갭 리버설 패턴 체크 위해 추가
-        base_snap.current_price = 10550
-        base_snap.high_price = 10600
+        # highs/lows를 closes와 일관성 있게 설정
+        base_snap.highs_1min = [10050] * 35 + [10150, 10200, 10150, 10250, 10300, 10250, 10300, 10350, 10300, 10350, 10400, 10350, 10400, 10450, 10400]
+        base_snap.lows_1min  = [9950]  * 35 + [10050, 10100, 10050, 10150, 10200, 10150, 10200, 10250, 10200, 10250, 10300, 10250, 10300, 10350, 10300]
+        base_snap.current_price = 10350
+        base_snap.high_price = 10400
         reason = check_jdm_entry(base_snap, base_config)
         assert reason is not None
 
