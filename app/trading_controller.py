@@ -464,50 +464,6 @@ class TradingController(QObject):
         except Exception as e:
             logger.warning("[tick_exit_check] 오류: %s", e)
 
-    def check_and_exit_all(self) -> None:
-        """모든 포지션 청산 판정 (5초 주기 호출)"""
-        count = 0
-        # 현재 시간 슬롯 감지
-        now = datetime.now()
-        exit_ctx = self._get_exit_context(now)
-
-
-        for code, pos in list(self._order_mgr.positions.items()):
-            if self._order_mgr.is_pending(code):
-                continue
-
-
-            qty_today = getattr(pos, "qty_buy_today_app", 0) or 0
-            if qty_today <= 0:
-                qty_today = pos.qty
-            sell_qty = min(pos.qty, qty_today)
-            if sell_qty <= 0:
-                continue
-
-
-            # 청산 판정 순서 (hard stop부터 시작)
-            # 상태 갱신 (peak_price 등)
-            self._strategy.update_state(pos)
-
-            should_exit, reason = self._strategy.should_exit(pos, exit_ctx)
-            if should_exit:
-                self.log_message.emit(f"🚀 [청산] {pos.name}({pos.code}) {reason}")
-                if any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑"]):
-                    self._order_mgr.mark_stop_loss(pos.code)
-                    # [NEW 2026-05-19] 손절 종목 재진입 방지 (20분 냉각)
-                    self._strategy.mark_loss_exit(pos)
-                self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-                count += 1
-                continue
-
-            do_partial, ratio = self._strategy.should_partial_exit(pos, exit_ctx)
-            if do_partial:
-                self.log_message.emit(f"🔀 [분할익절] {pos.name}({pos.code}) {ratio*100:.0f}% 매도")
-                self._order_mgr.partial_exit(pos.code, pos.name, sell_ratio=ratio, reason="분할익절")
-                count += 1
-                continue
-
-
 
     def _get_exit_context(self, now: datetime) -> ExitContext:
         """현재 시간에 따른 청산 파라미터 조회"""
@@ -825,7 +781,7 @@ class TradingController(QObject):
             self._ctx.update_portfolio(_data["cash"], _data["positions"])
 
         # 청산 판정 및 미체결 관리
-        self.check_and_exit_all()
+        self.tick_exit_check()
         self._order_mgr._check_failed_sells()
         self._order_mgr._check_pending_buys()
 
