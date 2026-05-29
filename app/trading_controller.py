@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 from strategy.base import ExitContext
 from strategy.jang_dong_min import JangDongMinStrategy
 from app.signal_filter import SignalFilterChain, SignalFilterContext
+from app.exit_validator import ExitValidatorChain, ExitValidationContext, ExitDecisionAggregator
 
 
 
@@ -113,6 +114,10 @@ class TradingController(QObject):
 
         # [Step 2 2026-05-29] 신호 필터 체인 초기화
         self._filter_chain = SignalFilterChain()
+
+        # [Step 3 2026-05-29] 청산 검증자 체인 초기화
+        self._exit_chain = ExitValidatorChain()
+        self._exit_aggregator = ExitDecisionAggregator()
 
         # [NEW] SmartScanner 신호를 주문 모듈과 연결 (2026-05-07 수정)
         if self._smart_scanner:
@@ -420,34 +425,42 @@ class TradingController(QObject):
     @pyqtSlot()
     def tick_exit_check(self) -> None:
         """
-        [Option A 2026-05-27] 독립 5초 타이머에서 호출되는 청산 평가.
+        [Step 3 2026-05-29] 청산 검증 체인 실행 (5초 주기).
 
-        기존엔 update_portfolio_prices() → check_and_exit_all() 흐름이 잔고 워커
-        (opw00001 60초 주기)에 종속됐음. 잔고 워커가 멈추면 청산도 멈춰서
-        2026-05-27 빛과전자 -52,211원 사례 발생 (11분간 청산 평가 0회).
-
-        이 메서드는:
-        1. SnapshotStore 실시간 가격으로 보유 포지션 current_price 갱신
-        2. check_and_exit_all() 직접 호출 (손절/익절 트리거)
-        3. AppState 갱신 (UI에 현재가/평가손익 반영)
-        — 잔고 동기화와 완전히 분리되어 독립적으로 작동.
+        ExitValidatorChain으로 모든 포지션의 청산 조건을 검증하고 실행.
         """
         if not self._order_mgr or not self._order_mgr.positions:
             return
+
+        if self._market_crash_off:
+            return
+
         try:
-            # 1. 보유 포지션 가격만 빠르게 갱신 (잔고 동기화 X, 가벼움)
+            # 포지션 가격 갱신
             for pos in self._order_mgr.positions.values():
                 if self._snap_store:
                     snap = self._snap_store.get_snapshot(pos.code)
-                    if snap and snap.current_price > 0 and pos.current_price != snap.current_price:
+                    if snap and snap.current_price > 0:
                         pos.current_price = snap.current_price
 
-            # 2. AppState 갱신 (UI에 평가손익 반영)
+            # AppState 갱신
             if self._ctx:
                 self._ctx.update_portfolio(self._order_mgr.cash, dict(self._order_mgr.positions))
 
-            # 3. 청산 평가 (가장 중요한 부분 — 손절/익절 트리거)
-            self.check_and_exit_all()
+            # 청산 검증 컨텍스트 구성
+            ctx = ExitValidationContext(
+                trading_cfg=self._scan_cfg,
+                strategy=self._strategy,
+                exit_context=self._get_exit_context(datetime.now()),
+            )
+
+            # 체인 실행
+            self._exit_aggregator.process_positions(
+                self._order_mgr.positions,
+                ctx,
+                self._order_mgr,
+                self.log_message,
+            )
         except Exception as e:
             logger.warning("[tick_exit_check] 오류: %s", e)
 
