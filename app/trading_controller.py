@@ -220,6 +220,24 @@ class TradingController(QObject):
 
         9단계 필터를 순차 실행하고, 모두 통과 시 주문 관리자로 위임.
         """
+        # 자동매매 OFF 상태 체크 (사용자가 완전히 비활성화한 경우)
+        if not self._auto_trading:
+            self.signal_rejected.emit(f"{sig.code}: 자동매매 OFF 상태")
+            self._record_signal(sig)
+            return False
+
+        # 최대 포지션 한도 체크
+        if self._order_mgr and len(self._order_mgr.positions) >= getattr(self._order_mgr, 'max_positions', 5):
+            self.signal_rejected.emit(f"{sig.code}: 최대포지션 초과 ({len(self._order_mgr.positions)}/{getattr(self._order_mgr, 'max_positions', 5)})")
+            self._record_signal(sig)
+            return False
+
+        # 중복 진입 방지
+        if self._order_mgr and sig.code in self._order_mgr.positions:
+            self.signal_rejected.emit(f"{sig.code}: 중복 진입 방지")
+            self._record_signal(sig)
+            return False
+
         # 필터 컨텍스트 구성
         ctx = SignalFilterContext(
             order_mgr=self._order_mgr,
