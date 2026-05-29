@@ -295,7 +295,8 @@ class MainWindowSlots:
         """장 마감 임박 처리 — 보유 포지션 전량 강제청산"""
         self.append_log("⌛ [장마감] 장 종료가 임박했습니다. 미체결 정리 및 당일청산을 준비합니다.")
         if hasattr(self, 'tc') and self.tc is not None:
-            self.tc.liquidate_all_positions()
+            # [Step 3 Phase 3] ExitValidatorChain으로 청산 (MarketCloseValidator가 처리)
+            self.tc.tick_exit_check()
 
     @pyqtSlot()
     def _on_feedback_triggered(self) -> None:

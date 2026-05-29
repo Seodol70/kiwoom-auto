@@ -194,7 +194,8 @@ class TradingController(QObject):
 
         # 리스크 매니저 신호 연결
         if self._risk_mgr:
-            self._risk_mgr.daily_loss_cut.connect(self.liquidate_all_positions)
+            # [Step 3 Phase 3] 손절 한도 도달 시 ExitValidatorChain으로 청산
+            self._risk_mgr.daily_loss_cut.connect(self.tick_exit_check)
             self._risk_mgr.daily_profit_locked.connect(
                 lambda: self.log_message.emit("💰 [리스크] 당일 수익 목표 달성 — 신규 매수 차단")
             )
@@ -696,43 +697,6 @@ class TradingController(QObject):
         """지수 급락 신호 수신 — 학습 데이터 수집 중이므로 무시 (2026-05-12)"""
         # 2026-05-12: 지수 급락 자동 정지 비활성화 (손해 감수하면서 데이터 수집)
         return
-    def liquidate_all_positions(self) -> None:
-        """장 마감 전 모든 포지션 청산 (EOD 제외)"""
-        if getattr(self, '_liquidate_in_progress', False):
-            return
-        self._liquidate_in_progress = True
-        try:
-            positions = list(self._order_mgr.positions.items())
-            if not positions:
-                self.log_message.emit('💤 보유 포지션 없음 — 청산 생략')
-                return
-            targets = []
-            for code, pos in positions:
-                if getattr(pos, 'eod_trade', False):
-                    self.log_message.emit(f'🌙 [EOD유지] {pos.name}({code}) — 종가매매 포지션, 당일 청산 제외')
-                    continue
-                q = getattr(pos, 'qty_buy_today_app', 0) or 0
-                if q <= 0 and (not getattr(pos, 'opened_by_app', False)):
-                    continue
-                sell_qty = min(pos.qty, q) if q > 0 else pos.qty
-                if sell_qty > 0:
-                    targets.append((code, pos, sell_qty))
-            
-            if not targets:
-                return
-            
-            self.log_message.emit(f'🔴 [자동청산 시작] 오늘 앱 매수 {len(targets)}종목만 청산...')
-            for code, pos, sell_qty in targets:
-                try:
-                    if hasattr(self._order_mgr, '_audit') and self._order_mgr._audit:
-                        self._order_mgr._audit.log_sell_decision(code, 'Day Close 15:19 강제청산', pos.current_price)
-                    self._order_mgr.sell(code, pos.name, sell_qty, price=0)
-                    self.log_message.emit(f'  └─ {pos.name}({code}) {sell_qty}주 시장가 매도 주문')
-                except Exception as e:
-                    self.log_message.emit(f'  ⚠️ {pos.name}({code}) 청산 실패: {e}')
-        finally:
-            self._liquidate_in_progress = False
-
     @pyqtSlot()
     def update_portfolio_prices(self) -> None:
         """보유 종목 현재가를 실시간 스냅샷 우선으로 갱신한다."""
