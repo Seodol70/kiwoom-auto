@@ -61,16 +61,26 @@ class OverheatPullbackStrategy(BaseStrategy):
                 "trading_value": c * v,
             })
 
-        # 일봉 컨텍스트 (snap.values에 daily_context 있으면 사용, 없으면 1분봉 근사)
-        daily_ctx = snap.values.get("daily_context", {}) if hasattr(snap, "values") else {}
-        if "ma20_slope_up" not in daily_ctx:
-            # 1분봉으로 근사 (당일 MA20 기울기)
-            if len(closes) >= 23:
-                ma20_now  = sum(closes[-20:]) / 20
-                ma20_prev = sum(closes[-23:-3]) / 20
-                daily_ctx = {"ma20_slope_up": ma20_now >= ma20_prev}
-            else:
-                daily_ctx = {"ma20_slope_up": True}
+        # [FIX 2026-05-28] 일봉 정배열 락 — 실제 일봉 데이터(snap.daily_closes) 우선 사용
+        # 미니 제미니 조언: 1분봉이 우상향해도 일봉이 역배열이면 매물대에 막힘.
+        # 실제 일봉으로 정확한 추세의 뼈대 검증 (이전: 1분봉 근사로 약했던 부분 강화)
+        daily_ctx = {}
+        if hasattr(snap, "daily_closes") and len(snap.daily_closes) >= 23:
+            from scanner.indicator_service import IndicatorService
+            daily_ctx = IndicatorService.get_daily_context(
+                snap.daily_closes, snap.current_price
+            )
+        elif len(closes) >= 23:
+            # 일봉 데이터 부족 시에만 1분봉 MA20 근사 (fallback)
+            ma20_now  = sum(closes[-20:]) / 20
+            ma20_prev = sum(closes[-23:-3]) / 20
+            daily_ctx = {
+                "ma20_slope_up": ma20_now >= ma20_prev,
+                "above_ma20":    snap.current_price >= ma20_now,
+                "daily_ma20":    ma20_now,
+            }
+        else:
+            daily_ctx = {"ma20_slope_up": True, "above_ma20": True, "daily_ma20": 0.0}
 
         ev = self._get_evaluator(cfg)
         result = ev.evaluate(

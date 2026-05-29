@@ -4,6 +4,7 @@ breakout.py — 돌파(Breakout) 전략 신호 평가
 from typing import Optional, TYPE_CHECKING
 from datetime import datetime, time as dtime
 from scanner.scanner_logger import ScannerLogger
+from scanner.indicator_service import IndicatorService
 from .common import _resolve_time_slot, _get_slot_value, check_vwap_filter
 
 if TYPE_CHECKING:
@@ -84,6 +85,22 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
         logger.debug("[check_breakout_gate] 시간필터 거절: %s", msg)
         ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_TIME", msg)
         return None
+
+    # [FIX 2026-05-28] 일봉 정배열 락 (추세의 뼈대) — 미니 제미니 조언 반영
+    # 1분봉이 우상향해도 일봉 차트가 역배열이면 상단 매물대에 맞고 즉시 밀린다.
+    # → 일봉 MA20 우상향 + 현재가 ≥ MA20 조건이 충족된 종목만 진입 허용.
+    if len(snap.daily_closes) >= 23:
+        _daily_ctx = IndicatorService.get_daily_context(snap.daily_closes, snap.current_price)
+        if getattr(cfg, "daily_ma20_filter_enabled", True):
+            if not _daily_ctx["above_ma20"] and _daily_ctx["daily_ma20"] > 0:
+                msg = f"일봉 20MA 하방 — 현재가 {snap.current_price:,} < 20MA {_daily_ctx['daily_ma20']:,.0f}"
+                ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_DAILY_MA20", msg)
+                return None
+        if getattr(cfg, "daily_ma20_slope_enabled", True):
+            if not _daily_ctx.get("ma20_slope_up", True):
+                msg = f"일봉 20MA 기울기 하락 — 추세역배열 진입 차단 (20MA={_daily_ctx['daily_ma20']:,.0f})"
+                ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_MA20_SLOPE", msg)
+                return None
 
     _slot       = _resolve_time_slot(now, cfg)
     _eff_ch_max = _get_slot_value(_slot, cfg, "max_change_pct", cfg.max_change_pct)
