@@ -16,34 +16,7 @@ from pathlib import Path
 from datetime import datetime
 
 
-class _WinSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
-    """
-    Windows 호환 RotatingFileHandler (copy+truncate 방식).
-    파일이 VS Code나 다른 툴에 의해 열려 있어도 안전하게 회전(Rollover) 가능하다.
-    """
-    def doRollover(self) -> None:
-        if self.stream:
-            self.stream.close()
-            self.stream = None
-
-        for i in range(self.backupCount - 1, 0, -1):
-            sfn = self.rotation_filename(f"{self.baseFilename}.{i}")
-            dfn = self.rotation_filename(f"{self.baseFilename}.{i + 1}")
-            if os.path.exists(sfn):
-                if os.path.exists(dfn):
-                    os.remove(dfn)
-                os.rename(sfn, dfn)
-
-        dfn = self.rotation_filename(f"{self.baseFilename}.1")
-        if os.path.exists(dfn):
-            os.remove(dfn)
-        if os.path.exists(self.baseFilename):
-            shutil.copy2(self.baseFilename, dfn)
-            with open(self.baseFilename, "w", encoding=self.encoding or "utf-8"):
-                pass
-
-        if not self.delay:
-            self.stream = self._open()
+from logging_config import WinSafeRotatingFileHandler as _WinSafeRotatingFileHandler
 
 
 def _build_scan_logger(log_dir: str = "logs") -> logging.Logger:
