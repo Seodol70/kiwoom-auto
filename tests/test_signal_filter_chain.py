@@ -72,13 +72,14 @@ class MockConfig:
 
 class MockSignal:
     """ScanSignal 모의 객체"""
-    def __init__(self, code="005930", name="삼성전자", signal_type="OPENING_SCALP"):
+    def __init__(self, code="005930", name="삼성전자", signal_type="JDM_ENTRY", emitted_at=None):
         self.code = code
         self.name = name
         self.signal_type = signal_type
         self.entry_phase = 0
         self.reason = "test"
         self.price = 50000
+        self.emitted_at = emitted_at  # None이면 EntryStrategyFilter가 datetime.now() 사용
 
 
 # ============================================================================
@@ -87,23 +88,63 @@ class MockSignal:
 
 
 class TestOverheatPullbackFilter:
-    def test_reject_overheat_pullback_signal(self):
+    def test_reject_when_loss_cut_active(self):
+        """손절컷 활성 시 OVERHEAT_PULLBACK 차단"""
         filter = OverheatPullbackFilter()
         sig = MockSignal(signal_type="OVERHEAT_PULLBACK")
+        risk_mgr = Mock()
+        risk_mgr.is_loss_cut = True
+        risk_mgr.is_profit_lock = False
         ctx = SignalFilterContext(
             order_mgr=MockOrderManager(),
             snap_store=MockSnapshotStore(),
             trading_cfg=MockConfig(),
-            risk_mgr=Mock(),
+            risk_mgr=risk_mgr,
         )
 
         passed, reason = filter.validate(sig, ctx)
         assert not passed
-        assert "수동" in reason
+        assert "손절컷" in reason
+
+    def test_reject_when_profit_lock_active(self):
+        """이익잠금 활성 시 OVERHEAT_PULLBACK 차단"""
+        filter = OverheatPullbackFilter()
+        sig = MockSignal(signal_type="OVERHEAT_PULLBACK")
+        risk_mgr = Mock()
+        risk_mgr.is_loss_cut = False
+        risk_mgr.is_profit_lock = True
+        ctx = SignalFilterContext(
+            order_mgr=MockOrderManager(),
+            snap_store=MockSnapshotStore(),
+            trading_cfg=MockConfig(),
+            risk_mgr=risk_mgr,
+        )
+
+        passed, reason = filter.validate(sig, ctx)
+        assert not passed
+        assert "이익잠금" in reason
+
+    def test_pass_when_no_risk_issues(self):
+        """리스크 이슈 없을 때 OVERHEAT_PULLBACK 통과"""
+        filter = OverheatPullbackFilter()
+        sig = MockSignal(signal_type="OVERHEAT_PULLBACK")
+        risk_mgr = Mock()
+        risk_mgr.is_loss_cut = False
+        risk_mgr.is_profit_lock = False
+        ctx = SignalFilterContext(
+            order_mgr=MockOrderManager(),
+            snap_store=MockSnapshotStore(),
+            trading_cfg=MockConfig(),
+            risk_mgr=risk_mgr,
+        )
+
+        passed, reason = filter.validate(sig, ctx)
+        assert passed
 
     def test_accept_other_signals(self):
+        """OVERHEAT_PULLBACK 이외 신호는 무조건 통과"""
         filter = OverheatPullbackFilter()
-        sig = MockSignal(signal_type="OPENING_SCALP")
+        sig = MockSignal(signal_type="JDM_ENTRY")
         ctx = SignalFilterContext(
             order_mgr=MockOrderManager(),
             snap_store=MockSnapshotStore(),
@@ -383,7 +424,7 @@ class TestSignalFilterChain:
     def test_chain_all_pass_returns_true(self):
         """모든 필터 통과 시 True 반환"""
         chain = SignalFilterChain()
-        sig = MockSignal(code="005930", signal_type="OPENING_SCALP")
+        sig = MockSignal(code="005930", signal_type="JDM_ENTRY")
 
         snap_store = MockSnapshotStore()
         snap_store.snapshots["005930"] = MockSnapshot()

@@ -55,6 +55,9 @@ COLUMNS: list[str] = [
     "kospi_chg_at_signal",      # 신호 당시 코스피 등락률 (%)
     "kosdaq_chg_at_signal",     # 신호 당시 코스닥 등락률 (%)
     "investor_score_at_signal", # 수급 점수 (-1/0/+1)
+    "trend_level_at_signal",    # 추세 레벨 (0=횡보 1=약세 2=상승 3=강세)
+    "vwap_at_signal",           # 신호 당시 VWAP
+    "rs_score_at_signal",       # 신호 당시 상대강도 점수
     # ── 매수 주문
     "buy_order_time",           # 매수 주문 전송 시각
     "buy_order_price",          # 매수 주문가 (0=시장가)
@@ -242,12 +245,23 @@ class TradeAuditLogger:
                 "name":                     sig.name,
                 "signal_type":              getattr(sig, "signal_type", ""),
                 "signal_time":              now.strftime("%H:%M:%S"),
+                "signal_price":             getattr(sig, "price", 0),
                 "signal_reason":            getattr(sig, "reason", ""),
-                "trade_amount_at_signal":   getattr(snap, "trade_amount", ""),
                 "final_status":             "SIGNAL_ONLY",
                 "is_warmup":                1 if getattr(sig, "is_warmup", False) else 0,
+                # ── 신호 당시 원시 지표값 (분석용 핵심 필드) ──────────────
+                "chejan_strength_at_signal": getattr(snap, "chejan_strength", ""),
+                "change_pct_at_signal":      getattr(snap, "change_pct", ""),
+                "trade_amount_at_signal":    getattr(snap, "trade_amount", ""),
+                "investor_score_at_signal":  getattr(snap, "investor_score", ""),
+                "kospi_chg_at_signal":       getattr(cfg, "kospi_chg_pct", "") if cfg else "",
+                "kosdaq_chg_at_signal":      getattr(cfg, "kosdaq_chg_pct", "") if cfg else "",
+                "trend_level_at_signal":     getattr(snap, "trend_level", ""),
+                "vwap_at_signal":            getattr(snap, "vwap", ""),
+                "rs_score_at_signal":        getattr(snap, "rs_score", ""),
+                "rsi_at_signal":             getattr(snap, "rsi", ""),
             })
-            # feature_engineer에서 추출된 특성들 업데이트
+            # feature_engineer에서 추출된 정규화 특성 (f_* 키) 업데이트
             row.update(features)
 
             with self._lock:

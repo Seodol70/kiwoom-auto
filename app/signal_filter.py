@@ -60,15 +60,38 @@ class SignalFilter(ABC):
 
 
 class OverheatPullbackFilter(SignalFilter):
-    """OVERHEAT_PULLBACK 신호 필터 — 수동 확인 대기"""
+    """OVERHEAT_PULLBACK 신호 전용 리스크 게이팅 — 당일 리스크 상태 및 섹터 쏠림 최종 점검"""
 
     def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
-        if sig.signal_type == "OVERHEAT_PULLBACK":
-            logger.info(
-                "[OVERHEAT_PULLBACK] %s(%s) 눌림목 신호 감지 — 수동 확인 필요 (자동매수 대기 중)",
-                sig.name, sig.code
+        if sig.signal_type != "OVERHEAT_PULLBACK":
+            return True, ""
+
+        # RiskManager 게이팅: 당일 손절컷·이익잠금 활성 시 신규 진입 차단
+        if ctx.risk_mgr is not None:
+            if getattr(ctx.risk_mgr, "is_loss_cut", False):
+                logger.info("[OP거절] %s(%s) 당일 손절컷 활성", sig.name, sig.code)
+                return False, f"{sig.code}: OP — 손절컷 활성"
+            if getattr(ctx.risk_mgr, "is_profit_lock", False):
+                logger.info("[OP거절] %s(%s) 당일 이익잠금 활성", sig.name, sig.code)
+                return False, f"{sig.code}: OP — 이익잠금 활성"
+
+        # 섹터 쏠림 게이팅: 동일 섹터 보유 종목이 sector_max_positions 이상이면 차단
+        snap = ctx.snap_store.get_snapshot(sig.code) if ctx.snap_store else None
+        sector = str(getattr(snap, "sector", "") or "") if snap else ""
+        if sector:
+            sector_max = int(getattr(ctx.trading_cfg, "sector_max_positions", 2))
+            sector_count = sum(
+                1 for p in ctx.order_mgr.positions.values()
+                if str(getattr(p, "sector", "") or "") == sector
             )
-            return False, f"{sig.code}: OP눌림목(수동확인)"
+            if sector_count >= sector_max:
+                logger.info(
+                    "[OP거절] %s(%s) 섹터 쏠림 — %s %d/%d",
+                    sig.name, sig.code, sector, sector_count, sector_max
+                )
+                return False, f"{sig.code}: OP — 섹터 쏠림 ({sector} {sector_count}/{sector_max})"
+
+        logger.info("[OP통과] %s(%s) 눌림목 신호 리스크 게이팅 통과", sig.name, sig.code)
         return True, ""
 
 
@@ -141,8 +164,12 @@ class EntryStrategyFilter(SignalFilter):
     """EntryStrategy 필터 + Phase1 태깅 및 한도 체크"""
 
     def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
-        # Phase 태깅
-        if sig.signal_type == "OPENING_SCALP":
+        # Phase 태깅: 신호 생성 시각(emitted_at) 09:00~09:30 → Phase1(모닝스캘핑)
+        signal_time = getattr(sig, "emitted_at", None) or ctx.now or datetime.now()
+        phase1_start = datetime.strptime("09:00", "%H:%M").time()
+        phase1_end = datetime.strptime("09:30", "%H:%M").time()
+
+        if phase1_start <= signal_time.time() <= phase1_end:
             sig.entry_phase = 1
             # Phase1 한도 체크
             phase1_max = int(getattr(ctx.trading_cfg, "phase1_max_positions", 3))

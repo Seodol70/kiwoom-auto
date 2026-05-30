@@ -409,43 +409,54 @@ def check_overheat_pullback_entry(
     Returns:
         str: 신호 사유 문자열 (거절 시 None)
     """
-    evaluator = get_evaluator(cfg)
+    closes = list(getattr(snap, 'closes_1min', None) or [])
+    if len(closes) < 35:
+        return None
 
-    # StockSnapshot의 candle 데이터를 필요한 형식으로 변환
+    highs   = list(getattr(snap, 'highs_1min',   None) or [])
+    lows    = list(getattr(snap, 'lows_1min',    None) or [])
+    volumes = list(getattr(snap, 'volumes_1min', None) or [])
+
+    # 거래대금 복원: 종가 × 거래량 (근사)
     candle_history = []
-    if hasattr(snap, 'closes_1min') and snap.closes_1min:
-        closes = list(snap.closes_1min)
-        highs = list(snap.highs_1min or [])
-        lows = list(snap.lows_1min or [])
-        volumes = list(snap.volumes_1min or [])
+    for i, c in enumerate(closes):
+        h = highs[i]   if i < len(highs)   else c
+        l = lows[i]    if i < len(lows)    else c
+        v = volumes[i] if i < len(volumes) else 0
+        candle_history.append({'close': c, 'high': h, 'low': l, 'trading_value': c * v})
 
-        # 거래대금 복원: 종가 × 거래량 (근사)
-        for i, c in enumerate(closes):
-            trading_value = c * (volumes[i] if i < len(volumes) else 0)
-            candle_history.append({
-                'close': c,
-                'high': highs[i] if i < len(highs) else c,
-                'low': lows[i] if i < len(lows) else c,
-                'trading_value': trading_value,
-            })
+    # VWAP 지지 필터: 현재가 < VWAP 이면 하방 경직성 미확보 → 거절
+    vwap = float(getattr(snap, 'vwap', 0) or 0)
+    if vwap > 0 and snap.current_price < vwap:
+        return None
 
-    # 일봉 정보 추출
-    daily_info = snap.values.get('daily_context', {}) if hasattr(snap, 'values') else {}
+    # 일봉 정보 추출 (실제 일봉 데이터 우선, fallback: 1분봉 MA20 근사)
+    daily_closes = getattr(snap, 'daily_closes', None) or []
+    if len(daily_closes) >= 23:
+        daily_info = IndicatorService.get_daily_context(daily_closes, snap.current_price)
+    elif len(closes) >= 23:
+        ma20_now  = sum(closes[-20:]) / 20
+        ma20_prev = sum(closes[-23:-3]) / 20
+        daily_info = {
+            "ma20_slope_up": ma20_now >= ma20_prev,
+            "above_ma20":    snap.current_price >= ma20_now,
+            "daily_ma20":    ma20_now,
+        }
+    else:
+        daily_info = {"ma20_slope_up": True, "above_ma20": True, "daily_ma20": 0.0}
 
-    # 평가 실행
-    result = evaluator.evaluate(
+    result = get_evaluator(cfg).evaluate(
         candle_history=candle_history,
         daily_info=daily_info,
         code=snap.code,
         name=snap.name,
     )
 
-    # 신호 판정
     if result['is_buy_signal']:
-        debug = result.get('debug_info', {})
+        debug = result.get('debug_info') or {}
         reason = result['reason']
         if debug:
-            reason += f" | Lv{debug.get('current_level', '?')} | Vol+{debug.get('volume_surge', '?'):.1f}x"
+            reason += f" | Lv{debug.get('current_level', '?')} | Vol+{debug.get('volume_surge', 0):.1f}x"
         return reason
 
     return None

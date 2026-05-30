@@ -125,6 +125,20 @@ class DatabaseManager:
                 """)
                 
                 # 기존 DB에 컬럼이 없을 경우 추가 (Migration)
+                # trades 테이블 마이그레이션
+                cursor.execute("PRAGMA table_info(trades)")
+                trades_cols = [col[1] for col in cursor.fetchall()]
+                trades_new_cols = [
+                    ("trend_level_at_signal", "INTEGER"),  # 신호 당시 추세 레벨 (0~3)
+                    ("vwap_at_signal", "REAL"),             # 신호 당시 VWAP
+                    ("rs_score_at_signal", "REAL"),         # 신호 당시 RS 점수
+                ]
+                for col_name, col_type in trades_new_cols:
+                    if col_name not in trades_cols:
+                        cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                        logger.info("[DatabaseManager] trades 신규 컬럼 추가: %s", col_name)
+
+                # signals 테이블 마이그레이션
                 cursor.execute("PRAGMA table_info(signals)")
                 existing_cols = [col[1] for col in cursor.fetchall()]
                 new_cols = [
