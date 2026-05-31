@@ -1026,6 +1026,12 @@ class KiwoomManager(KiwoomProtocol):
         )
         return [c for c in raw.strip().split(";") if c]
 
+    # [FIX 2026-05-29] public alias — smart_scanner.py가 이 이름으로 호출 중
+    # 누락 시 "시장 구분 태깅 실패" + opt10030 fallback 시 빈 종목 리스트 반환
+    def get_code_list_by_market(self, market_id: str) -> list[str]:
+        """시장별 전체 종목코드 반환 (market_id: '0'=KOSPI, '10'=KOSDAQ)"""
+        return self._get_codes_by_market(market_id)
+
     def _fix_enc(self, text: str) -> str:
         """한글 인코딩 보정 (latin-1 -> cp949)"""
         if not text: return ""
@@ -1253,6 +1259,19 @@ class KiwoomManager(KiwoomProtocol):
             # [2026-05-22] TR 수신 진입 로그 INFO → DEBUG 강등 (분당 30건, LogPanel 부하)
             logger.debug("[TR 수신 진입] rq=%s tr=%s prev_next=%s — 콜백 실행됨", rq_name, tr_code, self._tr_prev_next)
             logger.debug("[TR 수신] rq=%s tr=%s prev_next=%s screen=%s", rq_name, tr_code, self._tr_prev_next, screen_no)
+
+            # [FIX 2026-05-29] 늦게 도착한 응답이 다음 TR의 _tr_data를 오염시키는 문제 차단
+            # 5/29 09:05:05 balance 요청에 opt20001(index_info) 데이터가 섞인 사건이 원인.
+            # _tr_current_rq("")는 현재 어떤 요청도 대기 중이 아님을 의미 — 이때 들어오는 응답은
+            # 이전 TIMEOUT된 요청의 늦은 응답이므로 _tr_data를 건드리지 말고 무시한다.
+            # 다른 rq_name이 대기 중일 때 들어오는 응답도 마찬가지 (예: balance 대기 중에 늦은 index_info)
+            if self._tr_current_rq and self._tr_current_rq != rq_name:
+                logger.debug("[TR 수신] 늦은 응답 무시 — 수신=%s, 대기중=%s", rq_name, self._tr_current_rq)
+                return
+            if not self._tr_current_rq:
+                # 대기 중인 요청 없음 — 이전 TIMEOUT 응답의 잔향
+                logger.debug("[TR 수신] orphan 응답 무시 — rq=%s (대기 요청 없음)", rq_name)
+                return
 
             if rq_name == "stock_info":
                 self._tr_data = self._parse_single(tr_code, rq_name, [
@@ -1718,6 +1737,10 @@ class MockKiwoomManager:
 
     def get_current_price(self, code: str) -> int:
         return 0
+
+    def get_code_list_by_market(self, market_id: str) -> list[str]:
+        """Mock: 빈 리스트 반환"""
+        return []
 
     def get_min_candles(self, code: str, tick_unit: int = 1, count: int = 60) -> list:
         return []

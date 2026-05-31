@@ -109,7 +109,8 @@ class UniverseManager:
         exclude_kw = (
             "ETF", "ETN", "인버스", "레버리지", "곱버스", "역추적",
             "2X", "3X", "5X", "10X", "스팩", "SPAC", "HEDGE", "선물", "옵션",
-            "KODEX", "TIGER", "KBSTAR", "HANAR", "KOSEF", "ARIRANG", "ACE", "RISE", "SOL"
+            # [FIX 2026-05-29] PLUS 추가 — PLUS 코스피50(122090) ETF가 통과해 BREAKOUT 신호 → 09:06 멈춤
+            "KODEX", "TIGER", "KBSTAR", "HANAR", "KOSEF", "ARIRANG", "ACE", "RISE", "SOL", "PLUS",
         )
         return not any(kw in n for kw in exclude_kw)
 

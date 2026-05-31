@@ -901,7 +901,11 @@ class OrderManager(QObject):
             _hard = float(cfg.RISK.get("hard_stop_pct", -3.0))
             
             # 1. 하드 스탑 (-3.0% 등) — 즉시 탈출
+            # [FIX 2026-05-29] 이미 블랙리스트 등록 = 이미 매도 주문 발행됨 → 중복 차단
+            # 기가레인(049080) 매 틱마다 하드스탑 WARNING 수십 회 → min_candle TIMEOUT 폭주 유발
             if pos.pnl_pct <= _hard:
+                if code in self._stop_loss_today:
+                    return  # 이미 하드스탑 실행됨 — 체결 대기 중, 중복 매도 차단
                 logger.warning("🚨 [하드스탑] %s(%s) 임계치 돌파 (%.2f%%) — 즉시 매도 및 블랙리스트 등록", pos.name, code, pos.pnl_pct)
                 self.mark_stop_loss(code)
                 self.force_exit(code, pos.name, pos.qty, "하드스탑")

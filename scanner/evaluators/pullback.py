@@ -26,7 +26,7 @@ def check_pullback_entry(
         return None
 
     # [FIX 2026-05-28] 일봉 정배열 락 (추세의 뼈대) — 미니 제미니 조언 반영
-    # 1분봉이 우상향해도 일봉이 역배열이면 매물대에 막힘. 일봉 MA20 우상향 + 현재가≥MA20 강제
+    # [FIX 2026-05-29] 일봉 0개이면 통과 — daily_refresh 미연결로 전종목 차단되는 문제 해소
     if len(snap.daily_closes) >= 23:
         _daily_ctx = IndicatorService.get_daily_context(snap.daily_closes, snap.current_price)
         if getattr(cfg, "daily_ma20_filter_enabled", True):
