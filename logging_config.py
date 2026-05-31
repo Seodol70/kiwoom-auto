@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import os
+import shutil
 from pathlib import Path
 
 _LOG_DIR = Path(__file__).parent / "logs"
@@ -30,14 +32,54 @@ _FMT = logging.Formatter(
 )
 
 
+class WinSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """
+    Windows 호환 RotatingFileHandler.
+
+    표준 구현의 두 가지 Windows 문제를 모두 해결:
+      - shouldRollover(): stream.seek() 시 PermissionError → 롤오버 스킵
+      - doRollover(): 파일 잠금으로 rename 실패 → copy+truncate 방식으로 교체
+    """
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:
+        try:
+            return super().shouldRollover(record)
+        except (OSError, PermissionError):
+            return False  # 파일이 잠겨있으면 롤오버 포기, 현재 파일에 계속 기록
+
+    def doRollover(self) -> None:
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+
+        for i in range(self.backupCount - 1, 0, -1):
+            sfn = self.rotation_filename(f"{self.baseFilename}.{i}")
+            dfn = self.rotation_filename(f"{self.baseFilename}.{i + 1}")
+            if os.path.exists(sfn):
+                if os.path.exists(dfn):
+                    os.remove(dfn)
+                os.rename(sfn, dfn)
+
+        dfn = self.rotation_filename(f"{self.baseFilename}.1")
+        if os.path.exists(dfn):
+            os.remove(dfn)
+        if os.path.exists(self.baseFilename):
+            shutil.copy2(self.baseFilename, dfn)
+            with open(self.baseFilename, "w", encoding=self.encoding or "utf-8"):
+                pass
+
+        if not self.delay:
+            self.stream = self._open()
+
+
 def _make_logger(name: str, filename: str, level: int = logging.DEBUG) -> logging.Logger:
     """
-    RotatingFileHandler 기반 전용 로거를 생성한다.
+    WinSafeRotatingFileHandler 기반 전용 로거를 생성한다.
     이미 핸들러가 설정돼 있으면 재생성하지 않는다 (모듈 재로딩 방어).
     """
     lg = logging.getLogger(name)
-    if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in lg.handlers):
-        fh = logging.handlers.RotatingFileHandler(
+    if not any(isinstance(h, WinSafeRotatingFileHandler) for h in lg.handlers):
+        fh = WinSafeRotatingFileHandler(
             _LOG_DIR / filename,
             maxBytes=10 * 1024 * 1024,   # 10 MB
             backupCount=5,

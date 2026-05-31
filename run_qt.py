@@ -40,8 +40,9 @@ if __name__ == "__main__":
     os.makedirs("logs", exist_ok=True)
     
     # 루트 로거 설정 (터미널 및 파일, 그리고 UI 로그 패널로 전달됨)
+    from logging_config import WinSafeRotatingFileHandler
     console_handler = logging.StreamHandler()
-    file_handler = logging.handlers.RotatingFileHandler(
+    file_handler = WinSafeRotatingFileHandler(
         "logs/system.log", maxBytes=10*1024*1024, backupCount=5, encoding='utf-8'
     )
     formatter = logging.Formatter(

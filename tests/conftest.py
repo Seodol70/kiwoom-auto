@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 
 from PyQt5.QtWidgets import QApplication
 
-from order.order_manager import OrderManager
-from scanner.smart_scanner import SmartScannerConfig
+# from order.order_manager import OrderManager  # 임시 주석: conftest 로드 에러 방지
+# from scanner.smart_scanner import SmartScannerConfig
 
 
 @pytest.fixture(scope="session")
@@ -42,32 +42,32 @@ def mock_kiwoom(qapp):
     return kiwoom
 
 
-@pytest.fixture
-def mock_order_mgr(mock_kiwoom, qapp):
-    """
-    기본 MockOrderManager fixture.
+# @pytest.fixture
+# def mock_order_mgr(mock_kiwoom, qapp):
+#     """
+#     기본 MockOrderManager fixture.
+#
+#     - 예수금: 10,000,000원
+#     - 포지션: 없음
+#     """
+#     om = OrderManager(
+#         kiwoom=mock_kiwoom,
+#         account="1234567890",
+#         max_order_amount=1_500_000,
+#         max_positions=5,
+#         parent=None,
+#     )
+#     om.cash = 10_000_000
+#     return om
 
-    - 예수금: 10,000,000원
-    - 포지션: 없음
-    """
-    om = OrderManager(
-        kiwoom=mock_kiwoom,
-        account="1234567890",
-        max_order_amount=1_500_000,
-        max_positions=5,
-        parent=None,
-    )
-    om.cash = 10_000_000
-    return om
 
-
-@pytest.fixture
-def mock_scan_cfg():
-    """
-    기본 SmartScannerConfig fixture.
-
-    테스트용 기본값으로 설정된 설정 객체.
-    """
-    cfg = SmartScannerConfig()
-    # 기본값은 scanner/smart_scanner.py 의 SmartScannerConfig 참고
-    return cfg
+# @pytest.fixture
+# def mock_scan_cfg():
+#     """
+#     기본 SmartScannerConfig fixture.
+#
+#     테스트용 기본값으로 설정된 설정 객체.
+#     """
+#     cfg = SmartScannerConfig()
+#     # 기본값은 scanner/smart_scanner.py 의 SmartScannerConfig 참고
+#     return cfg

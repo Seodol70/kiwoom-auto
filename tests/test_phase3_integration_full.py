@@ -30,6 +30,13 @@ class MockOrderManager:
         self._pending = {}
         self._daily_realized_pnl = 0
         self.signals_handled = []
+        # [Step 2] SignalFilterChain을 위한 필터 의존성
+        self._strategy = MagicMock()
+        self._strategy.should_entry = MagicMock(return_value=(True, ""))
+        self._ai_filter = MagicMock()
+        self._ai_filter.should_enter = MagicMock(return_value=(True, 0.7))
+        self._ai_filter.is_ready = False
+        self._auto_trading = False
 
     @property
     def daily_realized_pnl(self):
@@ -56,6 +63,25 @@ class MockOrderManager:
         pass
 
 
+class MockSnapshot:
+    """StockSnapshot Mock"""
+    def __init__(self):
+        self.trend_level = 2
+        self.foreign_net_buy = 100
+        self.inst_net_buy = 100
+        self.rs_score = 0.5
+        self.closes_1min = [50000, 50100, 50200]
+
+
+class MockSnapshotStore:
+    """SnapshotStore Mock"""
+    def get_snapshot(self, code):
+        return MockSnapshot()
+
+    def update_investor(self, code, foreign_net, inst_net):
+        pass
+
+
 class MockConfig:
     daily_profit_lock_won = 100000
     daily_loss_cut_won = -100000
@@ -71,6 +97,11 @@ class MockConfig:
     strong_trend_hold_level = 3
     strong_trend_timecut_exempt = True
     trend_protect_enabled = True
+    # [Step 2] SignalFilterChain을 위한 설정
+    phase1_max_positions = 3
+    ai_threshold = 0.5
+    rs_threshold = 0.0
+    exploration_mode = False
 
 
 def _make_fresh_app_state():
@@ -104,12 +135,22 @@ class MockMainWindow(QObject):
         self._auto_trading = False
         self.events_log = []
 
+        # [Step 2] SignalFilterChain을 위한 의존성
+        self._snap_store = MockSnapshotStore()
+        self._kiwoom = MagicMock()
+        self._news_analyzer = None
+
         # Phase 3: Application Layer
         self.market_scheduler = MarketScheduler(self)
         self.risk_manager = RiskManager(self.order_mgr, self._scan_cfg, self, app_state=_make_fresh_app_state())
         self.trading_controller = TradingController(
-            order_mgr=self.order_mgr, scan_cfg=self._scan_cfg,
-            risk_mgr=self.risk_manager, parent=self
+            kiwoom=self._kiwoom,
+            order_mgr=self.order_mgr,
+            scan_cfg=self._scan_cfg,
+            risk_mgr=self.risk_manager,
+            snap_store=self._snap_store,
+            news_analyzer=self._news_analyzer,
+            parent=self
         )
 
         # 신호 연결
@@ -151,6 +192,11 @@ class MockMainWindow(QObject):
 
     def process_signal(self, sig: MockSignal) -> bool:
         """신호 처리 (실제 _on_scan_signal 시뮬레이션)"""
+        # [Step 2] RiskManager의 신규 매수 락 체크
+        if self.risk_manager.is_new_entry_locked:
+            self.events_log.append(("SIGNAL_REJECTED_BY_RISK", sig.code))
+            return False
+
         self.trading_controller.set_auto_trading(self._auto_trading)
         result = self.trading_controller.handle_signal(sig)
         self.events_log.append(("SIGNAL_PROCESSED", sig.code, result))

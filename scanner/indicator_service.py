@@ -142,7 +142,10 @@ class IndicatorService:
         if cur_price <= ema_now or ema_now <= ema_prev: return 0
         
         dist_atr = (cur_price - ema_now) / atr
-        
+
+        # dist_atr > 2.5: 가격이 EMA20에서 ATR의 2.5배 이상 이격 → 과열 의심
+        # Lv3(즉시진입)을 부여하지 않고 Lv2로 하향하여 진입 관찰 시간 확보
+        if dist_atr > 2.5: return 2
         if dist_atr >= 1.5: return 3
         if dist_atr >= 1.0: return 2
         if dist_atr >= 0.3: return 1

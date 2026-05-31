@@ -50,6 +50,11 @@ class OverheatPullbackStrategy(BaseStrategy):
         if len(closes) < 35:
             return None
 
+        # VWAP 지지 필터: 현재가 < VWAP 이면 하방 경직성 미확보
+        vwap = float(getattr(snap, 'vwap', 0) or 0)
+        if vwap > 0 and snap.current_price < vwap:
+            return None
+
         # 분봉 딕셔너리 형식으로 변환 (거래대금 = 종가 × 거래량 근사)
         candle_history = []
         for i, c in enumerate(closes):

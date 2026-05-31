@@ -372,6 +372,68 @@ class OrderManager(QObject):
                 self.on_position_closed(code)
 
     # -----------------------------------------------------------------------
+    # 포지션 재구성 헬퍼 (Step 1: 코드 중복 제거, 2026-05-29)
+    # -----------------------------------------------------------------------
+
+    def _rebuild_positions_from_holdings(self, holdings: list[dict]) -> dict[str, "Position"]:
+        """
+        holdings 리스트로부터 Position dict 재구성 (공통 로직 추출).
+
+        sync_balance()와 _sync_with_balance()에서 동일하게 반복되던 Position 생성 로직을
+        이 메서드로 통합. 22개 필드 복사 부분 중복 제거.
+
+        Args:
+            holdings: key={code, name, qty, avg_price, current_price, ...}인 dict 리스트
+
+        Returns:
+            dict[str, Position]: code → Position 매핑
+        """
+        new_positions: dict[str, Position] = {}
+        for h in holdings:
+            qty = h.get("qty", 0)
+            if qty <= 0:
+                # 보유수량 0 or 키 없음 — 불완전 응답 방어
+                logger.warning("_rebuild_positions_from_holdings: 보유수량 0 또는 누락 — %s(%s) 스킵",
+                               h.get("name", "?"), h.get("code", "?"))
+                continue
+            code = h["code"]
+            avg = h.get("avg_price", 0)
+            if avg == 0 and code in self.positions:
+                avg = self.positions[code].avg_price
+            old = self.positions.get(code)
+            qty_today = min(old.qty_buy_today_app, qty) if old else 0
+
+            # 22개 필드 복사 (기존 값 보존)
+            new_positions[code] = Position(
+                code              = code,
+                name              = h.get("name", ""),
+                qty               = qty,
+                avg_price         = avg,
+                current_price     = h.get("current_price", 0),
+                buy_date          = old.buy_date if old else None,
+                entry_time        = old.entry_time if old else None,
+                opened_by_app     = old.opened_by_app if old else False,
+                qty_buy_today_app = qty_today,
+                candle_stop_price = old.candle_stop_price if old else 0,
+                break_even_done   = old.break_even_done if old else False,
+                half_exited       = old.half_exited if old else False,
+                peak_price        = old.peak_price        if old else 0,
+                partial_sold      = old.partial_sold      if old else False,
+                qty_partial_sold  = old.qty_partial_sold  if old else 0,
+                trend_level       = old.trend_level       if old else 0,
+                trend_prev_level  = old.trend_prev_level  if old else 0,
+                entry_phase       = old.entry_phase       if old else 0,
+                sector            = old.sector            if old else "",
+                near_daily_high   = old.near_daily_high   if old else False,
+                custom_tp_pct     = old.custom_tp_pct     if old else 0.0,
+                eod_trade         = old.eod_trade         if old else False,
+                overnight_held    = old.overnight_held    if old else False,
+                entry_gap_pct     = old.entry_gap_pct     if old else 0.0,
+            )
+
+        return new_positions
+
+    # -----------------------------------------------------------------------
     # 잔고 동기화
     # -----------------------------------------------------------------------
 
@@ -411,49 +473,7 @@ class OrderManager(QObject):
                 return self.cash
 
             # opw00018 모의투자 서버는 매입가 필드를 반환하지 않음 → 기존 메모리값 보존
-            new_positions: dict[str, Position] = {}
-            for h in holdings:
-                qty = h.get("qty", 0)
-                if qty <= 0:
-                    # 보유수량 0 or 키 없음 — 불완전 응답 방어 (KeyError 'qty' 재발 방지)
-                    logger.warning("sync_balance: 보유수량 0 또는 누락 — %s(%s) 스킵",
-                                   h.get("name", "?"), h.get("code", "?"))
-                    continue
-                code = h["code"]
-                avg = h.get("avg_price", 0)
-                if avg == 0 and code in self.positions:
-                    avg = self.positions[code].avg_price
-                old = self.positions.get(code)
-                qty_today = min(old.qty_buy_today_app, qty) if old else 0
-                new_positions[code] = Position(
-                    code              = code,
-                    name              = h.get("name", ""),
-                    qty               = qty,
-                    avg_price         = avg,
-                    current_price     = h.get("current_price", 0),
-                    buy_date          = old.buy_date if old else None,
-                    entry_time        = old.entry_time if old else None,
-                    opened_by_app     = old.opened_by_app if old else False,
-                    qty_buy_today_app = qty_today,
-                    candle_stop_price = old.candle_stop_price if old else 0,
-                    break_even_done   = old.break_even_done if old else False,
-                    half_exited       = old.half_exited if old else False,
-                    peak_price        = old.peak_price        if old else 0,
-                    partial_sold      = old.partial_sold      if old else False,
-                    qty_partial_sold  = old.qty_partial_sold  if old else 0,
-                    trend_level       = old.trend_level       if old else 0,
-                    trend_prev_level  = old.trend_prev_level  if old else 0,
-                    entry_phase       = old.entry_phase       if old else 0,
-                    sector            = old.sector            if old else "",
-                    # [BUG FIX 2026-05-26] sync_balance 시 누락됐던 메타 필드 복사
-                    # — EOD/갭/익절 메타가 서버 동기화 후에도 유지되도록 보존
-                    near_daily_high   = old.near_daily_high   if old else False,
-                    custom_tp_pct     = old.custom_tp_pct     if old else 0.0,
-                    eod_trade         = old.eod_trade         if old else False,
-                    overnight_held    = old.overnight_held    if old else False,
-                    entry_gap_pct     = old.entry_gap_pct     if old else 0.0,
-                )
-            self.positions = new_positions
+            self.positions = self._rebuild_positions_from_holdings(holdings)
 
             # 모의투자 서버는 opw00001 "예수금"을 투자금 차감 없이 반환한다.
             # 실전투자 서버는 이미 차감된 "예수금" 또는 "D+2추정예수금"을 반환하므로 차감하지 않는다.
@@ -500,47 +520,7 @@ class OrderManager(QObject):
                 return self.cash
 
             # sync_balance()와 동일 — opw00018 응답 기반 포지션 재구성
-            new_positions: dict[str, Position] = {}
-            for h in holdings:
-                qty = h.get("qty", 0)
-                if qty <= 0:
-                    logger.warning("_sync_with_balance: 보유수량 0 또는 누락 — %s(%s) 스킵",
-                                   h.get("name", "?"), h.get("code", "?"))
-                    continue
-                code = h["code"]
-                avg = h.get("avg_price", 0)
-                if avg == 0 and code in self.positions:
-                    avg = self.positions[code].avg_price
-                old = self.positions.get(code)
-                qty_today = min(old.qty_buy_today_app, qty) if old else 0
-                new_positions[code] = Position(
-                    code              = code,
-                    name              = h.get("name", ""),
-                    qty               = qty,
-                    avg_price         = avg,
-                    current_price     = h.get("current_price", 0),
-                    buy_date          = old.buy_date if old else None,
-                    entry_time        = old.entry_time if old else None,
-                    opened_by_app     = old.opened_by_app if old else False,
-                    qty_buy_today_app = qty_today,
-                    candle_stop_price = old.candle_stop_price if old else 0,
-                    break_even_done   = old.break_even_done if old else False,
-                    half_exited       = old.half_exited if old else False,
-                    peak_price        = old.peak_price        if old else 0,
-                    partial_sold      = old.partial_sold      if old else False,
-                    qty_partial_sold  = old.qty_partial_sold  if old else 0,
-                    trend_level       = old.trend_level       if old else 0,
-                    trend_prev_level  = old.trend_prev_level  if old else 0,
-                    entry_phase       = old.entry_phase       if old else 0,
-                    sector            = old.sector            if old else "",
-                    # [BUG FIX 2026-05-26] sync_balance 시 누락됐던 메타 필드 복사
-                    near_daily_high   = old.near_daily_high   if old else False,
-                    custom_tp_pct     = old.custom_tp_pct     if old else 0.0,
-                    eod_trade         = old.eod_trade         if old else False,
-                    overnight_held    = old.overnight_held    if old else False,
-                    entry_gap_pct     = old.entry_gap_pct     if old else 0.0,
-                )
-            self.positions = new_positions
+            self.positions = self._rebuild_positions_from_holdings(holdings)
             if self._kiwoom.is_mock:
                 invested = sum(p.avg_price * p.qty for p in self.positions.values())
                 self.cash = max(0, server_cash - invested)

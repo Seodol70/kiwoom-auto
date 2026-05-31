@@ -41,6 +41,10 @@ htmlcov/
 *.swo
 *~
 
+# --- [Claude Code] ---
+.claude/
+!.claude/memory/
+
 # --- [Logs & Reports] ---
 *.log
 logs/
