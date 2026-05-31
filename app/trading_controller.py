@@ -248,13 +248,30 @@ class TradingController(QObject):
                 self._record_signal(sig)
                 return False
 
-        # [FIX 2026-05-29] 약한신호(trend_lv<2) 차단 — 09:30 이후만 적용
-        # 5/28에 전 시간대로 확대했더니 OPENING(09:00~09:30)에서 1분봉 22개 미만으로
-        # trend_lv 항상 0 → 6건 신호 모두 차단 (어보브반도체, 티에이치엔 등).
-        # OPENING은 BREAKOUT/PULLBACK 게이트의 일봉 락(MA20 우상향 + 현재가≥MA20)이 대신 보호.
+        # trend_lv 필터 — 슬롯별 차등 적용
+        # [데이터 분석 2026-06-01]
+        # Lv2 진입: 승률 100%, 평균 +7.30% (이브이첨단소재+14%, 토마토시스템+0.4%)
+        # Lv3 진입: 승률 30%,  평균 -0.80% (OPENING 직후 정점 진입이 주원인)
+        # → OPENING(09:00~09:30)에서 Lv3 차단, 09:30 이후는 Lv2 이상 유지
+        _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
+        _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
+
+        _is_opening = (_dt.strptime("09:00", "%H:%M").time()
+                       <= _now.time()
+                       < _dt.strptime("09:30", "%H:%M").time())
+
+        if _is_opening and _trend_lv == 3:
+            # OPENING Lv3 = 이미 강하게 오른 상태 = 정점 진입 위험
+            # 5/28 손절 7건 중 차백신·한성크린텍 등 OPENING Lv3가 대부분
+            logger.info(
+                "[진입거절] %s(%s) OPENING Lv3 차단 — 정점 진입 위험 (trend_lv=%d)",
+                sig.name, sig.code, _trend_lv
+            )
+            self.signal_rejected.emit(f"{sig.code}: OPENING Lv3 차단")
+            self._record_signal(sig)
+            return False
+
         if _now.time() >= _dt.strptime("09:30", "%H:%M").time():
-            _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
-            _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
             if _trend_lv < 2:
                 logger.info(
                     "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
