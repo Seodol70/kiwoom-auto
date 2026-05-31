@@ -393,11 +393,13 @@ class SmartScanner(QObject):
             t.daemon = True
             t.start()
             logger.warning("⏳ [SmartScanner] Pre-Filter %.0f초(= %s) 후 실행 예약", secs, (datetime.now() + timedelta(seconds=secs)).time())
-            # [FIX] Pre-Filter 대기 중에도 _prefiltered=True로 가정하고 실시간 루프 진행
-            # → UI에는 기존 캐시된 종목 표시, 09:00에 다시 갱신
-            if not self._prefiltered and secs <= 300:  # 5분 내라면 임시 활성화
+            # [FIX 2026-06-01] 장 시작 전이어도 분봉 캐시가 있으면 즉시 UI 활성화
+            # → 이전 거래일 캐시 종목으로 감시 목록 표시 (09:00 Pre-Filter 실행 시 갱신)
+            # → 5분 제한 제거: 08:11 기동처럼 수십 분 전에 켜도 감시 목록 표시
+            cached_code_count = len(getattr(self.store, '_min_candle_cache', {}))
+            if not self._prefiltered:
                 self._prefiltered = True
-                logger.info("[2단계] Pre-Filter 대기 중(%.0f초)이지만 UI 먼저 활성화", secs)
+                logger.info("[2단계] Pre-Filter 대기 중(%.0f초) — 캐시 %d종목으로 UI 즉시 활성화", secs, cached_code_count)
 
 
         # 2단계 루프
