@@ -38,22 +38,15 @@ class BreakoutStrategy(BaseStrategy):
         if not breakout_reason:
             return None
 
-        # 2. 진입 게이트 체크 (공통 필터) — OPENING 슬롯에서는 스킵 (2026-05-12: 학습 데이터 수집)
-        # [CLEANUP 2026-05-26] breakout_debug.log 디스크 IO + WARNING 로그 전부 제거
-        # — 매 신호 평가마다 4회 파일 flush + 2회 WARNING → UI 큐 폭주 / 디스크 부하 원인
-        # — 2026-05-26 14:15:00 UI 프리징 사건이 이 로그 폭주로 발생
-        from datetime import datetime
-        from scanner.evaluators.common import _resolve_time_slot
-        now = datetime.now().time()
-        slot = _resolve_time_slot(now, cfg)
-
-        if slot == "OPENING":
-            gate_reason = "[OPENING_GATE_SKIP]"
-        else:
-            gate_reason = check_breakout_gate(snap, cfg)
-            if not gate_reason:
-                # 차단 사유는 evaluators 내부에서 이미 ScannerLogger.rejected로 기록됨
-                return None
+        # 2. 진입 게이트 체크 (공통 필터)
+        # [FIX 2026-05-28] OPENING 스킵 제거 — 5/12 학습용 임시 코드가 잔존하던 것.
+        # OPENING_GATE_SKIP으로 09:00~10:00에 모든 필터 우회되어 trend_lv=0 종목도 진입,
+        # 5/28 OPENING 11건 진입 → 3승 8패 -25,000원의 직접 원인.
+        # jdm.py의 5/27 수정과 동일 접근 — 완전 스킵 대신 정상 게이트 적용.
+        gate_reason = check_breakout_gate(snap, cfg)
+        if not gate_reason:
+            # 차단 사유는 evaluators 내부에서 이미 ScannerLogger.rejected로 기록됨
+            return None
 
         # 3. AI 피처 및 신호 생성
         reason = f"{breakout_reason} | {gate_reason}"

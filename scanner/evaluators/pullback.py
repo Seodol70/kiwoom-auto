@@ -25,6 +25,21 @@ def check_pullback_entry(
     if len(closes) < 20:
         return None
 
+    # [FIX 2026-05-28] 일봉 정배열 락 (추세의 뼈대) — 미니 제미니 조언 반영
+    # 1분봉이 우상향해도 일봉이 역배열이면 매물대에 막힘. 일봉 MA20 우상향 + 현재가≥MA20 강제
+    if len(snap.daily_closes) >= 23:
+        _daily_ctx = IndicatorService.get_daily_context(snap.daily_closes, snap.current_price)
+        if getattr(cfg, "daily_ma20_filter_enabled", True):
+            if not _daily_ctx["above_ma20"] and _daily_ctx["daily_ma20"] > 0:
+                ScannerLogger.rejected(snap.code, snap.name, "PULLBACK_DAILY_MA20",
+                    f"일봉 20MA 하방 — 현재가 {snap.current_price:,} < 20MA {_daily_ctx['daily_ma20']:,.0f}")
+                return None
+        if getattr(cfg, "daily_ma20_slope_enabled", True):
+            if not _daily_ctx.get("ma20_slope_up", True):
+                ScannerLogger.rejected(snap.code, snap.name, "PULLBACK_MA20_SLOPE",
+                    f"일봉 20MA 기울기 하락 — 추세역배열 차단")
+                return None
+
     ema20 = IndicatorService.calc_ema(closes, 20)
     rsi = IndicatorService.calc_rsi(closes, 14)
     if ema20 is None or rsi is None:

@@ -248,21 +248,20 @@ class TradingController(QObject):
                 self._record_signal(sig)
                 return False
 
-        # [FIX 2026-05-26] 09:30+ 약한신호 차단 — 블록 범위를 09:00~10:00 밖으로 이동
-        # 버그: 이전에 09:00~10:00 블록 안에 nested → 10:00 이후 오후 신호에 미작동
-        # 5/26 분석: 13:16 라온시큐어(trend_lv=0), 13:17 우리로(trend_lv=0) 오후 진입 발생
-        # → 09:30 이후 전 시간대에 적용 (09:00~09:30 OPENING 제외)
-        if _now.time() >= _dt.strptime("09:30", "%H:%M").time():
-            _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
-            _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
-            if _trend_lv < 2:
-                logger.info(
-                    "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
-                    sig.name, sig.code, _trend_lv
-                )
-                self.signal_rejected.emit(f"{sig.code}: 09:30+ 약한신호 (trend_lv={_trend_lv})")
-                self._record_signal(sig)
-                return False
+        # [FIX 2026-05-28] 약한신호(trend_lv<2) 차단 — 전 시간대 적용
+        # 이전(5/26): 09:30+ 만 적용 → OPENING 09:00~09:30에 trend_lv=0 진입 다수 발생
+        # 5/28 분석: LG디스플레이/삼화콘덴서/현대차 등 trend_lv=0인데 진입 → 7건 손실
+        # → OPENING_GATE_SKIP 제거와 함께 전 시간대 trend_lv 필터 강제
+        _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
+        _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
+        if _trend_lv < 2:
+            logger.info(
+                "[진입거절] %s(%s) 약한신호 차단 — trend_lv=%d (요구: ≥2)",
+                sig.name, sig.code, _trend_lv
+            )
+            self.signal_rejected.emit(f"{sig.code}: 약한신호 (trend_lv={_trend_lv})")
+            self._record_signal(sig)
+            return False
 
         # Phase1 태깅 및 한도 체크
         if sig.signal_type == "OPENING_SCALP":

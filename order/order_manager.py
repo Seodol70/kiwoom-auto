@@ -1002,7 +1002,12 @@ class OrderManager(QObject):
         """
         해당 종목을 당일 손절 블랙리스트에 등록한다.
         손절·Hard Stop·캔들손절 시 호출. 익절·수동·Day Close는 호출하지 않음.
+
+        [FIX 2026-05-28] 중복 호출 차단 — 이미 등록된 종목이면 즉시 return
+        5/28 차백신연구소 811회 등록, 5/22 에코프로 435회 등록 같은 무한루프 방지
         """
+        if code in self._stop_loss_today:
+            return  # 이미 등록됨 — 로그/연산 모두 스킵
         self._stop_loss_today.add(code)
         logger.info("[손절 블랙리스트] %s 등록 — 당일 재매수 차단", code)
 
