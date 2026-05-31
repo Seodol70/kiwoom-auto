@@ -10,7 +10,9 @@ try:
     HAS_ML = True
 except ImportError:
     HAS_ML = False
-    logger.warning("[AIFilter] joblib 모듈이 없습니다. AI 필터링 기능이 비활성화됩니다. (pip install scikit-learn joblib 필요)")
+    # 32bit Python 환경(키움 OCX 제약)에서는 sklearn/joblib 설치 불가 — 정상 상황
+    # is_ready=False → should_enter()는 True(무조건 통과) 반환 — 매매에 영향 없음
+    logger.debug("[AIFilter] joblib 미설치 — AI 필터 관찰 모드 (32bit 환경 정상)")
 
 class AIFilter:
     """
