@@ -535,7 +535,13 @@ class SmartScanner(QObject):
                     logger.info("  ✓ 종목명 업데이트 완료: %d/%d", updated_count, len(all_codes))
 
         # [기존] 가격 보강 로직 (opt10030 실패 시 또는 가격이 0일 때 opt10001 연동)
-        is_fallback = getattr(self, "_last_volume_updated", 0) < time.monotonic() - 300.0
+        # [FIX 2026-06-01] CircuitBreaker 활성 중이면 opt10004 배치 호출 자체를 건너뜀
+        # 09:00 Pre-Filter 시 CircuitBreaker+캐시만료(is_fallback=True) 조합으로
+        # opt10004 30종목 동기 TR → 메인 스레드 블로킹 → UI 멈춤 반복 사건의 원인
+        cb_active = (self._kiwoom.is_tr_banned("opt10004") or
+                     self._kiwoom.is_tr_banned("opt10030"))
+        is_fallback = (not cb_active and
+                       getattr(self, "_last_volume_updated", 0) < time.monotonic() - 300.0)
 
         target_indices = []
         for i, r in enumerate(rows):
@@ -543,6 +549,11 @@ class SmartScanner(QObject):
                 target_indices.append(i)
             elif safe_int(r.get("current_price")) <= 0: # 가격이 0이면 무조건 보정
                 target_indices.append(i)
+
+        if cb_active and target_indices:
+            logger.info("  ⚠ CircuitBreaker 활성 — opt10004 데이터 보강 스킵 (%d종목)", len(target_indices))
+            target_indices = [i for i in target_indices
+                              if safe_int(rows[i].get("current_price")) <= 0]  # 가격 0만 유지
 
         if target_indices:
             logger.info("  ⚠ 데이터 보강 필요 (%d종목) -> opt10004 배치 연동 시작", len(target_indices))
