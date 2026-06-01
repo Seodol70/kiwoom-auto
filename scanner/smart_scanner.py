@@ -1649,16 +1649,18 @@ class SmartScanner(QObject):
         is_opening = _time(9, 0) <= now_t <= _time(9, 10)
         
         min_bars = 55
-        load_max = 30 if is_opening else 6  # 장초반에는 더 많이
+        load_max = 6
         codes_need_all = [c for c in top_codes if self.store.get_candle_count(c) < min_bars]
-        
-        # 첫 실행이거나 장초반이면 더 공격적으로 전체 로딩 시도
+
+        # [FIX 2026-06-01] TurboWarmup 상한 20종목으로 제한
+        # 50종목 전체 → min_candle TIMEOUT 연속 → TR 큐 독점 → UI 멈춤
+        # 250ms × 20종목 = 5초로 단축, 나머지는 다음 주기에 순차 로딩
+        TURBO_MAX = 20
         if not self._initial_candle_load_done or is_opening:
-            codes_need = codes_need_all if is_opening else codes_need_all[:50]
-            if is_opening:
-                logger.info("[TurboWarmup] 장초반 공격적 로딩 시작 (%d종목)", len(codes_need))
-            elif not self._initial_candle_load_done:
-                logger.info("[주기 스캔] 첫 일괄 로딩 시작 (%d종목)", len(codes_need))
+            codes_need = codes_need_all[:TURBO_MAX]
+            if codes_need:
+                logger.info("[TurboWarmup] 장초반 로딩 시작 (%d종목, 상한 %d)",
+                            len(codes_need), TURBO_MAX)
         else:
             codes_need = codes_need_all[:load_max]
 

@@ -196,7 +196,7 @@ class SnapshotStore:
                     self._bulk_name_log = set()
                 if code not in self._bulk_name_log and len(self._bulk_name_log) < 5:
                     self._bulk_name_log.add(code)
-                    logger.warning("[bulk_update] %s: st.name 설정 → %r", code, name_from_df)
+                    logger.debug("[bulk_update] %s: st.name 설정 → %r", code, name_from_df)
                 
                 # 고속 캐시 및 상태 업데이트 - 0원 방어 로직
                 try:
@@ -223,13 +223,7 @@ class SnapshotStore:
                     st.volume = new_vol
                     st.cumulative_volume = new_vol
 
-                # [DEBUG] 첫 5개 종목의 거래대금 값 로그 (bulk_update 후)
-                if not hasattr(self, "_bulk_amt_log"):
-                    self._bulk_amt_log = set()
-                if code not in self._bulk_amt_log and len(self._bulk_amt_log) < 5:
-                    self._bulk_amt_log.add(code)
-                    logger.warning("[bulk_update 후] %s: st.trade_amount=%d | new_amt=%d | df값=%s",
-                                 code, st.trade_amount, new_amt, new_df.at[code, "trade_amount"] if "trade_amount" in new_df.columns else "N/A")
+                # [CLEANUP 2026-06-01] 진단용 WARNING 제거
 
                 new_prev = int(new_df.at[code, "prev_close"]) if "prev_close" in new_df.columns else 0
                 if new_prev != 0:
