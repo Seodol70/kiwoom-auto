@@ -323,29 +323,13 @@ class TradingController(QObject):
             foreign_net = int(getattr(snap, "foreign_net_buy", 0) or 0)
             inst_net = int(getattr(snap, "inst_net_buy", 0) or 0)
 
-            # Phase 1: 둘 다 0이면 데이터가 아직 안 들어온 것 → 즉시 갱신
-            # [FIX 2026-05-29] TR 이미 진행 중이면 skip — 메인 스레드 블로킹 방지
-            # 11:06:00 파워넷 신호 후 멈춤 원인: 신호마다 opt10059 동기 TR → UI freeze
+            # Phase 1: 수급 데이터가 없으면 10분 주기 워커(tick_investor_refresh)가 채움
+            # [FIX 2026-06-01] 신호 수신 시 즉시 TR 호출 완전 제거
+            # 배경: _tr_busy 체크로도 부족 — balance TIMEOUT 직후 _tr_busy=False이면 호출됨
+            #       포스코DX 09:28:00 신호 후 멈춤이 이 경로 (balance TIMEOUT→False→investor TR)
+            # 수급 데이터 없으면 그냥 통과 (false negative 방지 — 데이터 없을 때 차단 안 함)
             if foreign_net == 0 and inst_net == 0:
-                _tr_busy = getattr(self._kiwoom, "_tr_busy", False)
-                if _tr_busy:
-                    logger.debug("[수급즉시갱신 스킵] %s — TR 사용 중, 기존 데이터로 진행", sig.code)
-                else:
-                    try:
-                        inv_data = self._kiwoom.get_investor_trend(sig.code)
-                        self._snap_store.update_investor(
-                            sig.code, inv_data["foreign_net"], inv_data["inst_net"]
-                        )
-                        snap = self._snap_store.get_snapshot(sig.code)
-                        if snap:
-                            foreign_net = int(getattr(snap, "foreign_net_buy", 0) or 0)
-                            inst_net = int(getattr(snap, "inst_net_buy", 0) or 0)
-                        logger.info(
-                            "[수급즉시갱신] %s(%s) 외인=%+d 기관=%+d",
-                            sig.name, sig.code, foreign_net, inst_net
-                        )
-                    except Exception as e:
-                        logger.warning("[수급갱신실패] %s(%s): %s — 기존 데이터로 진행", sig.name, sig.code, e)
+                logger.debug("[수급즉시갱신 스킵] %s — 10분 주기 워커에 위임", sig.code)
 
             # Phase 2: 외인+기관 둘 다 1,000주 이상 순매도면 차단
             # 안전장치: 둘 다 0이면 데이터 없음 → 통과 (false negative 방지)
