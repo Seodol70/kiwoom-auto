@@ -524,6 +524,14 @@ class TradingController(QObject):
                         result["volumes"] = [snap.volume if hasattr(snap, 'volume') else 0]
                         logger.info("[차트] %s 1분봉 로드 실패 — 실시간 데이터 폴백", code)
 
+            # [FIX 2026-06-01] 마지막 캔들을 실시간 현재가로 덮어쓰기
+            # opt10080은 완성된 분봉만 반환 → 진행 중인 현재 분봉은 틱 기준보다 낮을 수 있음
+            # 스캐너 테이블 현재가(실시간 틱)와 차트 현재가를 일치시킴
+            if result["closes"] and hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
+                snap = self._smart_scanner.store.get_snapshot(code)
+                if snap and snap.current_price > 0:
+                    result["closes"][-1] = snap.current_price
+
             # 종목명 조회
             if not result["closes"]:  # 데이터 없으면 종목명만
                 result["name"] = self._kiwoom.get_stock_name(code)
