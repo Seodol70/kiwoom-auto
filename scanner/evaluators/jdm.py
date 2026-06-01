@@ -337,11 +337,17 @@ def _jdm_check_execution_quality(
     warmup_reason = check_indicator_warmup(snap, 15)
     ctx.is_warmup = bool(warmup_reason)
 
-    # [FIX 2026-05-11] 거래량 필터 완화 — 거래량 미달 시에도 진입 허용 (경고 로그만 기록)
     # ── 거래량 체크
+    # [FIX 2026-06-01] OPENING 슬롯에서 거래량 부족 시 차단
+    # PS일렉트로닉스 2946주 거래량으로 진입 → 유동성 부족 → 매도 미체결 반복
+    # OPENING + 거래량 부족 = 최악의 조합 (장 초반 변동성 + 낮은 유동성)
     r_vol = check_volume_surge(snap, ctx.eff_vol_mult, getattr(cfg, "volume_surge_lookback", 10))
     if r_vol is None:
-        # 거래량 부족하지만 진입 허용 (다른 필터가 충분히 제한)
+        if ctx.slot == "OPENING":
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_VOL",
+                f"OPENING 거래량 미달 차단 — {snap.volumes_1min[-1] if snap.volumes_1min else 0}주 (유동성 부족)")
+            return None
+        # OPENING 외 슬롯: 진입 허용 (다른 필터가 충분히 제한)
         r_vol = f"거래량부족_허용({snap.volumes_1min[-1] if snap.volumes_1min else 0}주)"
         ScannerLogger.near_miss(snap.code, snap.name, "JDM_VOL", r_vol)
 
