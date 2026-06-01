@@ -51,6 +51,7 @@ class PendingOrderMeta:
     eod_trade: bool = False                 # EOD 거래 플래그
     entry_phase: int = 0                    # 진입 페이즈 (1=모닝스캘핑, 2=메인)
     entry_gap_pct: float = 0.0             # [2026-05-26] 진입 시 갭 상승 % (동적 손절선 산출용)
+    signal_price: int = 0                   # [2026-06-01] 신호 발생 시점의 가격 (슬리피지 체크용)
 
 
 # ---------------------------------------------------------------------------
@@ -842,6 +843,7 @@ class OrderManager(QObject):
             eod_trade=bool(_vals.get("eod_trade", False)),
             entry_phase=int(getattr(signal, "entry_phase", 0) or 0),
             entry_gap_pct=_gap_pct,
+            signal_price=int(getattr(signal, "price", 0) or 0),  # [방향 C] 슬리피지 체크용
         )
 
         # ✅ 피라미딩인 경우 수량 조절 (기본 50%)
@@ -1567,6 +1569,29 @@ class OrderManager(QObject):
                 self._pending.discard(code)
             else:
                 self._app_pending_buys[code] = rem
+
+        # [방향 C 2026-06-01] 신호가 대비 체결가 슬리피지 ≥3% 이면 즉시 취소 매도
+        # LG헬로비전: 신호 2,440 → 체결 2,540 (+4.1%) — 이미 4% 올라서 진입
+        # 신호가가 0이면 체크 불가 (시장가 신호 등) → 통과
+        _signal_price = int(getattr(meta, "signal_price", 0) or 0)
+        if _signal_price > 0 and prev_cum == 0:  # 첫 체결에만 체크
+            _slippage_pct = abs(filled_price - _signal_price) / _signal_price * 100
+            _max_slip = float(getattr(cfg, "RISK", {}).get("max_entry_slippage_pct", 3.0)
+                              if hasattr(cfg, "RISK") else 3.0)
+            if _slippage_pct >= _max_slip:
+                logger.warning(
+                    "[슬리피지초과] %s(%s) 신호가=%d → 체결가=%d (%.1f%% ≥ %.1f%%) — 즉시 매도",
+                    name, code, _signal_price, filled_price, _slippage_pct, _max_slip
+                )
+                # 포지션 등록 후 즉시 청산
+                if code not in self.positions:
+                    self.positions[code] = Position(
+                        code=code, name=name,
+                        qty=filled_qty, avg_price=filled_price,
+                        current_price=filled_price,
+                    )
+                self.sell(code, name, filled_qty)
+                return
 
         if code in self.positions:
             pos = self.positions[code]

@@ -52,9 +52,8 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
             f"거래량 미달 (volume={snap.volume:,}, 기준={min_volume:,})")
         return None
 
-    # [NEW 2026-05-19] 최근 상승도 차단 — 뒤늦은 진입 방지
-    # 문제: "이미 오른 종목"에 뒤늦게 진입 → 직후 손절
-    # 해결: 최근 1분/5분 상승도가 크면 진입 거절
+    # [방향 A 2026-06-01] 최근 상승도 차단 — 체결강도 연동 허용 범위 확대
+    # 체결강도 900%+ = 강한 매수세가 실려있으면 뒤늦은 게 아님 → 허용 범위 확대
     if len(snap.closes_1min) >= 6 and snap.closes_1min[-2] > 0:
         recent_1min_chg = (snap.closes_1min[-1] - snap.closes_1min[-2]) / snap.closes_1min[-2] * 100
         recent_5min_chg = (snap.closes_1min[-1] - snap.closes_1min[-6]) / snap.closes_1min[-6] * 100
@@ -62,14 +61,21 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         recent_1min_max = float(getattr(cfg, "recent_candle_max_1min_pct", 2.0))
         recent_5min_max = float(getattr(cfg, "recent_candle_max_5min_pct", 5.0))
 
+        # 체결강도 900% 이상이면 허용 범위 확대 (강한 매수세 = 진짜 에너지)
+        _chejan_for_surge = float(snap.chejan_strength) if hasattr(snap, 'chejan_strength') else 0
+        _surge_chejan_thr = float(getattr(cfg, "surge_chejan_bonus_threshold", 900.0))
+        if _chejan_for_surge >= _surge_chejan_thr:
+            recent_1min_max = float(getattr(cfg, "recent_candle_max_1min_pct_strong", 3.0))
+            recent_5min_max = float(getattr(cfg, "recent_candle_max_5min_pct_strong", 7.0))
+
         if recent_1min_chg >= recent_1min_max:
             ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
-                f"1분 급등 차단 — 지난 1분봉 {recent_1min_chg:+.2f}% (상한 {recent_1min_max:.1f}%)")
+                f"1분 급등 차단 — {recent_1min_chg:+.2f}% (상한 {recent_1min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%)")
             return None
 
         if recent_5min_chg >= recent_5min_max:
             ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
-                f"5분 급등 차단 — 지난 5분봉 {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%)")
+                f"5분 급등 차단 — {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%)")
             return None
 
     # [Phase A 2026-05-19] 갭 리버설 패턴 감지
@@ -336,6 +342,23 @@ def _jdm_check_execution_quality(
     # 워밍업 체크
     warmup_reason = check_indicator_warmup(snap, 15)
     ctx.is_warmup = bool(warmup_reason)
+
+    # [방향 B 2026-06-01] WARMUP 모드 진입 조건 강화
+    # 1분봉 부족 → RSI·캔들 패턴 없이 진입 → 검증 미흡 → 즉시 손실
+    # 체결강도·거래대금 기준을 높여 강한 에너지가 확인된 경우만 허용
+    if ctx.is_warmup:
+        _warmup_chejan_min = float(getattr(cfg, "jdm_warmup_chejan_min", 920.0))  # 일반 900 → 920
+        if snap.chejan_strength < _warmup_chejan_min:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_VOL",
+                f"WARMUP 체결강도 부족 — {snap.chejan_strength:.0f}% < {_warmup_chejan_min:.0f}% (WARMUP 강화 기준)")
+            return None
+        # 거래대금 배수도 상향 (OPENING 1.2배 → 2.0배)
+        from scanner.evaluators.common import check_trade_amount_surge
+        _warmup_ta_mult = float(getattr(cfg, "jdm_warmup_trade_amount_mult", 2.0))
+        if check_trade_amount_surge(snap, accel_mult=_warmup_ta_mult) is None:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_TRADE_AMOUNT",
+                f"WARMUP 거래대금 부족 — 최근 5봉 평균 × {_warmup_ta_mult:.1f}배 미달 (WARMUP 강화 기준)")
+            return None
 
     # ── 거래량 체크
     # [FIX 2026-06-01] OPENING 슬롯에서 거래량 부족 시 차단
