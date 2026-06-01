@@ -639,9 +639,18 @@ class TradingController(QObject):
             should_exit, reason = self._strategy.should_exit(pos, exit_ctx)
             if should_exit:
                 self.log_message.emit(f"🚀 [청산] {pos.name}({pos.code}) {reason}")
-                if any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑"]):
+                # [FIX 2026-06-01] EMA20이탈·추세소멸도 손절 냉각 적용
+                # 대한전선 3회 반복 진입 원인: EMA20이탈/추세소멸로 청산 시
+                # mark_stop_loss 미호출 → 냉각 없이 즉시 재진입 가능
+                _is_loss_exit = (
+                    any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑"])
+                    or ("EMA20이탈" in reason and pos.price_change_pct_vs_avg < 0)
+                    or ("추세소멸" in reason and pos.price_change_pct_vs_avg < 0)
+                    or ("Time Cut" in reason and pos.price_change_pct_vs_avg < 0)
+                )
+                if _is_loss_exit:
                     self._order_mgr.mark_stop_loss(pos.code)
-                    # [NEW 2026-05-19] 손절 종목 재진입 방지 (20분 냉각)
+                    # [NEW 2026-05-19] 손절 종목 재진입 방지 (60분 냉각)
                     self._strategy.mark_loss_exit(pos)
                 self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
                 count += 1
