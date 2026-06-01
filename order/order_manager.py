@@ -1286,7 +1286,9 @@ class OrderManager(QObject):
 
         for code, t in list(self._pending_buy_time.items()):
             elapsed = (now - t).total_seconds()
-            if elapsed < 10:
+            # [FIX 2026-06-01] 10초→30초 — OPENING 슬롯에서 체결 지연이 수십 초 발생
+            # 휴림로봇: 09:18:02 주문→10초 후 취소→09:24:03 뒤늦게 체결→즉시 청산 사례
+            if elapsed < 30:
                 continue
 
             info = self._pending_buy_info.get(code, {})
