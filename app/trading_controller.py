@@ -281,18 +281,28 @@ class TradingController(QObject):
                 self._record_signal(sig)
                 return False
 
-        # [FIX 2026-06-01] KOSDAQ 약세 시 PULLBACK 차단
-        # 근거: 2026-06-01 KOSDAQ -2.30% → EMA20 자체가 하락 중 → 지지선이 저항으로 작동
-        #       PULLBACK 33건 승률 21% / EMA20 이격 0~0.2% 구간 승률 11%
+        # [FIX 2026-06-01] 해당 종목 시장의 지수가 약세이면 PULLBACK 차단
+        # 근거: PULLBACK은 EMA20 지지 전제 — 지수 약세 시 EMA20 자체가 하락 → 지지선이 저항으로 작동
+        # 코스닥 종목 → KOSDAQ 기준 / 코스피 종목 → KOSPI 기준 (시장별로 분리 적용)
         if sig.signal_type == "PULLBACK":
-            _kosdaq_pct = float(getattr(self, "_kosdaq_chg_pct", 0.0))
-            _pullback_kosdaq_limit = float(getattr(self._scan_cfg, "pullback_kosdaq_min_pct", -2.0))
-            if _kosdaq_pct < _pullback_kosdaq_limit:
+            _limit = float(getattr(self._scan_cfg, "pullback_kosdaq_min_pct", -2.0))
+            # 종목 코드 기준 시장 구분: 코스피는 A로 시작하지 않는 6자리, 코스닥은 A 포함
+            _snap_for_mkt = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
+            _market = getattr(_snap_for_mkt, "market_type", "") if _snap_for_mkt else ""
+            # market_type이 없으면 지수 중 더 나쁜 값으로 보수적 판단
+            _idx_pct = (
+                float(getattr(self, "_kosdaq_chg_pct", 0.0)) if _market == "10"   # 코스닥
+                else float(getattr(self, "_kospi_chg_pct", 0.0)) if _market == "0"  # 코스피
+                else min(float(getattr(self, "_kospi_chg_pct", 0.0)),
+                         float(getattr(self, "_kosdaq_chg_pct", 0.0)))              # 불명: 더 나쁜 값
+            )
+            if _idx_pct < _limit:
                 logger.info(
-                    "[진입거절] %s(%s) KOSDAQ 약세 PULLBACK 차단 — KOSDAQ %.2f%% (기준 %.1f%%)",
-                    sig.name, sig.code, _kosdaq_pct, _pullback_kosdaq_limit
+                    "[진입거절] %s(%s) 지수 약세 PULLBACK 차단 — 시장=%s 등락=%.2f%% (기준 %.1f%%)",
+                    sig.name, sig.code, _market or "?", _idx_pct, _limit
                 )
-                self.signal_rejected.emit(f"{sig.code}: KOSDAQ약세({_kosdaq_pct:.1f}%) PULLBACK차단")
+                self.signal_rejected.emit(
+                    f"{sig.code}: 지수약세({_idx_pct:.1f}%) PULLBACK차단")
                 self._record_signal(sig)
                 return False
 
