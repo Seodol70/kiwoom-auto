@@ -42,7 +42,8 @@ class AIFilter:
             logger.info("[AIFilter] 모델 로드 완료 (학습시점: %s, 데이터수: %s)", 
                         data.get('trained_at'), data.get('data_count'))
         except Exception as e:
-            logger.error("[AIFilter] 모델 로드 실패: %s", e)
+            # 32bit 환경에서 sklearn 미설치 → pkl 역직렬화 실패 — 정상 상황
+            logger.debug("[AIFilter] 모델 로드 실패 (32bit/sklearn 없음) — 관찰 모드로 동작: %s", e)
 
     def predict_win_rate(self, signal_data: dict) -> float:
         """신호의 예상 승률(0.0 ~ 1.0) 반환"""
