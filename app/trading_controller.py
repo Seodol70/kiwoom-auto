@@ -281,6 +281,21 @@ class TradingController(QObject):
                 self._record_signal(sig)
                 return False
 
+        # [FIX 2026-06-01] KOSDAQ 약세 시 PULLBACK 차단
+        # 근거: 2026-06-01 KOSDAQ -2.30% → EMA20 자체가 하락 중 → 지지선이 저항으로 작동
+        #       PULLBACK 33건 승률 21% / EMA20 이격 0~0.2% 구간 승률 11%
+        if sig.signal_type == "PULLBACK":
+            _kosdaq_pct = float(getattr(self, "_kosdaq_chg_pct", 0.0))
+            _pullback_kosdaq_limit = float(getattr(self._scan_cfg, "pullback_kosdaq_min_pct", -2.0))
+            if _kosdaq_pct < _pullback_kosdaq_limit:
+                logger.info(
+                    "[진입거절] %s(%s) KOSDAQ 약세 PULLBACK 차단 — KOSDAQ %.2f%% (기준 %.1f%%)",
+                    sig.name, sig.code, _kosdaq_pct, _pullback_kosdaq_limit
+                )
+                self.signal_rejected.emit(f"{sig.code}: KOSDAQ약세({_kosdaq_pct:.1f}%) PULLBACK차단")
+                self._record_signal(sig)
+                return False
+
         # Phase1 태깅 및 한도 체크
         if sig.signal_type == "OPENING_SCALP":
             sig.entry_phase = 1

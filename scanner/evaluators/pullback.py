@@ -45,9 +45,13 @@ def check_pullback_entry(
     if ema20 is None or rsi is None:
         return None
 
-    # 1. EMA20 근처 확인 (0% ~ +2.0% 이내) — 2026-05-13: 0.8→2.0 (상승 추세 폭 확대)
+    # 1. EMA20 근처 확인 (0.2% ~ +2.0% 이내)
+    # [FIX 2026-06-01] 하한 0.0→0.2% — 이격 0~0.2% 구간 승률 11%(9건 중 1건)
+    # EMA20에 너무 바짝 붙은 경우 하락 중 일시적 접촉일 가능성 높음
     dist = (snap.current_price - ema20) / ema20 * 100
-    if not (0.0 <= dist <= 2.0):
+    if not (0.2 <= dist <= 2.0):
+        ScannerLogger.rejected(snap.code, snap.name, "PULLBACK",
+            f"EMA20 이격 범위 벗어남 ({dist:.2f}%, 허용: 0.2%~2.0%)")
         return None
 
     # 2. RSI 상승 모멘텀 확인 (50 ~ 70) — 2026-05-13: 40~58→50~70 (강한 상승만 진입)
