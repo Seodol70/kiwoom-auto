@@ -152,10 +152,14 @@ class RiskManager(QObject):
         if "매도" not in side:
             return
 
+        # 분할 체결 시 포지션이 아직 남아 있으면 카운트하지 않는다.
+        # qty > 0 이면 아직 잔여 수량이 있는 분할 체결이므로 건너뜀.
+        remaining_qty = payload.get("remaining_qty", -1)
+        if remaining_qty > 0:
+            return
+
         # 실현 손익 확인
         realized = payload.get("realized_pnl", 0)
-        # realized 가 없으면 (일부 체결 등) 계산 시도 (payload에 없으면 0으로 간주하거나 pass)
-        # OrderManager.order_filled emit 시 realized_pnl이 포함되도록 수정 필요할 수 있음
 
         # realized 가 음수면 손절로 간주
         if realized < 0:

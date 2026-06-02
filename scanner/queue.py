@@ -132,7 +132,13 @@ class PriorityWatchQueue:
             try:
                 self._kiwoom._ocx.dynamicCall(
                     "SetRealReg(QString, QString, QString, QString)",
-                    [self._screen, code_list, "10;11;12;13;14;16;17;18;20;121;125", "1"],
+                    # [2026-06-02] 호가 상세 FID 추가:
+                    # 41~49=매도1~5호가 가격, 61~69=매도1~5호가 수량
+                    # 51~59=매수1~5호가 가격, 71~79=매수1~5호가 수량
+                    [self._screen, code_list,
+                     "10;11;12;13;14;16;17;18;20;121;125;"
+                     "41;43;45;47;49;61;63;65;67;69;"
+                     "51;53;55;57;59;71;73;75;77;79", "1"],
                 )
                 import time as _time
                 _time.sleep(0.1)  # 청크 사이 100ms 대기
@@ -155,7 +161,10 @@ class PriorityWatchQueue:
         try:
             self._kiwoom._ocx.dynamicCall(
                 "SetRealReg(QString, QString, QString, QString)",
-                [self._screen, code, "10;11;12;13;14;16;17;18;20;121;125", "1"],
+                [self._screen, code,
+                 "10;11;12;13;14;16;17;18;20;121;125;"
+                 "41;43;45;47;49;61;63;65;67;69;"
+                 "51;53;55;57;59;71;73;75;77;79", "1"],
             )
             with self._lock:
                 self._subscribed.add(code)

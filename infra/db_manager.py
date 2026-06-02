@@ -138,23 +138,40 @@ class DatabaseManager:
                         cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
                         logger.info("[DatabaseManager] trades 신규 컬럼 추가: %s", col_name)
 
-                # signals 테이블 마이그레이션
+                # signals 테이블 마이그레이션 — 누락 컬럼 자동 추가
                 cursor.execute("PRAGMA table_info(signals)")
                 existing_cols = [col[1] for col in cursor.fetchall()]
                 new_cols = [
-                    ("f_price_mom", "REAL"),
-                    ("f_intra_pos", "REAL"),
-                    ("f_volatility", "REAL"),
-                    ("f_ma_align", "REAL"),
-                    ("f_rs_score", "REAL"),
-                    ("f_vwap_dist", "REAL"),
-                    ("f_mtf_15m_gap", "REAL"),
-                    ("f_mtf_60m_gap", "REAL"),
-                    ("f_hoga_ratio", "REAL"),
-                    ("f_candle_body", "REAL"),
-                    ("f_candle_upper_tail", "REAL"),
-                    ("f_candle_lower_tail", "REAL"),
-                    ("is_warmup", "INTEGER")
+                    ("f_price_mom",        "REAL"),
+                    ("f_intra_pos",        "REAL"),
+                    ("f_volatility",       "REAL"),
+                    ("f_ma_align",         "REAL"),
+                    ("f_rs_score",         "REAL"),
+                    ("f_vwap_dist",        "REAL"),
+                    ("f_mtf_15m_gap",      "REAL"),
+                    ("f_mtf_60m_gap",      "REAL"),
+                    ("f_hoga_ratio",       "REAL"),
+                    ("f_candle_body",      "REAL"),
+                    ("f_candle_upper_tail","REAL"),
+                    ("f_candle_lower_tail","REAL"),
+                    ("is_warmup",          "INTEGER"),
+                    ("entry_candle_low",   "INTEGER"),
+                    ("change_pct",         "REAL"),
+                    ("is_warmup_signal",   "INTEGER"),
+                    ("signal_price",       "INTEGER"),
+                    ("eod_trade",          "INTEGER DEFAULT 0"),
+                    ("candle_stop",        "INTEGER"),
+                    ("near_daily_high",    "INTEGER DEFAULT 0"),
+                    ("entry_gap_pct",      "REAL"),
+                    ("entry_phase",        "INTEGER"),
+                    ("gap_pct",            "REAL"),
+                    ("bearish_high",       "REAL"),
+                    ("op_current_level",   "INTEGER"),
+                    ("op_max_level",       "INTEGER"),
+                    ("op_volume_surge",    "REAL"),
+                    ("op_mtf_strength",    "INTEGER"),
+                    ("op_atr14",           "REAL"),
+                    ("op_ema20",           "REAL"),
                 ]
                 for col_name, col_type in new_cols:
                     if col_name not in existing_cols:
@@ -205,17 +222,25 @@ class DatabaseManager:
             logger.error("[DatabaseManager] upsert_trades_batch 실패: %s", e)
 
     def insert_signal(self, data: dict):
-        """AI 학습용 신호 데이터 저장"""
+        """AI 학습용 신호 데이터 저장 — 테이블에 없는 컬럼은 자동 무시"""
         from contextlib import closing
         try:
-            # 기본 필드와 AI 피처 분리 처리
-            columns = list(data.keys())
-            placeholders = ", ".join(["?" for _ in columns])
-            
-            query = f"INSERT INTO signals ({', '.join(columns)}) VALUES ({placeholders})"
-            params = [data[col] for col in columns]
-            
             with closing(self._get_connection()) as conn:
+                # 실제 테이블 컬럼 목록 조회 (스키마 불일치 방지)
+                cur = conn.cursor()
+                cur.execute("PRAGMA table_info(signals)")
+                valid_cols = {row[1] for row in cur.fetchall()}
+
+                # 테이블에 있는 컬럼만 필터링
+                filtered = {k: v for k, v in data.items() if k in valid_cols}
+                if not filtered:
+                    return
+
+                columns = list(filtered.keys())
+                placeholders = ", ".join(["?" for _ in columns])
+                query = f"INSERT INTO signals ({', '.join(columns)}) VALUES ({placeholders})"
+                params = [filtered[col] for col in columns]
+
                 conn.execute(query, params)
                 conn.commit()
         except Exception as e:

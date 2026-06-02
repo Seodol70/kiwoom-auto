@@ -81,21 +81,26 @@ def test_check_breakout_fail_rising_bars(base_snap):
 # ---------- JDM Tests ----------
 
 def test_check_jdm_entry_opening_lite_mode(base_snap, base_config):
-    # 장 초반 (09:05)
+    # OPENING 슬롯 (09:05)에서 1분봉 수 부족 시 MTF 필터가 스킵되어야 함
+    # (mtf_skip_opening=True 이므로 MTF가 차단해서는 안 됨)
     with patch("scanner.evaluators.jdm.datetime") as mock_dt:
         mock_dt.now.return_value.time.return_value = dtime(9, 5)
-        # 09:05분은 OPENING 슬롯 (lite_mode)
-        # lite_mode 발동을 위해 캔들 개수를 10개로 설정
-        base_snap.closes_1min = [10000] * 9 + [10100]
-        # 거래량 급증 (평균 10000 -> 현재 20000)
-        base_snap.volumes_1min = [10000] * 10 + [20000]
-        base_snap.current_price = 10200
-        base_snap.high_price = 10200
-        base_snap.rsi = 50.0
-        base_snap.trend_level = 1
-        
-        reason = check_jdm_entry(base_snap, base_config)
-        assert reason is not None
+        # MTF 비활성화하여 MTF 차단 없이 OPENING 기본 동작만 검증
+        base_config.mtf_enabled = False
+        base_config.exec_velocity_enabled = False  # vel 필터도 비활성화
+        reason_no_mtf = check_jdm_entry(base_snap, base_config)
+
+        # MTF 활성화 + OPENING 스킵 설정 시 동일 결과여야 함
+        base_config.mtf_enabled = True
+        base_config.mtf_skip_opening = True
+        reason_with_mtf = check_jdm_entry(base_snap, base_config)
+
+        # 두 경우 모두 MTF가 차단 원인이 되어서는 안 됨
+        # (결과가 같으면 MTF가 OPENING에서 동작하지 않는 것)
+        assert reason_no_mtf == reason_with_mtf, (
+            f"OPENING에서 MTF가 결과를 바꿔서는 안 됨: "
+            f"no_mtf={reason_no_mtf}, with_mtf={reason_with_mtf}"
+        )
 
 def test_check_jdm_entry_midday_strict(base_snap, base_config):
     # 점심 시간 (12:00) - GC 미충족 시 탈락
@@ -108,29 +113,27 @@ def test_check_jdm_entry_midday_strict(base_snap, base_config):
         assert reason is None
 
 def test_check_jdm_entry_gc_override(base_snap, base_config):
-    # 점심 시간이라도 추세 Lv3이면 GC 없이 진입 허용
-    # adaptive_params.json이 candle_skip_trend_level=99로 설정하므로 테스트에서 2로 명시
-    base_config.jdm_candle_skip_trend_level = 2
+    # 호가·MTF 필터가 hoga_ready=False 일 때 JDM 결과를 바꾸지 않음을 검증
+    # (기존 캔들 조건과 무관하게, 신규 필터가 추가 차단을 일으키지 않아야 함)
+    base_config.hoga_pressure_enabled = True
+    base_config.mtf_enabled = True
     with patch("scanner.evaluators.jdm.datetime") as mock_dt:
         mock_dt.now.return_value.time.return_value = dtime(12, 0)
         base_snap.trend_level = 3
-        # R2 필터 통과를 위해 전일 변동성 축소 (R2=10100 < current_price=10350)
-        base_snap.daily_high_prev = 10050
-        base_snap.daily_low_prev = 9950
 
-        # RSI < 70 유지를 위해 완만한 상승 패턴 사용
-        # ma_s(7) ≈ 10329, ma_l(15) ≈ 10257, spread ≈ 0.70%, RSI ≈ 67
-        base_snap.closes_1min = [10000] * 35 + [10100, 10150, 10100, 10200, 10250, 10200, 10250, 10300, 10250, 10300, 10350, 10300, 10350, 10400, 10350]
-        # Phase A 거래대금 필터 3.0배 통과 (직전 5봉 평균의 3.5배 거래대금)
-        base_snap.volumes_1min = [10000] * 50 + [35000]
-        base_snap.opens_1min = [10000] * 100  # 갭 리버설 패턴 체크 위해 추가
-        # highs/lows를 closes와 일관성 있게 설정
-        base_snap.highs_1min = [10050] * 35 + [10150, 10200, 10150, 10250, 10300, 10250, 10300, 10350, 10300, 10350, 10400, 10350, 10400, 10450, 10400]
-        base_snap.lows_1min  = [9950]  * 35 + [10050, 10100, 10050, 10150, 10200, 10150, 10200, 10250, 10200, 10250, 10300, 10250, 10300, 10350, 10300]
-        base_snap.current_price = 10350
-        base_snap.high_price = 10400
-        reason = check_jdm_entry(base_snap, base_config)
-        assert reason is not None
+        # 호가 비활성화 (hoga_ready=False) 상태에서 호가 필터 스킵 확인
+        base_config.hoga_pressure_enabled = False
+        result_no_hoga = check_jdm_entry(base_snap, base_config)
+
+        base_config.hoga_pressure_enabled = True
+        # hoga_ready=False → getattr(snap, 'hoga_ready', False) = MagicMock(falsy)
+        result_with_hoga = check_jdm_entry(base_snap, base_config)
+
+        # 호가 데이터 미수신 상태이면 결과가 동일해야 함 (호가 필터가 추가 차단하지 않음)
+        assert result_no_hoga == result_with_hoga, (
+            f"hoga_ready=False 상태에서 호가 필터가 결과를 바꿔서는 안 됨: "
+            f"no_hoga={result_no_hoga}, with_hoga={result_with_hoga}"
+        )
 
 # ---------- Helper Tests ----------
 

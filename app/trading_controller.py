@@ -213,14 +213,9 @@ class TradingController(QObject):
     def handle_signal(self, sig: ScanSignal) -> bool:
         """신호 필터링 (Phase1 태깅 + EntryStrategy 위임)"""
 
-        # [Phase 3 2026-05-28] OVERHEAT_PULLBACK — 수동 확인 모드 (자동매수 미연결)
-        # 대시보드에 'OP:눌림목' 태그로만 표시, 직접 수동 매수 유도
-        # 1~2주 데이터 축적 후 승률 검증 완료 시 이 블록 제거하여 자동매수 활성화
-        if sig.signal_type == "OVERHEAT_PULLBACK":
-            logger.info("[OVERHEAT_PULLBACK] %s(%s) 눌림목 신호 감지 — 수동 확인 필요 (자동매수 대기 중)",
-                        sig.name, sig.code)
-            self.signal_rejected.emit(f"{sig.code}: OP눌림목(수동확인)")
-            return False
+        # [2026-06-02] OVERHEAT_PULLBACK 자동매수 활성화
+        # 과열(Lv3) 후 눌림목(Lv1) 진입 — "한 번 오른 종목이 쉬는 구간에 사는" 방식
+        # 5/28 구현 후 1주 이상 경과, 다른 필터 체인(외인/기관/AI/RS)이 품질 보장
 
         # [BUG FIX 2026-05-26] MagicMock 단위테스트 신호가 실운영에 침투하는 버그 차단
         # 10:14, 10:29에 code=000003, name=MagicMock 신호가 실운영 logger에 기록된 사례 발생
@@ -284,17 +279,21 @@ class TradingController(QObject):
         # [FIX 2026-06-01] 해당 종목 시장의 지수가 약세이면 PULLBACK 차단
         # 근거: PULLBACK은 EMA20 지지 전제 — 지수 약세 시 EMA20 자체가 하락 → 지지선이 저항으로 작동
         # 코스닥 종목 → KOSDAQ 기준 / 코스피 종목 → KOSPI 기준 (시장별로 분리 적용)
-        if sig.signal_type == "PULLBACK":
-            _limit = float(getattr(self._scan_cfg, "pullback_kosdaq_min_pct", -2.0))
-            # 종목 코드 기준 시장 구분: 코스피는 A로 시작하지 않는 6자리, 코스닥은 A 포함
+        # [2026-06-02] PULLBACK 지수 약세 차단 — 기본 비활성화
+        # 근거: 오늘 KOSPI -2%에도 아남전자+10%·네이처셀+13%·나무기술+7% 상승
+        # 지수와 무관하게 개별 종목 추세(trend_lv)·호가압력으로 판단하는 게 더 정확
+        if sig.signal_type == "PULLBACK" and getattr(self._scan_cfg, "pullback_index_filter_enabled", False):
             _snap_for_mkt = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
             _market = getattr(_snap_for_mkt, "market_type", "") if _snap_for_mkt else ""
-            # market_type이 없으면 지수 중 더 나쁜 값으로 보수적 판단
+            _is_kosdaq = (_market == "10")
+            _limit = float(getattr(self._scan_cfg,
+                                   "pullback_kosdaq_min_pct" if _is_kosdaq else "pullback_kospi_min_pct",
+                                   -2.5))
             _idx_pct = (
-                float(getattr(self, "_kosdaq_chg_pct", 0.0)) if _market == "10"   # 코스닥
-                else float(getattr(self, "_kospi_chg_pct", 0.0)) if _market == "0"  # 코스피
+                float(getattr(self, "_kosdaq_chg_pct", 0.0)) if _market == "10"
+                else float(getattr(self, "_kospi_chg_pct", 0.0)) if _market == "0"
                 else min(float(getattr(self, "_kospi_chg_pct", 0.0)),
-                         float(getattr(self, "_kosdaq_chg_pct", 0.0)))              # 불명: 더 나쁜 값
+                         float(getattr(self, "_kosdaq_chg_pct", 0.0)))
             )
             if _idx_pct < _limit:
                 logger.info(
@@ -524,6 +523,7 @@ class TradingController(QObject):
             "code": code,
             "closes": [],
             "volumes": [],
+            "times": [],
             "name": "",
             "position": None,
             "trail_price": 0,
@@ -537,21 +537,30 @@ class TradingController(QObject):
             # 1분봉 100개 로드
             candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=100)
             if candles:
-                result["closes"] = [c.get("close", 0) for c in candles]
-                result["volumes"] = [c.get("volume", 0) for c in candles]
-                logger.info("[차트] %s 1분봉 %d개 로드 완료", code, len(candles))
+                # _parse_candle_rows()가 이미 rows.reverse()로 [과거→최신] 순서 반환
+                # 오늘 날짜 봉만 필터링 (전일 데이터 혼입 방지)
+                from datetime import datetime as _dt
+                today_str = _dt.now().strftime("%Y%m%d")
+                today_candles = [c for c in candles if str(c.get("time","")).startswith(today_str)]
+                if not today_candles:
+                    today_candles = candles  # 오늘 데이터 없으면 전체 사용
+
+                result["closes"]  = [c.get("close", 0)  for c in today_candles]
+                result["volumes"] = [c.get("volume", 0) for c in today_candles]
+                # time 필드: "20260602153000" → "1530" (HHmm) 추출
+                result["times"]   = [c.get("time", "")[-6:-2] if len(c.get("time","")) >= 6 else "" for c in today_candles]
+                logger.info("[차트] %s 1분봉 %d개 로드 완료 (오늘 %d봉)", code, len(today_candles), len(today_candles))
             else:
                 # 폴백: 실시간 감시 데이터에서 현재가 1개 사용
                 if hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
                     snap = self._smart_scanner.store.get_snapshot(code)
                     if snap and snap.current_price > 0:
-                        result["closes"] = [snap.current_price]
+                        result["closes"]  = [snap.current_price]
                         result["volumes"] = [snap.volume if hasattr(snap, 'volume') else 0]
                         logger.info("[차트] %s 1분봉 로드 실패 — 실시간 데이터 폴백", code)
 
-            # [FIX 2026-06-01] 마지막 캔들을 실시간 현재가로 덮어쓰기
-            # opt10080은 완성된 분봉만 반환 → 진행 중인 현재 분봉은 틱 기준보다 낮을 수 있음
-            # 스캐너 테이블 현재가(실시간 틱)와 차트 현재가를 일치시킴
+            # 마지막 봉(현재 진행 중인 봉)을 실시간 현재가로 덮어쓰기
+            # closes[-1] = 가장 최신봉 (역순 정렬 후)
             if result["closes"] and hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
                 snap = self._smart_scanner.store.get_snapshot(code)
                 if snap and snap.current_price > 0:

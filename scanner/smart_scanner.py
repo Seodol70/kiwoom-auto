@@ -223,10 +223,12 @@ class SmartScanner(QObject):
         from scanner.strategies.pullback import PullbackStrategy
         from scanner.strategies.eod import EODStrategy
         from scanner.strategies.overheat_pullback import OverheatPullbackStrategy
+        from scanner.strategies.gap_pullback import GapPullbackStrategy  # [2026-06-02] C전략
         self.strategy_map = {
             "BREAKOUT": BreakoutStrategy(),
             "JDM_ENTRY": JdmStrategy(),
             "PULLBACK": PullbackStrategy(),
+            "GAP_PULLBACK": GapPullbackStrategy(),   # [2026-06-02] C전략: 갭 눌림목
             "EOD": EODStrategy(),
             "OVERHEAT_PULLBACK": OverheatPullbackStrategy(),
         }
@@ -832,10 +834,35 @@ class SmartScanner(QObject):
             if trend_level != snap.trend_prev_level:
                 ScannerLogger.passed(snap.code, snap.name, "TREND_CHECK", f"추세변화:{_trend_text}(Lv{snap.trend_prev_level}→{trend_level}) 등락:{snap.change_pct}%")
 
+        # [2026-06-02] 60분봉 추세 판정
+        if getattr(self.cfg, "h1_trend_enabled", True) and snap.h1_closes:
+            h1 = IndicatorService.get_h1_trend(
+                h1_closes=snap.h1_closes,
+                h1_highs=snap.h1_highs or None,
+                h1_lows=snap.h1_lows   or None,
+            )
+            snap.h1_trend = h1["trend"]
+            snap.h1_slope = h1["slope"]
+            snap.h1_rsi   = h1["rsi"]
+
+        # [2026-06-02] MTF 추세 판정 (1분봉·5분봉 방향 일치 여부)
+        if getattr(self.cfg, "mtf_enabled", True):
+            mtf = IndicatorService.get_mtf_trend(
+                closes_1min=list(snap.closes_1min or []),
+                volumes_1min=list(snap.volumes_1min or []),
+                highs_1min=list(snap.highs_1min or []),
+                lows_1min=list(snap.lows_1min or []),
+            )
+            snap.mtf_aligned   = mtf["aligned"]
+            snap.mtf_tf1_slope = mtf["tf1_slope"]
+            snap.mtf_tf5_slope = mtf["tf5_slope"]
+            snap.mtf_tf1_trend = mtf["tf1_trend"]
+            snap.mtf_tf5_trend = mtf["tf5_trend"]
+            snap.mtf_tf5_bars  = mtf["tf5_bars"]
 
         # [v3.0] 모듈화된 전략 루프 적용
-        enabled = set(getattr(self.cfg, "enabled_strategies", ("BREAKOUT", "JDM_ENTRY")) or ())
-        order = tuple(getattr(self.cfg, "strategy_order", ("BREAKOUT", "JDM_ENTRY")) or ())
+        enabled = set(getattr(self.cfg, "enabled_strategies", ("JDM_ENTRY", "PULLBACK", "GAP_PULLBACK")) or ())
+        order = tuple(getattr(self.cfg, "strategy_order", ("JDM_ENTRY", "PULLBACK", "GAP_PULLBACK")) or ())
 
         for strategy_name in order:
             if strategy_name not in enabled:
@@ -977,10 +1004,38 @@ class SmartScanner(QObject):
 
         # [NEW] 호가 잔량 처리
         if real_type == "주식호가잔량":
-            total_ask = safe_int(fid(121)) # 매도총잔량
-            total_bid = safe_int(fid(125)) # 매수총잔량
-            if total_ask > 0 or total_bid > 0:
-                self.store.update_hoga(code, total_ask, total_bid)
+            total_ask = safe_int(fid(121))  # 매도총잔량
+            total_bid = safe_int(fid(125))  # 매수총잔량
+            # [2026-06-02] 호가 상세 파싱 (1~5호가 가격·수량)
+            # 매도: 가격 FID 41,43,45,47,49 / 수량 FID 61,63,65,67,69
+            # 매수: 가격 FID 51,53,55,57,59 / 수량 FID 71,73,75,77,79
+            ask_price_fids = [41, 43, 45, 47, 49]
+            ask_qty_fids   = [61, 63, 65, 67, 69]
+            bid_price_fids = [51, 53, 55, 57, 59]
+            bid_qty_fids   = [71, 73, 75, 77, 79]
+            ask_prices = [abs(safe_int(fid(f))) for f in ask_price_fids]
+            ask_qtys   = [abs(safe_int(fid(f))) for f in ask_qty_fids]
+            bid_prices = [abs(safe_int(fid(f))) for f in bid_price_fids]
+            bid_qtys   = [abs(safe_int(fid(f))) for f in bid_qty_fids]
+            self.store.update_hoga(
+                code, total_ask, total_bid,
+                ask_prices=ask_prices, ask_qtys=ask_qtys,
+                bid_prices=bid_prices, bid_qtys=bid_qtys,
+            )
+            # 종목별 최초 수신 시 1회 로그 (호가 데이터 수신 확인용)
+            _hoga_logged = getattr(self, "_hoga_first_logged", None)
+            if _hoga_logged is None:
+                self._hoga_first_logged = set()
+                _hoga_logged = self._hoga_first_logged
+            if code not in _hoga_logged and any(bid_qtys):
+                _hoga_logged.add(code)
+                logger.info(
+                    "[호가수신] %s 매도1~3호가: %s주 / 매수1~3호가: %s주 / 압력비=%.2f",
+                    code,
+                    "/".join(str(q) for q in ask_qtys[:3]),
+                    "/".join(str(q) for q in bid_qtys[:3]),
+                    (sum(bid_qtys[1:3]) / max(sum(ask_qtys[1:3]), 1)),
+                )
             return
 
         # 주식체결 처리
@@ -1919,6 +1974,17 @@ class SmartScanner(QObject):
                 logger.debug("[STEP-H async] %s TR 응답 없음 — 스킵", code)
         except Exception as e:
             logger.warning("[STEP-H async] %s 1분봉 로딩 실패: %s", code, e)
+
+        # [2026-06-02] 60분봉 로드 — 1분봉 직후 연속 호출 (350ms 후 자연스럽게 분리)
+        if getattr(self.cfg, "h1_trend_enabled", True):
+            try:
+                h1_candles = self._kiwoom.get_min_candles(code, 60, 20)  # 최근 20개 60분봉
+                h1_ohlc = [c for c in reversed(h1_candles) if c.get("close")]
+                if h1_ohlc:
+                    self.store.set_h1_candles(code, h1_ohlc)
+                    logger.debug("[STEP-H async] %s 60분봉 %d개 로딩 완료", code, len(h1_ohlc))
+            except Exception as e:
+                logger.debug("[STEP-H async] %s 60분봉 로딩 실패: %s", code, e)
 
 
         # 다음 종목을 비동기 처리

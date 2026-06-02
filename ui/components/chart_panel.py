@@ -208,10 +208,27 @@ class ChartPanel(QWidget):
         trail_price: int = 0,
         sl_pct: float = -1.5,
         signal_reason: str = None,
+        times: list = None,
     ) -> None:
         """1분봉 데이터 + 포지션 정보로 차트와 정보 패널을 갱신한다."""
         self._lbl_code.setText(f"  {'📈' if position else '👁️'} {name}  ({code})")
 
+        # ── x축 시각 레이블 설정 ──────────────────────────────────────
+        if times:
+            # "HHmm" → "HH:MM" 변환, 10분 단위로만 표시
+            tick_dict = {}
+            for i, t in enumerate(times):
+                if len(t) == 4:
+                    label = f"{t[:2]}:{t[2:]}"
+                    mm = int(t[2:]) if t[2:].isdigit() else -1
+                    if mm % 10 == 0:  # 10분 단위만 표시
+                        tick_dict[i] = label
+            if tick_dict:
+                ax_bottom_price = self._price_plot.getAxis("bottom")
+                ax_bottom_price.setTicks([list(tick_dict.items())])
+                ax_bottom_vol = self._volume_plot.getAxis("bottom")
+                ax_bottom_vol.setTicks([list(tick_dict.items())])
+                self._volume_plot.setLabel("bottom", "")
 
         # ── 차트 갱신 ────────────────────────────────────────────────
         if len(closes) >= 2:

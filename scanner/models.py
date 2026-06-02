@@ -29,10 +29,17 @@ class InternalStockState:
     change_pct: float = 0.0
     market_type: str = "10" # "0": KOSPI, "10": KOSDAQ
     
-    # 호가 잔량
+    # 호가 잔량 (집계)
     total_ask_qty: int = 0
     total_bid_qty: int = 0
-    
+
+    # [2026-06-02] 호가 상세 (1~5호가 가격·수량) — FID 41~49, 51~59
+    ask_prices: List[int] = field(default_factory=lambda: [0]*5)  # 매도1~5 가격
+    ask_qtys:   List[int] = field(default_factory=lambda: [0]*5)  # 매도1~5 수량
+    bid_prices: List[int] = field(default_factory=lambda: [0]*5)  # 매수1~5 가격
+    bid_qtys:   List[int] = field(default_factory=lambda: [0]*5)  # 매수1~5 수량
+    hoga_updated_at: Optional[datetime] = None
+
     # 분봉 (1분봉 OHLCV)
     mins: List[float] = field(default_factory=list)
     min_opens: List[float] = field(default_factory=list)
@@ -60,6 +67,12 @@ class InternalStockState:
     # 일봉 데이터
     daily_data: List[Dict] = field(default_factory=list)
     daily_updated_at: Optional[datetime] = None
+
+    # [2026-06-02] 60분봉 데이터
+    h1_closes: List[float] = field(default_factory=list)  # 60분봉 종가 (최신순 역전, 오래된→최신)
+    h1_highs:  List[float] = field(default_factory=list)
+    h1_lows:   List[float] = field(default_factory=list)
+    h1_updated_at: Optional[datetime] = None
 
     # [NEW] 성능 최적화용 지표 캐시 및 갱신 제어
     rsi_cached: float = 0.0
@@ -93,9 +106,32 @@ class StockSnapshot:
     change_pct: float
     market_type: str = "10"
     
-    # 호가 잔량
+    # 호가 잔량 (집계)
     total_ask_qty: int = 0
     total_bid_qty: int = 0
+
+    # [2026-06-02] 호가 상세 (1~5호가 가격·수량) — FID 41~49, 51~59
+    ask_prices: list[int] = field(default_factory=lambda: [0]*5)  # 매도1~5 가격
+    ask_qtys:   list[int] = field(default_factory=lambda: [0]*5)  # 매도1~5 수량
+    bid_prices: list[int] = field(default_factory=lambda: [0]*5)  # 매수1~5 가격
+    bid_qtys:   list[int] = field(default_factory=lambda: [0]*5)  # 매수1~5 수량
+    hoga_updated_at: Optional[datetime] = None
+
+    @property
+    def hoga_pressure(self) -> float:
+        """매수호가 압력비 = 매수2~3호가 합계 / 매도2~3호가 합계.
+        1.0 초과 → 매수 우위, 미만 → 매도 우위. 데이터 없으면 1.0 반환.
+        """
+        bid_vol = sum(self.bid_qtys[1:3])  # 매수2+3호가
+        ask_vol = sum(self.ask_qtys[1:3])  # 매도2+3호가
+        if ask_vol <= 0:
+            return 2.0 if bid_vol > 0 else 1.0
+        return bid_vol / ask_vol
+
+    @property
+    def hoga_ready(self) -> bool:
+        """호가 상세 데이터가 수신된 상태인지"""
+        return self.hoga_updated_at is not None and any(self.bid_qtys)
 
     # 지표 (계산 결과)
     rsi: Optional[float] = None
@@ -146,6 +182,22 @@ class StockSnapshot:
     rs_score: float = 0.0           # 지수 대비 강도 (Stock% - Index%)
     exec_velocity_ratio: float = 0.0 # [NEW] 체결 가속도 (10초 체결량 / 1분 평균 10초량)
     sl_triggered_at: Optional[datetime] = None # [NEW] 손절가 하회 시작 시각
+
+    # [2026-06-02] 60분봉 데이터
+    h1_closes: list[float] = field(default_factory=list)
+    h1_highs:  list[float] = field(default_factory=list)
+    h1_lows:   list[float] = field(default_factory=list)
+    h1_trend:  int  = 0     # 60분봉 trend_lv (0~3)
+    h1_slope:  float = 0.0  # 60분봉 EMA10 기울기 (양수=상승)
+    h1_rsi:    Optional[float] = None  # 60분봉 RSI
+
+    # [2026-06-02] 멀티타임프레임 추세
+    mtf_aligned: bool = False       # 1분봉·5분봉 추세 방향 일치 여부
+    mtf_tf1_slope: float = 0.0     # 1분봉 EMA10 기울기
+    mtf_tf5_slope: float = 0.0     # 5분봉 EMA10 기울기
+    mtf_tf1_trend: int = 0         # 1분봉 trend_lv
+    mtf_tf5_trend: int = 0         # 5분봉 trend_lv
+    mtf_tf5_bars: int = 0          # 사용 가능한 5분봉 수
 
     @property
     def foreign_net(self) -> int: return self.foreign_net_buy

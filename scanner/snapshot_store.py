@@ -188,8 +188,24 @@ class SnapshotStore:
                 self._states.pop(c, None)
 
             for code in new_df.index:
+                is_new_code = code not in self._states
                 st = self._get_state(code)
                 name_from_df = str(new_df.at[code, "name"])
+
+                # [2026-06-02] 신규 종목 진입 시 1분봉·일봉 데이터 초기화
+                # 이전 감시 목록에 없던 종목이 새로 들어올 때 오염된 분봉 데이터가
+                # 남아 있으면 EMA/RSI 계산이 엉뚱한 값을 반환한다 (나무기술 EMA20=14,284 버그)
+                if is_new_code:
+                    st.mins      = []
+                    st.min_opens = []
+                    st.min_highs = []
+                    st.min_lows  = []
+                    st.min_vols  = []
+                    st.daily_data        = []
+                    st.daily_updated_at  = None
+                    st.chejan_history.clear()
+                    st.tick_ts_vol.clear()
+
                 st.name = name_from_df
                 # [DEBUG] 처음 5개만 로그
                 if not hasattr(self, "_bulk_name_log"):
@@ -473,6 +489,11 @@ class SnapshotStore:
             change_pct    = st.change_pct if st.change_pct != 0 else safe_float_cell("change_pct",  0.0),
             total_ask_qty = st.total_ask_qty if st.total_ask_qty > 0 else safe_int_cell("total_ask_qty", 0),
             total_bid_qty = st.total_bid_qty if st.total_bid_qty > 0 else safe_int_cell("total_bid_qty", 0),
+            ask_prices    = list(getattr(st, "ask_prices", [0]*5)),
+            ask_qtys      = list(getattr(st, "ask_qtys",   [0]*5)),
+            bid_prices    = list(getattr(st, "bid_prices", [0]*5)),
+            bid_qtys      = list(getattr(st, "bid_qtys",   [0]*5)),
+            hoga_updated_at = getattr(st, "hoga_updated_at", None),
             closes_1min   = closes_list,
             opens_1min    = list(st.min_opens),
             highs_1min    = highs_list,
@@ -495,7 +516,24 @@ class SnapshotStore:
             rsi              = _rsi_val,
             exec_velocity_ratio = _vel_ratio,
             updated_at       = updated_at,
+            h1_closes        = list(getattr(st, "h1_closes", [])),
+            h1_highs         = list(getattr(st, "h1_highs",  [])),
+            h1_lows          = list(getattr(st, "h1_lows",   [])),
         )
+
+    def set_h1_candles(self, code: str, ohlc: list[dict]) -> None:
+        """60분봉 OHLCV 저장 (오래된→최신 순서 가정).
+        ohlc: [{"open":int,"high":int,"low":int,"close":int}, ...]
+        """
+        if not ohlc:
+            return
+        with self._lock:
+            st = self._get_state(code)
+            st.h1_closes = [float(c.get("close", 0)) for c in ohlc]
+            st.h1_highs  = [float(c.get("high",  0)) for c in ohlc]
+            st.h1_lows   = [float(c.get("low",   0)) for c in ohlc]
+            from datetime import datetime as _dt
+            st.h1_updated_at = _dt.now()
 
     def update_trend_level(self, code: str, trend_level: int) -> None:
         """요셉 시그널 추세 레벨 갱신(0~3). 직전 단계도 함께 보관."""
@@ -509,12 +547,33 @@ class SnapshotStore:
             with self._lock:
                 self._get_state(code).chejan_str = strength
 
-    def update_hoga(self, code: str, total_ask: int, total_bid: int) -> None:
-        """[NEW] 호가 잔량 갱신."""
+    def update_hoga(
+        self,
+        code: str,
+        total_ask: int,
+        total_bid: int,
+        ask_prices: list[int] | None = None,
+        ask_qtys:   list[int] | None = None,
+        bid_prices: list[int] | None = None,
+        bid_qtys:   list[int] | None = None,
+    ) -> None:
+        """호가 잔량 갱신 — 집계(총잔량) + 상세(1~5호가 가격·수량)."""
         with self._lock:
             st = self._get_state(code)
             st.total_ask_qty = total_ask
             st.total_bid_qty = total_bid
+            # [2026-06-02] 호가 상세 저장
+            if ask_prices is not None:
+                st.ask_prices = list(ask_prices)
+            if ask_qtys is not None:
+                st.ask_qtys = list(ask_qtys)
+            if bid_prices is not None:
+                st.bid_prices = list(bid_prices)
+            if bid_qtys is not None:
+                st.bid_qtys = list(bid_qtys)
+            if any(v is not None for v in [ask_prices, ask_qtys, bid_prices, bid_qtys]):
+                from datetime import datetime as _dt
+                st.hoga_updated_at = _dt.now()
             if code in self._df.index:
                 self._df.at[code, "total_ask_qty"] = total_ask
                 self._df.at[code, "total_bid_qty"] = total_bid

@@ -281,7 +281,8 @@ class MainWindowSlots:
             name=data["name"],
             position=data["position"],
             trail_price=data["trail_price"],
-            sl_pct=data["sl_pct"]
+            sl_pct=data["sl_pct"],
+            times=data.get("times", []),
         )
         logger.info("[차트] 종목 선택됨: %s(%s) - %d캔들 로드", data["name"], code, len(data["closes"]))
 

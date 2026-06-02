@@ -220,6 +220,145 @@ class IndicatorService:
         return result
 
     @staticmethod
+    def get_h1_trend(
+        h1_closes: list[float],
+        h1_highs:  list[float] | None = None,
+        h1_lows:   list[float] | None = None,
+    ) -> dict:
+        """60분봉 추세 판정.
+
+        반환 dict:
+          trend   (int)   — trend_lv 0~3 (get_trend_status 기준)
+          slope   (float) — EMA10 기울기 (양수=상승, 음수=하락)
+          rsi     (float|None) — RSI14
+          above_ema20 (bool) — 현재가(마지막 종가)가 EMA20 위인가
+          direction (str) — "UP" | "DOWN" | "FLAT"
+        """
+        result = {
+            "trend": 0, "slope": 0.0, "rsi": None,
+            "above_ema20": False, "direction": "FLAT",
+        }
+        if len(h1_closes) < 5:
+            return result
+
+        h = h1_highs or h1_closes
+        l = h1_lows  or h1_closes
+
+        # trend_lv
+        result["trend"] = IndicatorService.get_trend_status(h1_closes, h, l, [])
+
+        # EMA10 기울기
+        if len(h1_closes) >= 10:
+            ema_now  = IndicatorService.calc_ema(h1_closes, 10)
+            ema_prev = IndicatorService.calc_ema(h1_closes[:-1], 10)
+            if ema_now and ema_prev:
+                result["slope"] = ema_now - ema_prev
+
+        # EMA20 위/아래
+        if len(h1_closes) >= 20:
+            ema20 = IndicatorService.calc_ema(h1_closes, 20)
+            if ema20:
+                result["above_ema20"] = h1_closes[-1] > ema20
+
+        # RSI
+        if len(h1_closes) >= 15:
+            result["rsi"] = IndicatorService.calc_rsi(h1_closes, 14)
+
+        # 방향
+        if result["slope"] > 0 and result["above_ema20"]:
+            result["direction"] = "UP"
+        elif result["slope"] < 0 or not result["above_ema20"]:
+            result["direction"] = "DOWN"
+        else:
+            result["direction"] = "FLAT"
+
+        return result
+
+    @staticmethod
+    def build_5min_closes(closes_1min: list[float], volumes_1min: list[int] | None = None) -> tuple[list[float], list[int]]:
+        """1분봉 closes/volumes를 5분봉으로 집계한다.
+        반환: (5분봉 종가 리스트, 5분봉 거래량 리스트) — 최신 봉이 마지막.
+        현재 미완성 봉(나머지 < 5개)은 포함하지 않는다.
+        """
+        n = len(closes_1min)
+        full_bars = n // 5
+        if full_bars == 0:
+            return [], []
+        c5, v5 = [], []
+        vols = volumes_1min if volumes_1min and len(volumes_1min) == n else [0] * n
+        for i in range(full_bars):
+            start = i * 5
+            end = start + 5
+            c5.append(closes_1min[end - 1])        # 봉 종가 = 5번째 1분봉 종가
+            v5.append(sum(vols[start:end]))
+        return c5, v5
+
+    @staticmethod
+    def get_mtf_trend(
+        closes_1min: list[float],
+        volumes_1min: list[int] | None = None,
+        highs_1min: list[float] | None = None,
+        lows_1min: list[float] | None = None,
+    ) -> dict:
+        """멀티타임프레임 추세 판정.
+
+        반환 dict:
+          aligned     (bool)  — 1분/5분 추세 방향이 일치하는가
+          tf1_slope   (float) — 1분봉 EMA10 기울기 (현재 - 1봉 전, 양수=상승)
+          tf5_slope   (float) — 5분봉 EMA10 기울기
+          tf1_trend   (int)   — 1분봉 trend_lv (0~3)
+          tf5_trend   (int)   — 5분봉 trend_lv (0~3)
+          tf5_bars    (int)   — 사용 가능한 5분봉 수
+        """
+        result = {
+            "aligned": False,
+            "tf1_slope": 0.0,
+            "tf5_slope": 0.0,
+            "tf1_trend": 0,
+            "tf5_trend": 0,
+            "tf5_bars": 0,
+        }
+        if len(closes_1min) < 10:
+            return result
+
+        # ── 1분봉 지표
+        ema1_now  = IndicatorService.calc_ema(closes_1min, 10)
+        ema1_prev = IndicatorService.calc_ema(closes_1min[:-1], 10)
+        if ema1_now and ema1_prev:
+            result["tf1_slope"] = ema1_now - ema1_prev
+
+        # 1분봉 trend_lv
+        h1 = highs_1min or closes_1min
+        l1 = lows_1min  or closes_1min
+        result["tf1_trend"] = IndicatorService.get_trend_status(closes_1min, h1, l1, volumes_1min or [])
+
+        # ── 5분봉 집계
+        c5, v5 = IndicatorService.build_5min_closes(closes_1min, volumes_1min)
+        result["tf5_bars"] = len(c5)
+        if len(c5) < 3:
+            # 5분봉 부족 — 1분봉만으로 판단 (aligned=True 로 차단하지 않음)
+            result["aligned"] = result["tf1_slope"] > 0
+            return result
+
+        ema5_now  = IndicatorService.calc_ema(c5, min(10, len(c5)))
+        ema5_prev = IndicatorService.calc_ema(c5[:-1], min(10, len(c5) - 1)) if len(c5) > 1 else None
+        if ema5_now and ema5_prev:
+            result["tf5_slope"] = ema5_now - ema5_prev
+
+        # 5분봉 trend_lv (highs/lows 없으면 closes로 근사)
+        h5 = [max(closes_1min[i*5:(i+1)*5]) for i in range(len(c5))] if highs_1min and len(highs_1min) == len(closes_1min) else c5
+        l5 = [min(closes_1min[i*5:(i+1)*5]) for i in range(len(c5))] if lows_1min  and len(lows_1min)  == len(closes_1min) else c5
+        result["tf5_trend"] = IndicatorService.get_trend_status(c5, h5, l5, v5)
+
+        # ── 방향 일치 판정
+        # 조건: 1분봉 EMA 상승 AND 5분봉 EMA 상승 (둘 다 기울기 양수)
+        tf1_up = result["tf1_slope"] > 0
+        tf5_up = result["tf5_slope"] > 0
+        result["aligned"] = tf1_up and tf5_up
+
+        return result
+
+    @staticmethod
     def get_technical_summary(snap: 'StockSnapshot', cfg: 'SmartScannerConfig') -> dict[str, Any]:
         """종목의 모든 기술적 상태를 통합 반환"""
         closes = snap.closes_1min

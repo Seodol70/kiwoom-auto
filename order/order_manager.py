@@ -510,21 +510,39 @@ class OrderManager(QObject):
         balance가 비어 있으면 self.cash 반환 (기존값 유지).
         """
         try:
-            server_cash = balance.get("cash", 0)
+            # [FIX 2026-06-02] balance 체크를 server_cash 할당 전에 먼저 수행
+            # TIMEOUT으로 balance={} 반환 시 server_cash=0으로 덮어쓰기 방지
             if not balance:
+                return self.cash
+            server_cash = balance.get("cash", 0)
+            if server_cash <= 0:
+                # 잔고 조회 실패 또는 0원 — 기존값 유지
+                logger.warning("_sync_with_balance: server_cash=%d — 기존 예수금 유지", server_cash)
                 return self.cash
 
             holdings = self._kiwoom.get_holdings()
             if not holdings and self.positions:
                 invested = sum(p.avg_price * p.qty for p in self.positions.values())
-                self.cash = max(0, server_cash - invested)
+                new_cash = max(0, server_cash - invested)
+                # [FIX 2026-06-02] invested > server_cash이면 계산 신뢰 불가 → 기존값 유지
+                if new_cash == 0 and self.cash > 0:
+                    logger.warning("_sync_with_balance: 예수금 0 계산됨 (server=%d, invested=%d) — 기존값 유지",
+                                   server_cash, invested)
+                    return self.cash
+                self.cash = new_cash
                 return self.cash
 
             # sync_balance()와 동일 — opw00018 응답 기반 포지션 재구성
             self.positions = self._rebuild_positions_from_holdings(holdings)
             if self._kiwoom.is_mock:
                 invested = sum(p.avg_price * p.qty for p in self.positions.values())
-                self.cash = max(0, server_cash - invested)
+                new_cash = max(0, server_cash - invested)
+                # [FIX 2026-06-02] 0원 오계산 방지 — 기존값이 있으면 유지
+                if new_cash == 0 and self.cash > 0:
+                    logger.warning("_sync_with_balance: 예수금 0 계산됨 (server=%d, invested=%d) — 기존값 유지",
+                                   server_cash, invested)
+                else:
+                    self.cash = new_cash
             else:
                 self.cash = server_cash
             logger.info("잔고 동기화(2단계) 완료 — 예수금 %s원 / 보유 %d종목",
@@ -1570,14 +1588,13 @@ class OrderManager(QObject):
             else:
                 self._app_pending_buys[code] = rem
 
-        # [방향 C 2026-06-01] 신호가 대비 체결가 슬리피지 ≥3% 이면 즉시 취소 매도
-        # LG헬로비전: 신호 2,440 → 체결 2,540 (+4.1%) — 이미 4% 올라서 진입
+        # [2026-06-01] 신호가 대비 체결가 슬리피지 초과 시 즉시 취소 매도
+        # [2026-06-02] 기본값 3.0% → 1.5% 강화: LG디스플레이 신호17,080→체결17,380(+1.75%) 손실 패턴
         # 신호가가 0이면 체크 불가 (시장가 신호 등) → 통과
         _signal_price = int(getattr(meta, "signal_price", 0) or 0)
         if _signal_price > 0 and prev_cum == 0:  # 첫 체결에만 체크
             _slippage_pct = abs(filled_price - _signal_price) / _signal_price * 100
-            _max_slip = float(getattr(cfg, "RISK", {}).get("max_entry_slippage_pct", 3.0)
-                              if hasattr(cfg, "RISK") else 3.0)
+            _max_slip = float(getattr(cfg, "max_entry_slippage_pct", 1.5))
             if _slippage_pct >= _max_slip:
                 logger.warning(
                     "[슬리피지초과] %s(%s) 신호가=%d → 체결가=%d (%.1f%% ≥ %.1f%%) — 즉시 매도",
@@ -1664,11 +1681,12 @@ class OrderManager(QObject):
             "qty": filled_qty, "price": filled_price, "amount": sell_amount, "realized": realized
         })
         
+        is_partial_fill = code in self._partial_pending_codes
         self._partial_pending_codes.discard(code)
         self._append_fill_to_file(
             realized=realized, code=code, name=name,
             sell_price=filled_price, avg_price=pos.avg_price, qty=filled_qty,
-            is_partial=code in self._partial_pending_codes,
+            is_partial=is_partial_fill,
         )
         if self._audit:
             self._audit.log_sell_fill(code, filled_qty, filled_price, avg_buy_price=pos.avg_price, realized_pnl=realized)
@@ -1677,7 +1695,8 @@ class OrderManager(QObject):
         sell_from_today = min(filled_qty, pos.qty_buy_today_app)
         pos.qty_buy_today_app -= sell_from_today
         pos.qty -= filled_qty
-        
+        remaining_qty = pos.qty
+
         if pos.qty <= 0:
             _pnl_pct = (filled_price - avg_buy_for_log) / avg_buy_for_log * 100 if avg_buy_for_log else 0
             position_log.info("[포지션청산] %s(%s) 매도가=%d 손익=%+.2f%%", name, code, filled_price, _pnl_pct)
@@ -1691,17 +1710,18 @@ class OrderManager(QObject):
                 self.handle_signal(queued)
 
         self.cash += filled_qty * filled_price
-        self._finalize_fill(code, name, filled_qty, filled_price, OrderType.SELL, realized, avg_buy_for_log)
+        self._finalize_fill(code, name, filled_qty, filled_price, OrderType.SELL, realized, avg_buy_for_log, remaining_qty=remaining_qty)
 
-    def _finalize_fill(self, code, name, filled_qty, filled_price, order_type, realized=0, avg_buy=None):
+    def _finalize_fill(self, code, name, filled_qty, filled_price, order_type, realized=0, avg_buy=None, remaining_qty: int = 0):
         """체결 공통 마무리 (상태 정리, 신호 발행)"""
         self._pending.discard(code)
         self._pending_sell_time.pop(code, None)
-        
+
         payload = {
             "time": datetime.now().strftime("%H:%M:%S"),
             "side": "매수체결" if order_type == OrderType.BUY else "매도체결",
-            "code": code, "name": name, "filled_qty": filled_qty, "filled_price": filled_price, "realized_pnl": realized
+            "code": code, "name": name, "filled_qty": filled_qty, "filled_price": filled_price,
+            "realized_pnl": realized, "remaining_qty": remaining_qty,
         }
         if avg_buy: payload["avg_buy_price"] = avg_buy
         if self.state: self.state.update_portfolio(self.cash, dict(self.positions))
