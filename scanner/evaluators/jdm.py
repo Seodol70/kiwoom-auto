@@ -458,13 +458,31 @@ def _jdm_check_execution_quality(
             return None
 
     # ── 캔들 패턴
+    # [2026-06-01] 선행 패턴 4종 추가 — 오르기 전에 발견
+    from scanner.evaluators.common import (
+        check_flag_pattern, check_cup_and_handle,
+        check_three_soldiers, check_volume_dry_up,
+    )
+    # 선행 패턴: 기존 패턴보다 우선 체크 (추세 시작 전 단계 포착)
+    r_flag     = check_flag_pattern(snap)
+    r_cup      = check_cup_and_handle(snap)
+    r_soldiers = check_three_soldiers(snap)
+    r_dry_up   = check_volume_dry_up(snap)
+    r_precursor = r_flag or r_cup or r_soldiers or r_dry_up  # 4종 중 하나라도 있으면
+
     if not ctx.lite_mode:
         if ctx.trend_lv >= ctx.candle_skip_lv:
             candle_reason = f"TREND_SKIP(lv{ctx.trend_lv})"
+            if r_precursor:
+                candle_reason = f"{r_precursor}+TREND(lv{ctx.trend_lv})"
         else:
             r_engulf = check_bullish_engulfing(snap)
             r_pinbar = check_bullish_pin_bar(snap)
-            if ctx.is_warmup and r_engulf is None and r_pinbar is None:
+
+            # 선행 패턴이 있으면 기존 캔들 패턴 없어도 진입 허용
+            if r_precursor:
+                candle_reason = r_precursor
+            elif ctx.is_warmup and r_engulf is None and r_pinbar is None:
                 if snap.current_price > snap.open_price and snap.current_price >= snap.high_prev:
                     candle_reason = "AGGRESSIVE_BREAKOUT"
                 else:
@@ -472,12 +490,12 @@ def _jdm_check_execution_quality(
                     return None
             elif r_engulf is None and r_pinbar is None:
                 ScannerLogger.rejected(snap.code, snap.name, "JDM_CANDLE",
-                    f"캔들 패턴 미충족 (상승장악형·강세핀바 불성립, trend_lv={ctx.trend_lv} < {ctx.candle_skip_lv})")
+                    f"캔들 패턴 미충족 (상승장악형·강세핀바·선행4종 불성립, trend_lv={ctx.trend_lv})")
                 return None
             else:
                 candle_reason = r_engulf or r_pinbar
     else:
-        candle_reason = "LITE(캔들패턴스킵)"
+        candle_reason = r_precursor or "LITE(캔들패턴스킵)"
 
     # ── 체결강도 최종 재확인
     if snap.chejan_strength < ctx.eff_chejan:
