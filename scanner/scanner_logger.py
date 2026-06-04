@@ -63,6 +63,10 @@ class ScannerLogger:
     _stop_event = threading.Event()
     _bg_thread: threading.Thread | None = None
 
+    # [FIX 2026-06-04] passed() UI 중복 로그 방지 — 동일 (code, step) 60초 쿨다운
+    _passed_cooldown: dict[tuple, float] = {}
+    _passed_cooldown_sec: float = 60.0
+
     @classmethod
     def _ensure_bg_thread(cls) -> None:
         """백그라운드 flush 스레드가 없으면 시작."""
@@ -146,6 +150,17 @@ class ScannerLogger:
     def passed(code: str, name: str, filter_name: str, detail: str = "", values: dict = None) -> None:
         """선정된 신호 기록."""
         reason = detail if detail else filter_name
+        # [FIX 2026-06-04] 동일 (code, step) 60초 내 반복 호출 시 UI 로그만 스킵
+        # 평가 루프가 1초마다 돌며 passed()를 계속 호출해 UI가 도배되는 문제 방지.
+        # 파일(CSV) 기록은 그대로 유지.
+        _key = (code, filter_name)
+        _now = time.monotonic()
+        _last = ScannerLogger._passed_cooldown.get(_key, 0.0)
+        if _now - _last < ScannerLogger._passed_cooldown_sec:
+            # UI 로그 스킵, 파일만 기록
+            ScannerLogger._buffer_csv("scanner_passed.csv", code, name, f"[{filter_name}] {reason}", values or {})
+            return
+        ScannerLogger._passed_cooldown[_key] = _now
         # Handler 형식: "PASS/FAIL\tcode\tname\tstep\treason"
         scan_log.info("PASS\t%s\t%s\t%s\t%s", code, name, filter_name, reason)
         ScannerLogger._buffer_csv("scanner_passed.csv", code, name, f"[{filter_name}] {reason}", values or {})
