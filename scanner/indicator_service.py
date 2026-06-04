@@ -176,6 +176,53 @@ class IndicatorService:
         return 0.0
 
     @staticmethod
+    def calc_chejan_acceleration(chejan_history: list) -> float:
+        """
+        체결강도 가속도 점수 (0.0~1.0).
+
+        탐지: 반등 후 계속 강해지는가 (반등 후 추세 확인).
+        최근 3틱이 이전 3틱보다 계속 강해야 함 = 진정한 매수세.
+        """
+        if len(chejan_history) < 7:
+            return 0.0
+        recent_3 = chejan_history[-3:]
+        prior_3  = chejan_history[-6:-3]
+
+        recent_avg = sum(recent_3) / 3
+        prior_avg  = sum(prior_3) / 3
+
+        if prior_avg <= 0:
+            return 0.0
+
+        # 최근이 이전보다 강해졌는가?
+        accel_ratio = recent_avg / prior_avg
+        if accel_ratio > 1.05:  # 5% 이상 강해짐
+            return min((accel_ratio - 1.0) * 2.0, 1.0)
+        return 0.0
+
+    @staticmethod
+    def calc_hoga_velocity(bid_qtys: list[int] | None) -> float:
+        """
+        호가 매수 속도 점수 (0.0~1.0).
+
+        탐지: 1~5호가 매수잔량이 계속 증가하는가 (한 번의 변화가 아니라 추세).
+        최근 5호가의 합 > 이전 5호가의 합 → 매수 잔량 증가 추세.
+        """
+        if bid_qtys is None or len(bid_qtys) < 10:
+            return 0.0
+
+        recent_sum = sum(bid_qtys[-5:]) if len(bid_qtys) >= 5 else sum(bid_qtys)
+        prior_sum  = sum(bid_qtys[-10:-5]) if len(bid_qtys) >= 10 else 1
+
+        if prior_sum <= 0:
+            return 0.0
+
+        velocity_ratio = recent_sum / prior_sum
+        if velocity_ratio > 1.1:  # 10% 이상 증가
+            return min((velocity_ratio - 1.0) * 2.0, 1.0)
+        return 0.0
+
+    @staticmethod
     def calc_accumulation_score(volumes: list, closes: list) -> float:
         """
         거래량 축적(Accumulation) 점수 (0.0~1.0).
@@ -219,44 +266,50 @@ class IndicatorService:
         복합 선행 점수 (0.0~1.0) — 우상향 가능성 예측.
 
         [방향 원칙]
-        "지금 막 매수세가 불붙고 있는가"를 확인.
-        단순히 지표가 높은 것(후행)이 아니라 변화가 일어나고 있는 것(선행)을 요구.
+        "지금 막 매수세가 불붙고 있으면서 계속 강해지는가"를 확인.
+        단순히 지표가 높은 것(후행)이 아니라 변화와 가속이 함께 일어나야 함(선행).
 
         PRIMARY 조건 (하나 이상 필수):
-          체결강도 반등 ≥ 0.15  — 조용하다가 갑자기 매수 활성화
-          기관/외인 전환 ≥ 0.50  — 기관이 방향을 바꿔 매수 시작
+          체결강도 반등 ≥ 0.25  — 명확한 매수세 점화 (강화됨: 0.15→0.25)
+          기관/외인 전환 ≥ 0.50  — 기관 방향 전환 (기존)
 
         PRIMARY 없으면 0.0 반환 → 진입 차단.
 
         가중합 (PRIMARY 통과 후):
-          체결강도 반등  50% — 핵심 선행 신호 (비중 ↑)
-          거래량 축적    20% — 스마트머니 매집 징조
-          호가 압력      15% — 실시간 매수 우위
-          외인+기관 전환 15% — 기관 방향 전환
+          체결강도 반등     35% — 핵심 선행 신호 (비중 ↓, 가속도로 보완)
+          체결강도 가속도   20% — 반등 후 계속 강해지는가 (신규)
+          거래량 축적       15% — 스마트머니 매집 징조 (비중 ↓)
+          호가 압력         15% — 실시간 매수 우위 (유지)
+          호가 속도         10% — 매수잔량이 계속 증가하는가 (신규)
+          외인+기관 전환     5% — 기관 방향 전환 (비중 ↓)
 
         데이터 부족 시 None 반환 → 호출처에서 체크 생략.
         """
         hist = list(getattr(snap, 'chejan_history', None) or [])
         vols = list(getattr(snap, 'volumes_1min',  None) or [])
+        bid_qtys = list(getattr(snap, 'bid_qtys', None) or [])
         if len(hist) < 8 or len(vols) < 11:
             return None  # 데이터 부족 → 체크 생략
 
         cr = IndicatorService.calc_chejan_reversal_score(hist)
+        ca = IndicatorService.calc_chejan_acceleration(hist)
         ac = IndicatorService.calc_accumulation_score(
             vols, list(getattr(snap, 'closes_1min', None) or []))
         hp = IndicatorService.calc_hoga_pressure_score(
             int(getattr(snap, 'total_ask_qty', 0) or 0),
             int(getattr(snap, 'total_bid_qty', 0) or 0),
         )
+        hv = IndicatorService.calc_hoga_velocity(bid_qtys if bid_qtys else None)
         iv = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
 
-        # PRIMARY 조건: "변화"가 없으면 0점 → 진입 차단
-        # 체결강도가 반등하거나, 기관이 방향을 바꿨을 때만 의미 있는 점수
-        primary_ok = (cr >= 0.15) or (iv >= 0.50)
+        # PRIMARY 조건: 더 강한 반등이거나 기관 전환이 있을 때만
+        # cr >= 0.25 (강화) OR iv >= 0.50
+        primary_ok = (cr >= 0.25) or (iv >= 0.50)
         if not primary_ok:
             return 0.0
 
-        return cr * 0.50 + ac * 0.20 + hp * 0.15 + iv * 0.15
+        # 가중합: 가속도를 통해 진정한 매수세 확인
+        return (cr * 0.35 + ca * 0.20 + ac * 0.15 + hp * 0.15 + hv * 0.10 + iv * 0.05)
 
     @staticmethod
     def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:

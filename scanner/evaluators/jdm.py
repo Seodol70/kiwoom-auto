@@ -198,27 +198,14 @@ def _jdm_check_trend_and_ma(
     """요셉 추세 필터 + MA 골든크로스/이격도 체크. (spread_tag, rsi_tag) 또는 None 반환."""
     closes, highs, lows = ctx.closes, ctx.highs, ctx.lows
 
-    # ── 요셉 추세 필터
-    if getattr(cfg, "yosep_trend_enabled", True):
-        if ctx.slot == "AFTERNOON":
-            min_trend = int(getattr(cfg, "yosep_min_trend_level_afternoon", 3))
-        elif ctx.slot == "OPENING":
-            min_trend = int(getattr(cfg, "yosep_min_trend_level_opening", 0))
-        else:
-            min_trend = int(getattr(cfg, "yosep_min_trend_level", 1))
-
-        # 선행 강세 시 trend_lv 요구치 1단계 완화 (AFTERNOON·OPENING 제외)
-        # 매수세가 이제 막 점화되는 순간 = trend_lv가 아직 따라오지 않았을 수 있음
-        _ls_strong_thr2 = float(getattr(cfg, "leading_score_strong", 0.50))
-        if (ctx.leading_score >= _ls_strong_thr2
-                and ctx.slot not in ("AFTERNOON", "OPENING")
-                and min_trend > 0):
-            min_trend = max(0, min_trend - 1)
-
-        if ctx.trend_lv < min_trend:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_TREND",
-                f"요셉 추세 미달 [{ctx.slot}] — level {ctx.trend_lv} < {min_trend} "
-                f"(leading={ctx.leading_score:.2f})")
+    # ── 요셉 추세 필터 (축소: 일봉 역배열만 차단, 추세 요구치는 완화)
+    # [FIX 2026-06-04 Phase3] trend_lv 요구치 축소. 선행 신호(leading_score)가 우선 → 추세는 보조.
+    # 하지만 일봉이 역배열(매도압력)이면 차단 — 추세 붕괴 방지.
+    if getattr(cfg, "daily_alignment_enabled", True) and len(snap.daily_closes) >= 20:
+        align = IndicatorService.check_daily_alignment(snap.daily_closes, snap.current_price)
+        if not align["is_aligned"]:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_DAILY_ALIGN",
+                f"일봉 역배열 — MA5:{align['ma5']:.0f} < MA10:{align['ma10']:.0f} < MA20:{align['ma20']:.0f}")
             return None
         
 
@@ -433,49 +420,27 @@ def _jdm_check_execution_quality(
     r_dry_up   = check_volume_dry_up(snap)
     r_precursor = r_flag or r_cup or r_soldiers or r_dry_up
 
-    # ── RSI 체크
-    # [FIX 2026-05-27] OPENING 스킵 제거 — 5/12 학습용 임시였으나 정점 진입 원인.
-    # [FIX 2026-06-04] OPENING은 trend_lv≥2여도 완화 금지.
-    # [FIX 2026-06-04 Phase2] 기본 상한 70→60. 선행 패턴 있으면 65까지 허용.
+    # ── RSI 체크 (상한만 사용 — 하한 제거, leading_score가 없으면 신호가 안 나므로)
+    # [FIX 2026-06-04 Phase3] RSI 하한 제거, 상한만 체크. leading_score >= 0.25가 필수이므로 하한은 불필요.
     rsi = getattr(ctx, "_rsi", None)
     if not ctx.lite_mode and rsi is not None:
-        eff_rsi_high = cfg.jdm_rsi_high  # 기본 60
-        # 선행 패턴(Volume Dry-Up/Flag/Cup/3연상승) 있으면 65까지 허용
-        if r_precursor:
-            eff_rsi_high = max(eff_rsi_high,
-                               float(getattr(cfg, "jdm_rsi_high_with_precursor", 65.0)))
-        # trend_lv≥2 완화 — OPENING 제외
-        if ctx.trend_lv >= ctx.candle_skip_lv and ctx.slot != "OPENING":
-            eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_trend", 70.0))
-            if len(closes) >= 20 and len(highs) >= 15 and len(lows) >= 15:
-                ema20_b = IndicatorService.calc_ema(closes, 20)
-                atr14_b = IndicatorService.calc_atr(highs, lows, closes, 14)
-                if (ema20_b is not None and atr14_b is not None and atr14_b > 0
-                        and snap.current_price > ema20_b + atr14_b * 1.5):
-                    eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_breakout", 72.0))
-        if ctx.is_warmup:
-            eff_rsi_high = 80.0
+        eff_rsi_high = cfg.jdm_rsi_high  # 기본 60 (변경: 70→60, 상한만 사용)
 
-        # 선행 강세 시 RSI 허용 구간 확대 — 매수세 점화 초기에 더 빠르게 진입
-        # 체결강도 반등+호가 압력이 강하게 켜진 상태면, RSI가 아직 반응 안 해도 허용
-        eff_rsi_min_final = ctx.eff_rsi_min
+        # 선행 강세 시 RSI 상한만 완화 (하한은 제거)
         _ls_strong_thr = float(getattr(cfg, "leading_score_strong", 0.50))
         if ctx.leading_score >= _ls_strong_thr:
-            _rsi_high_boost = float(getattr(cfg, "jdm_rsi_high_strong_leading", 75.0))
-            _rsi_min_boost  = float(getattr(cfg, "jdm_rsi_min_strong_leading",  45.0))
-            eff_rsi_high      = max(eff_rsi_high, _rsi_high_boost)
-            eff_rsi_min_final = min(eff_rsi_min_final, _rsi_min_boost)
+            _rsi_high_boost = float(getattr(cfg, "jdm_rsi_high_strong_leading", 70.0))
+            eff_rsi_high = max(eff_rsi_high, _rsi_high_boost)
             ScannerLogger.passed(snap.code, snap.name, "JDM_LEADING_BOOST",
-                f"선행 강세 → RSI 구간 확대 ({eff_rsi_min_final:.0f}~{eff_rsi_high:.0f}) "
+                f"선행 강세 → RSI 상한 완화 (상한={eff_rsi_high:.0f}) "
                 f"leading={ctx.leading_score:.2f} RSI={rsi:.1f}")
 
-        if not (eff_rsi_min_final <= rsi < eff_rsi_high):
-            thresh = eff_rsi_min_final if rsi < eff_rsi_min_final else eff_rsi_high
+        # 과매수만 차단 (RSI >= 상한)
+        if rsi >= eff_rsi_high:
             ScannerLogger.near_miss(snap.code, snap.name, "JDM_RSI",
-                actual=rsi, threshold=thresh,
-                reason=f"[{ctx.slot}] RSI 범위 초과 — 현재 {rsi:.1f}% "
-                       f"(허용 {eff_rsi_min_final:.0f}~{eff_rsi_high:.0f}%, "
-                       f"trend_lv={ctx.trend_lv}, leading={ctx.leading_score:.2f})")
+                actual=rsi, threshold=eff_rsi_high,
+                reason=f"[{ctx.slot}] RSI 과매수 차단 — {rsi:.1f}% >= {eff_rsi_high:.0f}% "
+                       f"(leading={ctx.leading_score:.2f})")
             return None
 
     # ── 캔들 패턴 (정보 기록용 — 진입 차단 없음)
