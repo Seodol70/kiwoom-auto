@@ -154,6 +154,7 @@ def reload_adaptive(scan_cfg) -> str:
 
         # config.py를 단일 진실 소스로 하여 SmartScannerConfig에 주입
         new_cfg.max_change_pct      = float(_RISK.get("max_change_pct", 22.0))
+        new_cfg.min_change_pct      = float(_RISK.get("min_change_pct", -1.5))
         new_cfg.signal_cooldown_sec = float(_RISK.get("signal_cooldown_sec", 45.0))
         new_cfg.index_block_pct     = float(_RISK.get("market_index_block_pct", -1.5))
 

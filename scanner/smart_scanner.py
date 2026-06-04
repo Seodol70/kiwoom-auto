@@ -577,13 +577,13 @@ class SmartScanner(QObject):
 
         rows, _ = self.universe_mgr.filter_equity_rows(rows)
         mc = self.cfg.max_change_pct
+        mn = float(getattr(self.cfg, "min_change_pct", -1.5))
         _n0 = len(rows)
-        # 2026-05-07: 음수 종목 제외 필터 추가 (change_pct >= 0 필터링)
-        rows = [r for r in rows if 0 <= float(r.get("change_pct", 0) or 0) < mc]
+        rows = [r for r in rows if mn <= float(r.get("change_pct", 0) or 0) < mc]
         if _n0 != len(rows):
             logger.info(
-                "  등락률 상한 0%% ~ %.1f%% 범위만 유지 — %d → %d종목",
-                mc, _n0, len(rows),
+                "  등락률 범위 %.1f%% ~ %.1f%% 유지 — %d → %d종목",
+                mn, mc, _n0, len(rows),
             )
         rows = self.universe_mgr.apply_scoring_cap(rows, self.cfg.watch_pool_max)
         if not rows:
@@ -797,8 +797,9 @@ class SmartScanner(QObject):
             self._eval_min[snap.code] = cur_min
 
 
-        # ② 등락률 상한
-        if snap.change_pct >= self.cfg.max_change_pct:
+        # ② 등락률 범위 (하한~상한)
+        _mn = float(getattr(self.cfg, "min_change_pct", -1.5))
+        if snap.change_pct < _mn or snap.change_pct >= self.cfg.max_change_pct:
             return None
 
 

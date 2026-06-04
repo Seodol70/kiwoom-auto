@@ -494,6 +494,7 @@ class SnapshotStore:
             bid_prices    = list(getattr(st, "bid_prices", [0]*5)),
             bid_qtys      = list(getattr(st, "bid_qtys",   [0]*5)),
             hoga_updated_at = getattr(st, "hoga_updated_at", None),
+            bid1_history    = list(getattr(st, "bid1_history", [])),
             closes_1min   = closes_list,
             opens_1min    = list(st.min_opens),
             highs_1min    = highs_list,
@@ -569,6 +570,9 @@ class SnapshotStore:
                 st.ask_qtys = list(ask_qtys)
             if bid_prices is not None:
                 st.bid_prices = list(bid_prices)
+                # [2026-06-04 Phase3] 매수1호가 이력 누적 — 우상향 기울기 감지용
+                if bid_prices[0] > 0:
+                    st.bid1_history.append(bid_prices[0])
             if bid_qtys is not None:
                 st.bid_qtys = list(bid_qtys)
             if any(v is not None for v in [ask_prices, ask_qtys, bid_prices, bid_qtys]):

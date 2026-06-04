@@ -244,9 +244,9 @@ def _jdm_check_trend_and_ma(
     # 1분봉 상승 신호인데 5분봉이 하락 중인 경우 차단 — 고점 진입 방지
     if getattr(cfg, "mtf_enabled", True) and getattr(cfg, "mtf_block_on_misalign", True):
         _skip_mtf = False
-        # OPENING 슬롯 스킵 (5분봉 3개 미만)
-        if ctx.slot == "OPENING" and getattr(cfg, "mtf_skip_opening", True):
-            _skip_mtf = True
+        # [FIX 2026-06-04] OPENING 슬롯 MTF 스킵 제거 — 5분봉 추세 방향 필수 확인
+        # 기존: OPENING은 5분봉 데이터 부족으로 스킵 → 추세 역행 진입 허용 → 손실
+        # 변경: 5분봉 3개 미만이면 자연 스킵(아래 _min_bars 체크), 있으면 반드시 확인
         # 1분봉 추세가 매우 강하면(Lv3+) 스킵 — 폭발적 강세는 MTF 무시
         _skip_lv = int(getattr(cfg, "mtf_skip_tf1_trend_lv", 3))
         if int(getattr(snap, "mtf_tf1_trend", 0)) >= _skip_lv:
@@ -447,41 +447,54 @@ def _jdm_check_execution_quality(
                     f"현재가/EMA{ema_s_period} 이격 과열 — {price_ema_disp:.2f}% ≥ {price_ema_disp_max:.1f}%")
                 return None
 
+    # ── 선행 패턴 사전 계산 (RSI 완화 판단에 사용)
+    from scanner.evaluators.common import (
+        check_flag_pattern, check_cup_and_handle,
+        check_three_soldiers, check_volume_dry_up,
+    )
+    r_flag     = check_flag_pattern(snap)
+    r_cup      = check_cup_and_handle(snap)
+    r_soldiers = check_three_soldiers(snap)
+    r_dry_up   = check_volume_dry_up(snap)
+    r_precursor = r_flag or r_cup or r_soldiers or r_dry_up
+
     # ── RSI 체크
     # [FIX 2026-05-27] OPENING 스킵 제거 — 5/12 학습용 임시였으나 정점 진입 원인.
-    # 5/27 진입 종목 RSI 평균 90+ (한온시스템 93, 네이처셀 94, 에이팩트 99) → 모두 손실.
+    # [FIX 2026-06-04] OPENING은 trend_lv≥2여도 완화 금지.
+    # [FIX 2026-06-04 Phase2] 기본 상한 70→60. 선행 패턴 있으면 65까지 허용.
     rsi = getattr(ctx, "_rsi", None)
     if not ctx.lite_mode and rsi is not None:
-        eff_rsi_high = cfg.jdm_rsi_high
-        if ctx.trend_lv >= ctx.candle_skip_lv:
-            eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_trend", 80.0))
+        eff_rsi_high = cfg.jdm_rsi_high  # 기본 60
+        # 선행 패턴(Volume Dry-Up/Flag/Cup/3연상승) 있으면 65까지 허용
+        if r_precursor:
+            eff_rsi_high = max(eff_rsi_high,
+                               float(getattr(cfg, "jdm_rsi_high_with_precursor", 65.0)))
+        # trend_lv≥2 완화 — OPENING 제외
+        if ctx.trend_lv >= ctx.candle_skip_lv and ctx.slot != "OPENING":
+            eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_trend", 70.0))
             if len(closes) >= 20 and len(highs) >= 15 and len(lows) >= 15:
                 ema20_b = IndicatorService.calc_ema(closes, 20)
                 atr14_b = IndicatorService.calc_atr(highs, lows, closes, 14)
                 if (ema20_b is not None and atr14_b is not None and atr14_b > 0
                         and snap.current_price > ema20_b + atr14_b * 1.5):
-                    eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_breakout", 82.0))
+                    eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_breakout", 72.0))
         if ctx.is_warmup:
-            eff_rsi_high = 88.0
+            eff_rsi_high = 80.0
         if not (ctx.eff_rsi_min <= rsi < eff_rsi_high):
             thresh = ctx.eff_rsi_min if rsi < ctx.eff_rsi_min else eff_rsi_high
             ScannerLogger.near_miss(snap.code, snap.name, "JDM_RSI",
                 actual=rsi, threshold=thresh,
-                reason=f"[{ctx.slot}] RSI 범위 초과 — 현재 {rsi:.1f}% (허용 {ctx.eff_rsi_min:.0f}~{eff_rsi_high:.0f}%, trend_lv={ctx.trend_lv})")
+                reason=f"[{ctx.slot}] RSI 범위 초과 — 현재 {rsi:.1f}% "
+                       f"(허용 {ctx.eff_rsi_min:.0f}~{eff_rsi_high:.0f}%, "
+                       f"trend_lv={ctx.trend_lv}, precursor={'있음' if r_precursor else '없음'})")
             return None
 
     # ── 캔들 패턴
-    # [2026-06-01] 선행 패턴 4종 추가 — 오르기 전에 발견
-    from scanner.evaluators.common import (
-        check_flag_pattern, check_cup_and_handle,
-        check_three_soldiers, check_volume_dry_up,
-    )
-    # 선행 패턴: 기존 패턴보다 우선 체크 (추세 시작 전 단계 포착)
-    r_flag     = check_flag_pattern(snap)
-    r_cup      = check_cup_and_handle(snap)
-    r_soldiers = check_three_soldiers(snap)
-    r_dry_up   = check_volume_dry_up(snap)
-    r_precursor = r_flag or r_cup or r_soldiers or r_dry_up  # 4종 중 하나라도 있으면
+    # [FIX 2026-06-04] OPENING 슬롯: 선행 패턴(4종) 없으면 진입 금지
+    if ctx.slot == "OPENING" and not r_precursor:
+        ScannerLogger.rejected(snap.code, snap.name, "JDM_OPENING_PRECURSOR",
+            f"OPENING 선행 패턴 없음 — 깃발형/컵앤핸들/3연상승/거래량수축 중 하나 필요 (trend_lv={ctx.trend_lv})")
+        return None
 
     if not ctx.lite_mode:
         if ctx.trend_lv >= ctx.candle_skip_lv:
@@ -584,7 +597,8 @@ def check_jdm_entry(
     _hoga_ready = getattr(snap, "hoga_ready", False)
     if getattr(cfg, "hoga_pressure_enabled", True) and _hoga_ready:
         pressure = float(getattr(snap, "hoga_pressure", 1.0))
-        min_pressure = float(getattr(cfg, "hoga_pressure_min", 1.3))
+        _hoga_min_key = "hoga_pressure_min_opening" if ctx.slot == "OPENING" else "hoga_pressure_min"
+        min_pressure = float(getattr(cfg, _hoga_min_key, getattr(cfg, "hoga_pressure_min", 1.3)))
         if pressure < min_pressure:
             _bid_vol = sum(list(getattr(snap, "bid_qtys", [0]*5))[1:3])
             _ask_vol = sum(list(getattr(snap, "ask_qtys", [0]*5))[1:3])
@@ -593,9 +607,23 @@ def check_jdm_entry(
                 f"(매수2~3호가 {_bid_vol:,}주 vs 매도 {_ask_vol:,}주)")
             return None
 
+    # [2026-06-04 Phase3] OPENING 슬롯 매수1호가 우상향 기울기 필터
+    # 매수1호가가 하락 중(음수 기울기)이면 매수세 약화 → 진입 금지
+    if ctx.slot == "OPENING" and _hoga_ready:
+        _bid1_slope = float(getattr(snap, "bid1_slope", 0.0))
+        _bid1_hist  = list(getattr(snap, "bid1_history", []))
+        _slope_min  = float(getattr(cfg, "bid1_slope_min_opening", 0.0))
+        if len(_bid1_hist) >= 5 and _bid1_slope < _slope_min:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_BID1_SLOPE",
+                f"OPENING 매수1호가 하락 기울기 — {_bid1_slope:+.3f}% < {_slope_min:.1f}% "
+                f"(최근5틱: {_bid1_hist[-5:]})")
+            return None
+
     pressure_tag = ""
     if _hoga_ready:
-        pressure_tag = f" | 호가압력={float(getattr(snap, 'hoga_pressure', 1.0)):.2f}"
+        _slope_val = float(getattr(snap, "bid1_slope", 0.0))
+        pressure_tag = (f" | 호가압력={float(getattr(snap, 'hoga_pressure', 1.0)):.2f}"
+                        f" | 호가기울기={_slope_val:+.3f}%")
 
     mode_tag  = "JDM_LITE" if ctx.lite_mode else "JDM"
     warm_tag  = " | [WARMUP]" if ctx.is_warmup else ""

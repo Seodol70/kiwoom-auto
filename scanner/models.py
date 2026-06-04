@@ -39,6 +39,8 @@ class InternalStockState:
     bid_prices: List[int] = field(default_factory=lambda: [0]*5)  # 매수1~5 가격
     bid_qtys:   List[int] = field(default_factory=lambda: [0]*5)  # 매수1~5 수량
     hoga_updated_at: Optional[datetime] = None
+    # [2026-06-04 Phase3] 매수1호가 가격 이력 — 우상향 기울기 감지용 (최근 10틱)
+    bid1_history: _Deque = field(default_factory=lambda: _Deque(maxlen=10))
 
     # 분봉 (1분봉 OHLCV)
     mins: List[float] = field(default_factory=list)
@@ -116,6 +118,8 @@ class StockSnapshot:
     bid_prices: list[int] = field(default_factory=lambda: [0]*5)  # 매수1~5 가격
     bid_qtys:   list[int] = field(default_factory=lambda: [0]*5)  # 매수1~5 수량
     hoga_updated_at: Optional[datetime] = None
+    # [2026-06-04 Phase3] 매수1호가 이력 (최근 10틱) — 우상향 기울기 감지용
+    bid1_history: list = field(default_factory=list)
 
     @property
     def hoga_pressure(self) -> float:
@@ -132,6 +136,21 @@ class StockSnapshot:
     def hoga_ready(self) -> bool:
         """호가 상세 데이터가 수신된 상태인지"""
         return self.hoga_updated_at is not None and any(self.bid_qtys)
+
+    @property
+    def bid1_slope(self) -> float:
+        """매수1호가 우상향 기울기 — 최근 5틱 이상 있을 때만 계산.
+        양수 = 우상향(매수세 강화), 0 = 보합, 음수 = 하락(매수세 약화).
+        데이터 부족 시 0.0 반환.
+        """
+        h = list(self.bid1_history)
+        if len(h) < 5:
+            return 0.0
+        h = h[-5:]  # 최근 5틱
+        # 단순 선형 기울기: (마지막 - 첫번째) / 첫번째 * 100 (%)
+        if h[0] <= 0:
+            return 0.0
+        return (h[-1] - h[0]) / h[0] * 100
 
     # 지표 (계산 결과)
     rsi: Optional[float] = None
