@@ -328,6 +328,11 @@ class TradingController(QObject):
             self.auto_trade_started.emit()
             logger.info("[TradingController] 첫 신호 발생 — 자동매매 자동 시작 요청")
 
+        # 자동매매 OFF 상태 → 주문 처리 차단 (신호 기록은 계속)
+        if not self._auto_trading:
+            self._record_signal(sig)
+            return False
+
         passed, reason = self._strategy.should_entry(sig, self._auto_trading)
 
         if not passed:

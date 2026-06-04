@@ -80,7 +80,20 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
                 f"5분 급등 차단 — {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%)")
             return None
 
-    # [2026-06-02] 갭 리버설 JDM 내부 로직 제거 — GAP_PULLBACK 전략으로 분리됨 (중복)
+    # ── 체결강도 가속도 (모멘텀 방향) 필터
+    # 체결강도가 "지금 높다"는 것만으로는 부족 — 상승 중이어야 진입 타이밍
+    # 최근 3틱 평균 < 이전 3틱 평균의 80% → 모멘텀 소멸, 진입 포기
+    if getattr(cfg, "chejan_accel_check_enabled", True):
+        _hist = list(getattr(snap, "chejan_history", None) or [])
+        if len(_hist) >= 8:
+            _recent_avg = sum(_hist[-3:]) / 3
+            _prev_avg   = sum(_hist[-6:-3]) / 3
+            _drop_thr   = float(getattr(cfg, "chejan_accel_min_ratio", 0.80))
+            if _prev_avg > 0 and (_recent_avg / _prev_avg) < _drop_thr:
+                ScannerLogger.rejected(snap.code, snap.name, "JDM_CHEJAN_DECEL",
+                    f"체결강도 하락 중 — 최근:{_recent_avg:.0f}% / 이전:{_prev_avg:.0f}% "
+                    f"= {_recent_avg/_prev_avg:.2f}x (기준 ≥ {_drop_thr:.2f}x)")
+                return None
 
     # ── 거래대금 가속도 필터
     if getattr(cfg, "trade_amount_surge_enabled", True):
