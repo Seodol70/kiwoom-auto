@@ -35,6 +35,7 @@ class _JdmCtx:
     lows:          list
     is_warmup:     bool = False
     _rsi:          Optional[float] = None
+    leading_score: float = 0.0  # 선행 지표 복합 점수 — RSI/추세 조건 완화 판단에 사용
 
 def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional["_JdmCtx"]:
     """슬롯·유효 파라미터 계산. 조기 차단 조건 해당 시 None 반환."""
@@ -80,36 +81,36 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
                 f"5분 급등 차단 — {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%)")
             return None
 
-    # [2026-06-02] 갭 리버설 JDM 내부 로직 제거 — GAP_PULLBACK 전략으로 분리됨 (중복)
+    # ── 체결강도 가속도 (모멘텀 방향) 필터
+    # 체결강도가 "지금 높다"는 것만으로는 부족 — 상승 중이어야 진입 타이밍
+    # 최근 3틱 평균 < 이전 3틱 평균의 80% → 모멘텀 소멸, 진입 포기
+    if getattr(cfg, "chejan_accel_check_enabled", True):
+        _hist = list(getattr(snap, "chejan_history", None) or [])
+        if len(_hist) >= 8:
+            _recent_avg = sum(_hist[-3:]) / 3
+            _prev_avg   = sum(_hist[-6:-3]) / 3
+            _drop_thr   = float(getattr(cfg, "chejan_accel_min_ratio", 0.80))
+            if _prev_avg > 0 and (_recent_avg / _prev_avg) < _drop_thr:
+                ScannerLogger.rejected(snap.code, snap.name, "JDM_CHEJAN_DECEL",
+                    f"체결강도 하락 중 — 최근:{_recent_avg:.0f}% / 이전:{_prev_avg:.0f}% "
+                    f"= {_recent_avg/_prev_avg:.2f}x (기준 ≥ {_drop_thr:.2f}x)")
+                return None
 
-    # ── 거래대금 가속도 필터
-    if getattr(cfg, "trade_amount_surge_enabled", True):
-        surge_mult = float(getattr(cfg, "trade_amount_surge_mult", 2.0))
-        # OPENING 슬롯: 거래대금 기준 완화 (장 초반은 자연스럽게 높음)
-        now_for_slot = datetime.now().time()
-        slot_for_check = _resolve_time_slot(now_for_slot, cfg)
-        if slot_for_check == "OPENING":
-            surge_mult = 1.2  # OPENING은 완화 (2.0 → 1.2)
-
-        from scanner.evaluators.common import check_trade_amount_surge
-        ta_result = check_trade_amount_surge(snap, accel_mult=surge_mult)
-        if ta_result is None:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_TRADE_AMOUNT",
-                f"거래대금 미달 — 현재 봉 거래대금 < 최근 5봉 평균 × {surge_mult:.1f}배")
+    # ── 선행 지표 복합 점수 필터
+    # 체결강도 반등 + 거래량 축적 + 호가 압력 합산
+    # None = 데이터 부족(장 초반) → 생략, 0.0~1.0 = 유효
+    _leading = IndicatorService.get_leading_score(snap)
+    _ctx_leading = 0.0  # ctx에 전달할 선행 점수 (후속 함수에서 RSI 완화 판단에 사용)
+    if _leading is not None:
+        _leading_thr = float(getattr(cfg, "leading_score_min", 0.25))
+        if _leading < _leading_thr:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_LEADING",
+                f"선행점수 미달 — {_leading:.2f} < {_leading_thr:.2f} "
+                f"(체결반등:{IndicatorService.calc_chejan_reversal_score(list(getattr(snap,'chejan_history',[]))):.2f}"
+                f" 축적:{IndicatorService.calc_accumulation_score(list(getattr(snap,'volumes_1min',[])),list(getattr(snap,'closes_1min',[]))):.2f}"
+                f" 호가:{IndicatorService.calc_hoga_pressure_score(int(getattr(snap,'total_ask_qty',0)),int(getattr(snap,'total_bid_qty',0))):.2f})")
             return None
-
-    # ── 시가 대비 상승도 차단
-    if snap.open_price > 0:
-        surge_from_open = (snap.current_price - snap.open_price) / snap.open_price * 100
-        _surge_cap       = float(cfg.entry_open_surge_max)
-        _surge_override  = int(getattr(cfg, "surge_trend_override_level", 2))
-        _surge_trend_max = float(getattr(cfg, "surge_trend_max_pct", 15.0))
-        _snap_trend_lvl  = int(getattr(snap, "trend_level", 0))
-        if _surge_override > 0 and _snap_trend_lvl >= _surge_override:
-            _surge_cap = max(_surge_cap, _surge_trend_max)
-        if surge_from_open >= _surge_cap:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_SURGE", "시가 대비 이미 상승 — 고점 진입 차단")
-            return None
+        _ctx_leading = _leading  # 임계값 통과: 점수를 ctx에 전달
 
     now = datetime.now().time()
     if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
@@ -166,16 +167,6 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
             f"[{slot}] 등락률 {snap_chg:.2f}% ≥ 구간 상한 {chg_cap:.0f}% (trend={snap_trend_lv2})")
         return None
 
-    # [2026-06-02] AFTERNOON 이미 많이 오른 종목 차단
-    # 삼성전자(+7%) 사례: 오후 장 막바지에 RSI 소폭 하락으로 필터 통과 → 손실
-    # 오전에 많이 오른 종목은 오후에 차익실현 압력 → 추가 상승 여력 없음
-    if slot == "AFTERNOON":
-        _afternoon_chg_limit = float(getattr(cfg, "afternoon_already_up_pct", 5.0))
-        if snap_chg >= _afternoon_chg_limit:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_AFTERNOON_OVERBOUGHT",
-                f"[AFTERNOON] 당일 이미 +{snap_chg:.1f}% 상승 — 오후 추가 진입 차단 (상한 {_afternoon_chg_limit:.0f}%)")
-            return None
-
     # ── 캔들 데이터 준비
     closes    = list(snap.closes_1min or [])
     highs     = list(snap.highs_1min  or [])
@@ -191,15 +182,6 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         return None
 
 
-    # JDM_SLIP 필터 — OPENING 슬롯에서는 스킵 (2026-05-12: 극단 변동성 대응)
-    if slot != "OPENING" and len(closes) >= 2 and closes[-2] > 0:
-        slip_pct = (closes[-1] - closes[-2]) / closes[-2] * 100
-        slip_max = getattr(cfg, "slippage_block_pct", 3.0)
-        if slip_pct >= slip_max:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_SLIP",
-                f"슬리피지 차단 — 직전 1분봉 대비 {slip_pct:.2f}% 급등 (상한 {slip_max:.1f}%)")
-            return None
-
     return _JdmCtx(
         now=now, slot=slot,
         eff_chejan=eff_chejan, eff_vol_mult=eff_vol_mult,
@@ -207,6 +189,7 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         scoring_bonus=scoring_bonus, trend_lv=trend_lv,
         candle_skip_lv=candle_skip_lv, lite_mode=lite_mode,
         closes=closes, highs=highs, lows=lows,
+        leading_score=_ctx_leading,
     )
 
 def _jdm_check_trend_and_ma(
@@ -215,30 +198,16 @@ def _jdm_check_trend_and_ma(
     """요셉 추세 필터 + MA 골든크로스/이격도 체크. (spread_tag, rsi_tag) 또는 None 반환."""
     closes, highs, lows = ctx.closes, ctx.highs, ctx.lows
 
-    # ── 요셉 추세 필터
-    if getattr(cfg, "yosep_trend_enabled", True):
-        if ctx.slot == "AFTERNOON":
-            min_trend = int(getattr(cfg, "yosep_min_trend_level_afternoon", 3))
-        elif ctx.slot == "OPENING":
-            min_trend = int(getattr(cfg, "yosep_min_trend_level_opening", 0))
-        else:
-            min_trend = int(getattr(cfg, "yosep_min_trend_level", 1))
-        if ctx.trend_lv < min_trend:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_TREND",
-                f"요셉 추세 미달 [{ctx.slot}] — level {ctx.trend_lv} < {min_trend}")
+    # ── 요셉 추세 필터 (축소: 일봉 역배열만 차단, 추세 요구치는 완화)
+    # [FIX 2026-06-04 Phase3] trend_lv 요구치 축소. 선행 신호(leading_score)가 우선 → 추세는 보조.
+    # 하지만 일봉이 역배열(매도압력)이면 차단 — 추세 붕괴 방지.
+    if getattr(cfg, "daily_alignment_enabled", True) and len(snap.daily_closes) >= 20:
+        align = IndicatorService.check_daily_alignment(snap.daily_closes, snap.current_price)
+        if not align["is_aligned"]:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_DAILY_ALIGN",
+                f"일봉 역배열 — MA5:{align['ma5']:.0f} < MA10:{align['ma10']:.0f} < MA20:{align['ma20']:.0f}")
             return None
         
-        ema_p    = int(getattr(cfg, "yosep_ema_period", 20))
-        atr_p    = int(getattr(cfg, "yosep_atr_period", 14))
-        down_mult = float(getattr(cfg, "yosep_downtrend_block_atr", 0.8))
-        if len(closes) >= ema_p and len(highs) >= atr_p + 1 and len(lows) >= atr_p + 1:
-            ema20 = IndicatorService.calc_ema(closes, ema_p)
-            atr14 = IndicatorService.calc_atr(highs, lows, closes, atr_p)
-            if ema20 is not None and atr14 is not None and atr14 > 0:
-                if snap.current_price < (ema20 - atr14 * down_mult):
-                    ScannerLogger.rejected(snap.code, snap.name, "JDM_TREND_DOWN",
-                        f"하락 추세 강세 — 현재가 {snap.current_price:,} < EMA{ema_p} {ema20:,.0f} - ATR{atr_p}×{down_mult:.1f}")
-                    return None
 
     # ── MTF(멀티타임프레임) 추세 일치 필터
     # 1분봉 상승 신호인데 5분봉이 하락 중인 경우 차단 — 고점 진입 방지
@@ -380,13 +349,6 @@ def _jdm_check_execution_quality(
             ScannerLogger.rejected(snap.code, snap.name, "JDM_VOL",
                 f"WARMUP 체결강도 부족 — {snap.chejan_strength:.0f}% < {_warmup_chejan_min:.0f}% (WARMUP 강화 기준)")
             return None
-        # 거래대금 배수도 상향 (OPENING 1.2배 → 2.0배)
-        from scanner.evaluators.common import check_trade_amount_surge
-        _warmup_ta_mult = float(getattr(cfg, "jdm_warmup_trade_amount_mult", 2.0))
-        if check_trade_amount_surge(snap, accel_mult=_warmup_ta_mult) is None:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_TRADE_AMOUNT",
-                f"WARMUP 거래대금 부족 — 최근 5봉 평균 × {_warmup_ta_mult:.1f}배 미달 (WARMUP 강화 기준)")
-            return None
 
     # ── 거래량 체크
     # [FIX 2026-06-01] OPENING 슬롯에서 거래량 부족 시 차단
@@ -458,68 +420,43 @@ def _jdm_check_execution_quality(
     r_dry_up   = check_volume_dry_up(snap)
     r_precursor = r_flag or r_cup or r_soldiers or r_dry_up
 
-    # ── RSI 체크
-    # [FIX 2026-05-27] OPENING 스킵 제거 — 5/12 학습용 임시였으나 정점 진입 원인.
-    # [FIX 2026-06-04] OPENING은 trend_lv≥2여도 완화 금지.
-    # [FIX 2026-06-04 Phase2] 기본 상한 70→60. 선행 패턴 있으면 65까지 허용.
+    # ── RSI 체크 (상한만 사용 — 하한 제거, leading_score가 없으면 신호가 안 나므로)
+    # [FIX 2026-06-04 Phase3] RSI 하한 제거, 상한만 체크. leading_score >= 0.25가 필수이므로 하한은 불필요.
     rsi = getattr(ctx, "_rsi", None)
     if not ctx.lite_mode and rsi is not None:
-        eff_rsi_high = cfg.jdm_rsi_high  # 기본 60
-        # 선행 패턴(Volume Dry-Up/Flag/Cup/3연상승) 있으면 65까지 허용
-        if r_precursor:
-            eff_rsi_high = max(eff_rsi_high,
-                               float(getattr(cfg, "jdm_rsi_high_with_precursor", 65.0)))
-        # trend_lv≥2 완화 — OPENING 제외
-        if ctx.trend_lv >= ctx.candle_skip_lv and ctx.slot != "OPENING":
-            eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_trend", 70.0))
-            if len(closes) >= 20 and len(highs) >= 15 and len(lows) >= 15:
-                ema20_b = IndicatorService.calc_ema(closes, 20)
-                atr14_b = IndicatorService.calc_atr(highs, lows, closes, 14)
-                if (ema20_b is not None and atr14_b is not None and atr14_b > 0
-                        and snap.current_price > ema20_b + atr14_b * 1.5):
-                    eff_rsi_high = float(getattr(cfg, "jdm_rsi_high_breakout", 72.0))
-        if ctx.is_warmup:
-            eff_rsi_high = 80.0
-        if not (ctx.eff_rsi_min <= rsi < eff_rsi_high):
-            thresh = ctx.eff_rsi_min if rsi < ctx.eff_rsi_min else eff_rsi_high
+        eff_rsi_high = cfg.jdm_rsi_high  # 기본 60 (변경: 70→60, 상한만 사용)
+
+        # 선행 강세 시 RSI 상한만 완화 (하한은 제거)
+        _ls_strong_thr = float(getattr(cfg, "leading_score_strong", 0.50))
+        if ctx.leading_score >= _ls_strong_thr:
+            _rsi_high_boost = float(getattr(cfg, "jdm_rsi_high_strong_leading", 70.0))
+            eff_rsi_high = max(eff_rsi_high, _rsi_high_boost)
+            ScannerLogger.passed(snap.code, snap.name, "JDM_LEADING_BOOST",
+                f"선행 강세 → RSI 상한 완화 (상한={eff_rsi_high:.0f}) "
+                f"leading={ctx.leading_score:.2f} RSI={rsi:.1f}")
+
+        # 과매수만 차단 (RSI >= 상한)
+        if rsi >= eff_rsi_high:
             ScannerLogger.near_miss(snap.code, snap.name, "JDM_RSI",
-                actual=rsi, threshold=thresh,
-                reason=f"[{ctx.slot}] RSI 범위 초과 — 현재 {rsi:.1f}% "
-                       f"(허용 {ctx.eff_rsi_min:.0f}~{eff_rsi_high:.0f}%, "
-                       f"trend_lv={ctx.trend_lv}, precursor={'있음' if r_precursor else '없음'})")
+                actual=rsi, threshold=eff_rsi_high,
+                reason=f"[{ctx.slot}] RSI 과매수 차단 — {rsi:.1f}% >= {eff_rsi_high:.0f}% "
+                       f"(leading={ctx.leading_score:.2f})")
             return None
 
-    # ── 캔들 패턴
-    # [FIX 2026-06-04] OPENING 슬롯: 선행 패턴(4종) 없으면 진입 금지
-    if ctx.slot == "OPENING" and not r_precursor:
-        ScannerLogger.rejected(snap.code, snap.name, "JDM_OPENING_PRECURSOR",
-            f"OPENING 선행 패턴 없음 — 깃발형/컵앤핸들/3연상승/거래량수축 중 하나 필요 (trend_lv={ctx.trend_lv})")
-        return None
-
+    # ── 캔들 패턴 (정보 기록용 — 진입 차단 없음)
     if not ctx.lite_mode:
+        r_engulf = check_bullish_engulfing(snap)
+        r_pinbar = check_bullish_pin_bar(snap)
         if ctx.trend_lv >= ctx.candle_skip_lv:
             candle_reason = f"TREND_SKIP(lv{ctx.trend_lv})"
             if r_precursor:
                 candle_reason = f"{r_precursor}+TREND(lv{ctx.trend_lv})"
+        elif r_precursor:
+            candle_reason = r_precursor
+        elif r_engulf or r_pinbar:
+            candle_reason = r_engulf or r_pinbar
         else:
-            r_engulf = check_bullish_engulfing(snap)
-            r_pinbar = check_bullish_pin_bar(snap)
-
-            # 선행 패턴이 있으면 기존 캔들 패턴 없어도 진입 허용
-            if r_precursor:
-                candle_reason = r_precursor
-            elif ctx.is_warmup and r_engulf is None and r_pinbar is None:
-                if snap.current_price > snap.open_price and snap.current_price >= snap.high_prev:
-                    candle_reason = "AGGRESSIVE_BREAKOUT"
-                else:
-                    ScannerLogger.rejected(snap.code, snap.name, "JDM_CANDLE", "워밍업 양봉 돌파 미충족")
-                    return None
-            elif r_engulf is None and r_pinbar is None:
-                ScannerLogger.rejected(snap.code, snap.name, "JDM_CANDLE",
-                    f"캔들 패턴 미충족 (상승장악형·강세핀바·선행4종 불성립, trend_lv={ctx.trend_lv})")
-                return None
-            else:
-                candle_reason = r_engulf or r_pinbar
+            candle_reason = "NO_PATTERN"
     else:
         candle_reason = r_precursor or "LITE(캔들패턴스킵)"
 
@@ -607,17 +544,6 @@ def check_jdm_entry(
                 f"(매수2~3호가 {_bid_vol:,}주 vs 매도 {_ask_vol:,}주)")
             return None
 
-    # [2026-06-04 Phase3] OPENING 슬롯 매수1호가 우상향 기울기 필터
-    # 매수1호가가 하락 중(음수 기울기)이면 매수세 약화 → 진입 금지
-    if ctx.slot == "OPENING" and _hoga_ready:
-        _bid1_slope = float(getattr(snap, "bid1_slope", 0.0))
-        _bid1_hist  = list(getattr(snap, "bid1_history", []))
-        _slope_min  = float(getattr(cfg, "bid1_slope_min_opening", 0.0))
-        if len(_bid1_hist) >= 5 and _bid1_slope < _slope_min:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_BID1_SLOPE",
-                f"OPENING 매수1호가 하락 기울기 — {_bid1_slope:+.3f}% < {_slope_min:.1f}% "
-                f"(최근5틱: {_bid1_hist[-5:]})")
-            return None
 
     pressure_tag = ""
     if _hoga_ready:

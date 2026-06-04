@@ -95,21 +95,6 @@ class OverheatPullbackFilter(SignalFilter):
         return True, ""
 
 
-class MockSignalFilter(SignalFilter):
-    """MagicMock 단위테스트 신호 차단 (실운영 보호)"""
-
-    def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
-        if (sig.code == "000003"
-                or "mock" in str(sig.name).lower()
-                or "MagicMock" in str(sig.name)):
-            logger.warning(
-                "[진입거절] %s(%s) 테스트 신호 차단 — 실운영 환경에서 Mock 신호 감지",
-                sig.name, sig.code
-            )
-            return False, f"{sig.code}: 테스트신호차단"
-        return True, ""
-
-
 class OpeningTimeFilter(SignalFilter):
     """개장 1시간(09:00~10:00) 분당 1건 진입 제한"""
 
@@ -137,25 +122,39 @@ class OpeningTimeFilter(SignalFilter):
 
 
 class WeakSignalFilter(SignalFilter):
-    """약한신호(trend_level<2) 차단 — 09:30 이후만 적용"""
+    """추세 레벨 기반 시간대별 진입 차단
+
+    - OPENING(09:00~09:30): Lv3 차단 — 갭상승 직후 정점 진입 위험
+    - 09:30 이후: Lv < 2 차단 — 약세 신호 진입 금지
+    """
 
     def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
         now = ctx.now or datetime.now()
 
-        threshold_time = datetime.strptime("09:30", "%H:%M").time()
-        if now.time() < threshold_time:
-            return True, ""
-
-        # 스냅샷에서 추세 레벨 확인
         snap = ctx.snap_store.get_snapshot(sig.code) if ctx.snap_store else None
         trend_lv = int(getattr(snap, "trend_level", 0) or 0) if snap else 0
 
-        if trend_lv < 2:
-            logger.info(
-                "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
-                sig.name, sig.code, trend_lv
-            )
-            return False, f"{sig.code}: 약한신호 (trend_lv={trend_lv})"
+        opening_start = datetime.strptime("09:00", "%H:%M").time()
+        opening_end   = datetime.strptime("09:30", "%H:%M").time()
+
+        # OPENING 구간: Lv3(극강 상승) = 이미 정점 가능성 → 차단
+        if opening_start <= now.time() < opening_end:
+            if trend_lv == 3:
+                logger.info(
+                    "[진입거절] %s(%s) OPENING Lv3 차단 — 정점 진입 위험",
+                    sig.name, sig.code,
+                )
+                return False, f"{sig.code}: OPENING Lv3 차단"
+            return True, ""
+
+        # 09:30 이후: Lv < 2 차단
+        if now.time() >= opening_end:
+            if trend_lv < 2:
+                logger.info(
+                    "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
+                    sig.name, sig.code, trend_lv,
+                )
+                return False, f"{sig.code}: 약한신호 (trend_lv={trend_lv})"
 
         return True, ""
 
@@ -203,88 +202,6 @@ class EntryStrategyFilter(SignalFilter):
                 sig.name, sig.code, reason
             )
             return False, reason
-
-        return True, ""
-
-
-class InvestorFilter(SignalFilter):
-    """외인/기관 순매매 필터"""
-
-    def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
-        snap = ctx.snap_store.get_snapshot(sig.code) if ctx.snap_store else None
-        if not snap:
-            return True, ""
-
-        foreign_net = int(getattr(snap, "foreign_net_buy", 0) or 0)
-        inst_net = int(getattr(snap, "inst_net_buy", 0) or 0)
-
-        # Phase 1: 둘 다 0이면 데이터 갱신 시도
-        if foreign_net == 0 and inst_net == 0:
-            if ctx.kiwoom is None:
-                logger.debug("[수급갱신스킵] %s — kiwoom API unavailable", sig.code)
-                return True, ""
-
-            tr_busy = getattr(ctx.kiwoom, "_tr_busy", False)
-            if tr_busy:
-                logger.debug("[수급즉시갱신 스킵] %s — TR 사용 중, 기존 데이터로 진행", sig.code)
-                return True, ""
-
-            try:
-                inv_data = ctx.kiwoom.get_investor_trend(sig.code)
-                ctx.snap_store.update_investor(
-                    sig.code, inv_data["foreign_net"], inv_data["inst_net"]
-                )
-                snap = ctx.snap_store.get_snapshot(sig.code)
-                if snap:
-                    foreign_net = int(getattr(snap, "foreign_net_buy", 0) or 0)
-                    inst_net = int(getattr(snap, "inst_net_buy", 0) or 0)
-                logger.info(
-                    "[수급즉시갱신] %s(%s) 외인=%+d 기관=%+d",
-                    sig.name, sig.code, foreign_net, inst_net
-                )
-            except Exception as e:
-                logger.warning(
-                    "[수급갱신실패] %s(%s): %s — 기존 데이터로 진행",
-                    sig.name, sig.code, e
-                )
-                return True, ""
-
-        # Phase 2: 외인 && 기관 둘 다 1,000주 이상 순매도면 차단
-        INV_NET_SELL_THRESHOLD = -1000
-        if foreign_net != 0 or inst_net != 0:
-            if foreign_net <= INV_NET_SELL_THRESHOLD and inst_net <= INV_NET_SELL_THRESHOLD:
-                reject_msg = (
-                    f"[진입거절] {sig.name}({sig.code}) 수급악화 — "
-                    f"외인={foreign_net:+,} 기관={inst_net:+,} (둘 다 순매도)"
-                )
-                logger.info(reject_msg)
-                return False, f"{sig.code}: 수급악화 (외인+기관 매도)"
-
-        return True, ""
-
-
-class NewsFilter(SignalFilter):
-    """뉴스 감정(호재/악재) 조회 및 Context에 저장"""
-
-    def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
-        if ctx.news_analyzer is None:
-            return True, ""
-
-        try:
-            cached = ctx.news_analyzer.get_cached_result(sig.code)
-            if cached is not None:
-                ctx.news_sentiment = cached.sentiment  # POSITIVE | NEGATIVE | NEUTRAL
-                logger.info(
-                    "[뉴스감정] %s(%s) %s — %s",
-                    sig.name, sig.code, ctx.news_sentiment,
-                    cached.headlines[0]["title"][:30] if cached.headlines else "헤드라인 없음"
-                )
-            else:
-                # 아직 분석 안 됨 → 백그라운드 분석 시작
-                ctx.news_analyzer.analyze(sig.code, sig.name)
-                logger.debug("[뉴스분석요청] %s(%s)", sig.name, sig.code)
-        except Exception as e:
-            logger.warning("[뉴스감정조회실패] %s(%s): %s", sig.name, sig.code, e)
 
         return True, ""
 
@@ -348,49 +265,19 @@ class AIFilter(SignalFilter):
         return True, ""
 
 
-class RSFilter(SignalFilter):
-    """상대강도(RS) 필터 — 지수 대비 강도"""
-
-    def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
-        snap = ctx.snap_store.get_snapshot(sig.code) if ctx.snap_store else None
-        if not snap:
-            return True, ""
-
-        rs_score = getattr(snap, "rs_score", 0.0) or 0.0
-        rs_thr = float(getattr(ctx.trading_cfg, "rs_threshold", 0.0))
-
-        if rs_score < rs_thr:
-            reject_msg = (
-                f"[진입거절] {sig.name}({sig.code}) RS필터 거절 "
-                f"(RS={rs_score:.2f} < 기준 {rs_thr:.2f})"
-            )
-            logger.warning(reject_msg)
-            return False, f"{sig.code}: RS 필터 거절 ({rs_score:.2f})"
-
-        # 탐색 모드에서 상세 로그
-        if getattr(ctx.trading_cfg, "exploration_mode", False):
-            logger.debug(
-                "[RS필터] %s RS={rs_score:.2f} (기준 {rs_thr:.2f}) → 데이터 수집 통과",
-                sig.name
-            )
-
-        return True, ""
-
-
 class SignalFilterChain:
     """신호 필터 체인 (Composite 패턴)"""
 
     def __init__(self):
+        # [FIX 2026-06-04 Phase3] 필터 축소: 9개 → 5개
+        # 제거: MockSignalFilter (모의투자 아님), InvestorFilter (라깅), NewsFilter (분석 미흡), RSFilter (개별주 우선)
+        # 유지: OverheatPullbackFilter, OpeningTimeFilter, WeakSignalFilter, EntryStrategyFilter, AIFilter
         self.filters = [
             OverheatPullbackFilter(),
-            MockSignalFilter(),
             OpeningTimeFilter(),
             WeakSignalFilter(),
             EntryStrategyFilter(),
-            InvestorFilter(),
-            NewsFilter(),
             AIFilter(),
-            RSFilter(),
         ]
 
     def validate(

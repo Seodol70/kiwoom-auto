@@ -41,6 +41,9 @@ class InternalStockState:
     hoga_updated_at: Optional[datetime] = None
     # [2026-06-04 Phase3] 매수1호가 가격 이력 — 우상향 기울기 감지용 (최근 10틱)
     bid1_history: _Deque = field(default_factory=lambda: _Deque(maxlen=10))
+    # [2026-06-04 Phase3-FIX] 매수호가 수량 이력 — 호가 속도(velocity) 계산용 (최근 10스냅)
+    # 매 호가 수신마다 [1호가, 2호가, ..., 5호가]의 합계만 저장 (크기 최적화)
+    bid_qty_sums_history: _Deque = field(default_factory=lambda: _Deque(maxlen=10))
 
     # 분봉 (1분봉 OHLCV)
     mins: List[float] = field(default_factory=list)
@@ -55,6 +58,11 @@ class InternalStockState:
     inv_inst: int = 0
     inv_score: int = 0
     inv_updated_at: Optional[datetime] = None
+    # 매수 전환 감지용 이력
+    inv_foreign_prev: int = 0          # 직전 외인 순매수
+    inv_inst_prev: int = 0             # 직전 기관 순매수
+    inv_score_prev: int = 0            # 직전 수급 점수 (-1/0/1)
+    inv_flip_at: Optional[datetime] = None  # 최근 매수 전환 시각
     
     # 추세/메타
     trend_level: int = 0
@@ -120,6 +128,8 @@ class StockSnapshot:
     hoga_updated_at: Optional[datetime] = None
     # [2026-06-04 Phase3] 매수1호가 이력 (최근 10틱) — 우상향 기울기 감지용
     bid1_history: list = field(default_factory=list)
+    # [2026-06-04 Phase3-FIX] 매수호가 수량 이력 (최근 10스냅) — 호가 속도 계산용
+    bid_qty_sums_history: list = field(default_factory=list)
 
     @property
     def hoga_pressure(self) -> float:
@@ -190,6 +200,7 @@ class StockSnapshot:
     foreign_net_buy: int = 0
     inst_net_buy: int = 0
     investor_score: int = 0
+    inv_flip_score: float = 0.0  # 외인+기관 동시 매수 전환 신선도 (0~1, 30분 감쇠)
 
     # 추세 상태 (Yosep 신호)
     trend_level: int = 0  # 추세 단계 0~3

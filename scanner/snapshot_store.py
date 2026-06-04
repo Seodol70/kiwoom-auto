@@ -417,6 +417,12 @@ class SnapshotStore:
             inv_foreign   = st.inv_foreign
             inv_inst      = st.inv_inst
             inv_score     = st.inv_score
+            # 매수 전환 신선도 점수: flip 후 30분 동안 1.0→0.0 선형 감쇠
+            _inv_flip_score = 0.0
+            if st.inv_flip_at is not None:
+                _flip_age_min = (datetime.now() - st.inv_flip_at).total_seconds() / 60.0
+                if _flip_age_min <= 30.0:
+                    _inv_flip_score = max(1.0 - _flip_age_min / 30.0, 0.0)
             trend_lv      = st.trend_level
             trend_prev_lv = st.trend_prev_level
             chejan_str    = st.chejan_str
@@ -495,6 +501,7 @@ class SnapshotStore:
             bid_qtys      = list(getattr(st, "bid_qtys",   [0]*5)),
             hoga_updated_at = getattr(st, "hoga_updated_at", None),
             bid1_history    = list(getattr(st, "bid1_history", [])),
+            bid_qty_sums_history = list(getattr(st, "bid_qty_sums_history", [])),
             closes_1min   = closes_list,
             opens_1min    = list(st.min_opens),
             highs_1min    = highs_list,
@@ -506,6 +513,7 @@ class SnapshotStore:
             foreign_net_buy = inv_foreign,
             inst_net_buy    = inv_inst,
             investor_score  = inv_score,
+            inv_flip_score  = _inv_flip_score,
             trend_level     = trend_lv,
             trend_prev_level = trend_prev_lv,
             chejan_strength  = chejan_str,
@@ -575,6 +583,9 @@ class SnapshotStore:
                     st.bid1_history.append(bid_prices[0])
             if bid_qtys is not None:
                 st.bid_qtys = list(bid_qtys)
+                # [2026-06-04 Phase3-FIX] 매수호가 수량 합계 이력 저장 (호가 속도 계산용)
+                bid_qty_sum = sum(bid_qtys) if bid_qtys else 0
+                st.bid_qty_sums_history.append(bid_qty_sum)
             if any(v is not None for v in [ask_prices, ask_qtys, bid_prices, bid_qtys]):
                 from datetime import datetime as _dt
                 st.hoga_updated_at = _dt.now()
@@ -628,19 +639,43 @@ class SnapshotStore:
         foreign_net: int,
         inst_net:    int,
     ) -> None:
-        """외국인/기관 순매수 수량을 StockSnapshot에 갱신한다."""
+        """외국인/기관 순매수 수량을 갱신하고 매수 전환(flip) 여부를 감지한다."""
         with self._lock:
             st = self._get_state(code)
+
+            # 이전 값 보존
+            st.inv_foreign_prev = st.inv_foreign
+            st.inv_inst_prev    = st.inv_inst
+            st.inv_score_prev   = st.inv_score
+
+            # 새 값 반영
             st.inv_foreign = int(foreign_net)
-            st.inv_inst = int(inst_net)
-            
+            st.inv_inst    = int(inst_net)
+
             if foreign_net > 0 and inst_net > 0:
-                score = 1
+                new_score = 1
             elif foreign_net < 0 and inst_net < 0:
-                score = -1
+                new_score = -1
             else:
-                score = 0
-            st.inv_score = score
+                new_score = 0
+
+            # 매수 전환 감지: 이전 데이터가 있었고, 매도/중립 → 외인+기관 동시 매수
+            if (st.inv_updated_at is not None
+                    and st.inv_score_prev < 1
+                    and new_score == 1):
+                # 1시간 이내에 이미 flip 기록이 없으면 새 flip으로 기록
+                _now = datetime.now()
+                if (st.inv_flip_at is None
+                        or (_now - st.inv_flip_at).total_seconds() > 3600):
+                    st.inv_flip_at = _now
+                    logger.debug(
+                        "[수급전환] %s 외인+기관 동시 매수 전환 감지 "
+                        "(이전 score=%d → 현재 score=%d, 외인=%+d 기관=%+d)",
+                        code, st.inv_score_prev, new_score,
+                        foreign_net, inst_net,
+                    )
+
+            st.inv_score      = new_score
             st.inv_updated_at = datetime.now()
 
     def get_investor_data(self, code: str) -> tuple[int, int, int]:

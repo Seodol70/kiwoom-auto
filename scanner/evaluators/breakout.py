@@ -140,6 +140,22 @@ def check_breakout_gate(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Opt
         )
         return None
 
+    # ── 최근 급등 차단 — 이미 오른 종목 추격 매수 방지
+    # JDM과 동일한 임계값 적용 (config에서 공유)
+    if len(snap.closes_1min) >= 6 and snap.closes_1min[-2] > 0:
+        _r1 = (snap.closes_1min[-1] - snap.closes_1min[-2]) / snap.closes_1min[-2] * 100
+        _r5 = (snap.closes_1min[-1] - snap.closes_1min[-6]) / snap.closes_1min[-6] * 100
+        _r1_max = float(getattr(cfg, "recent_candle_max_1min_pct", 2.0))
+        _r5_max = float(getattr(cfg, "recent_candle_max_5min_pct", 5.0))
+        if _r1 >= _r1_max:
+            ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_RECENT_SURGE",
+                f"1분 급등 차단 — {_r1:+.2f}% ≥ {_r1_max:.1f}%")
+            return None
+        if _r5 >= _r5_max:
+            ScannerLogger.rejected(snap.code, snap.name, "BREAKOUT_RECENT_SURGE",
+                f"5분 급등 차단 — {_r5:+.2f}% ≥ {_r5_max:.1f}%")
+            return None
+
     # BREAKOUT RSI 상한 — OPENING 슬롯에서는 스킵 (2026-05-12: 극단 변동성 대응)
     if _slot != "OPENING":
         _rsi_max = getattr(cfg, "breakout_rsi_max", 80.0)

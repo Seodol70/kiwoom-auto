@@ -8,14 +8,10 @@ from app.signal_filter import (
     SignalFilterChain,
     SignalFilterContext,
     OverheatPullbackFilter,
-    MockSignalFilter,
     OpeningTimeFilter,
     WeakSignalFilter,
     EntryStrategyFilter,
-    InvestorFilter,
-    NewsFilter,
     AIFilter,
-    RSFilter,
 )
 
 
@@ -156,47 +152,6 @@ class TestOverheatPullbackFilter:
         assert passed
 
 
-class TestMockSignalFilter:
-    def test_reject_mock_code_000003(self):
-        filter = MockSignalFilter()
-        sig = MockSignal(code="000003", name="Test")
-        ctx = SignalFilterContext(
-            order_mgr=MockOrderManager(),
-            snap_store=MockSnapshotStore(),
-            trading_cfg=MockConfig(),
-            risk_mgr=Mock(),
-        )
-
-        passed, reason = filter.validate(sig, ctx)
-        assert not passed
-
-    def test_reject_mock_name(self):
-        filter = MockSignalFilter()
-        sig = MockSignal(code="005930", name="MagicMock")
-        ctx = SignalFilterContext(
-            order_mgr=MockOrderManager(),
-            snap_store=MockSnapshotStore(),
-            trading_cfg=MockConfig(),
-            risk_mgr=Mock(),
-        )
-
-        passed, reason = filter.validate(sig, ctx)
-        assert not passed
-
-    def test_accept_real_signals(self):
-        filter = MockSignalFilter()
-        sig = MockSignal(code="005930", name="삼성전자")
-        ctx = SignalFilterContext(
-            order_mgr=MockOrderManager(),
-            snap_store=MockSnapshotStore(),
-            trading_cfg=MockConfig(),
-            risk_mgr=Mock(),
-        )
-
-        passed, reason = filter.validate(sig, ctx)
-        assert passed
-
-
 class TestOpeningTimeFilter:
     def test_reject_multiple_entries_in_60sec(self):
         filter = OpeningTimeFilter()
@@ -324,78 +279,6 @@ class TestWeakSignalFilter:
         assert passed
 
 
-class TestInvestorFilter:
-    def test_reject_both_selling(self):
-        filter = InvestorFilter()
-        sig = MockSignal()
-        snap_store = MockSnapshotStore()
-        snap_store.snapshots["005930"] = MockSnapshot(foreign_net=-1000, inst_net=-1000)
-
-        ctx = SignalFilterContext(
-            order_mgr=MockOrderManager(),
-            snap_store=snap_store,
-            trading_cfg=MockConfig(),
-            risk_mgr=Mock(),
-        )
-
-        passed, reason = filter.validate(sig, ctx)
-        assert not passed
-
-    def test_accept_buying(self):
-        filter = InvestorFilter()
-        sig = MockSignal()
-        snap_store = MockSnapshotStore()
-        snap_store.snapshots["005930"] = MockSnapshot(foreign_net=1000, inst_net=1000)
-
-        ctx = SignalFilterContext(
-            order_mgr=MockOrderManager(),
-            snap_store=snap_store,
-            trading_cfg=MockConfig(),
-            risk_mgr=Mock(),
-        )
-
-        passed, reason = filter.validate(sig, ctx)
-        assert passed
-
-
-class TestRSFilter:
-    def test_reject_low_rs_score(self):
-        filter = RSFilter()
-        sig = MockSignal()
-        cfg = MockConfig()
-        cfg.rs_threshold = 0.5
-        snap_store = MockSnapshotStore()
-        snap_store.snapshots["005930"] = MockSnapshot(rs_score=0.3)
-
-        ctx = SignalFilterContext(
-            order_mgr=MockOrderManager(),
-            snap_store=snap_store,
-            trading_cfg=cfg,
-            risk_mgr=Mock(),
-        )
-
-        passed, reason = filter.validate(sig, ctx)
-        assert not passed
-
-    def test_accept_high_rs_score(self):
-        filter = RSFilter()
-        sig = MockSignal()
-        cfg = MockConfig()
-        cfg.rs_threshold = 0.3
-        snap_store = MockSnapshotStore()
-        snap_store.snapshots["005930"] = MockSnapshot(rs_score=0.5)
-
-        ctx = SignalFilterContext(
-            order_mgr=MockOrderManager(),
-            snap_store=snap_store,
-            trading_cfg=cfg,
-            risk_mgr=Mock(),
-        )
-
-        passed, reason = filter.validate(sig, ctx)
-        assert passed
-
-
 # ============================================================================
 # 필터 체인 통합 테스트
 # ============================================================================
@@ -405,21 +288,29 @@ class TestSignalFilterChain:
     def test_chain_stops_at_first_failure(self):
         """체인은 첫 실패에서 중단해야 함"""
         chain = SignalFilterChain()
-        sig = MockSignal(code="000003")  # Mock code → 2번째 필터에서 차단
+        sig = MockSignal(code="005930", signal_type="JDM_ENTRY")
 
         snap_store = MockSnapshotStore()
-        snap_store.snapshots["000003"] = MockSnapshot()
+        snap_store.snapshots["005930"] = MockSnapshot(trend_level=0)  # WeakSignalFilter에서 차단
+
+        order_mgr = MockOrderManager()
+        order_mgr._strategy.should_entry = Mock(return_value=(True, ""))
 
         ctx = SignalFilterContext(
-            order_mgr=MockOrderManager(),
+            order_mgr=order_mgr,
             snap_store=snap_store,
             trading_cfg=MockConfig(),
             risk_mgr=Mock(),
+            now=datetime.strptime("10:00", "%H:%M").replace(
+                year=datetime.now().year,
+                month=datetime.now().month,
+                day=datetime.now().day
+            ),
         )
 
         passed, reason = chain.validate(sig, ctx)
         assert not passed
-        assert "테스트신호" in reason or "Mock" in reason
+        assert "약한신호" in reason or "trend_lv" in reason
 
     def test_chain_all_pass_returns_true(self):
         """모든 필터 통과 시 True 반환"""

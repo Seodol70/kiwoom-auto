@@ -151,6 +151,166 @@ class IndicatorService:
         if dist_atr >= 0.3: return 1
         return 0
 
+    # ── 선행 지표 (Leading Indicators) ─────────────────────────────────────────
+
+    @staticmethod
+    def calc_chejan_reversal_score(chejan_history: list) -> float:
+        """
+        체결강도 바닥 반등 점수 (0.0~1.0).
+
+        탐지: 이전 5틱이 조용하다가(< 115%) 최근 3틱이 갑자기 130%+로 상승.
+        이는 매수세가 막 점화되는 초입 순간을 잡는 선행 신호.
+        이미 130% 상태가 오래된 종목은 점수 0 (이미 늦음).
+        """
+        if len(chejan_history) < 8:
+            return 0.0
+        recent_avg = sum(chejan_history[-3:]) / 3
+        older_avg  = sum(chejan_history[-8:-3]) / 5
+        if older_avg <= 0:
+            return 0.0
+        was_quiet  = older_avg < 115.0
+        now_active = recent_avg > 130.0
+        rise_ratio = recent_avg / older_avg
+        if was_quiet and now_active and rise_ratio > 1.15:
+            return min((rise_ratio - 1.0) * 2.5, 1.0)
+        return 0.0
+
+    @staticmethod
+    def calc_chejan_acceleration(chejan_history: list) -> float:
+        """
+        체결강도 가속도 점수 (0.0~1.0).
+
+        탐지: 반등 후 계속 강해지는가 (반등 후 추세 확인).
+        최근 3틱이 이전 3틱보다 계속 강해야 함 = 진정한 매수세.
+        """
+        if len(chejan_history) < 7:
+            return 0.0
+        recent_3 = chejan_history[-3:]
+        prior_3  = chejan_history[-6:-3]
+
+        recent_avg = sum(recent_3) / 3
+        prior_avg  = sum(prior_3) / 3
+
+        if prior_avg <= 0:
+            return 0.0
+
+        # 최근이 이전보다 강해졌는가?
+        accel_ratio = recent_avg / prior_avg
+        if accel_ratio > 1.05:  # 5% 이상 강해짐
+            return min((accel_ratio - 1.0) * 2.0, 1.0)
+        return 0.0
+
+    @staticmethod
+    def calc_hoga_velocity(bid_qty_sums_history: list[int] | None) -> float:
+        """
+        호가 매수 속도 점수 (0.0~1.0).
+
+        탐지: 1~5호가 매수잔량 합계가 지속적으로 증가하는가 (10스냅 이상 이력 필요).
+        최근 5스냅 평균 > 이전 5스냅 평균 → 매수 잔량 증가 추세.
+        """
+        if bid_qty_sums_history is None or len(bid_qty_sums_history) < 10:
+            return 0.0
+
+        recent_avg = sum(bid_qty_sums_history[-5:]) / 5  # 최근 5스냅
+        prior_avg  = sum(bid_qty_sums_history[-10:-5]) / 5  # 이전 5스냅
+
+        if prior_avg <= 0:
+            return 0.0
+
+        velocity_ratio = recent_avg / prior_avg
+        if velocity_ratio > 1.1:  # 10% 이상 증가
+            return min((velocity_ratio - 1.0) * 2.0, 1.0)
+        return 0.0
+
+    @staticmethod
+    def calc_accumulation_score(volumes: list, closes: list) -> float:
+        """
+        거래량 축적(Accumulation) 점수 (0.0~1.0).
+
+        탐지: 거래량은 2배↑ 폭증하는데 가격은 1.5% 이내로 안 오름.
+        스마트머니가 가격을 올리지 않고 조용히 매집 중 → 곧 상승 압력 개방.
+        """
+        if len(volumes) < 11 or len(closes) < 6:
+            return 0.0
+        vol_recent = sum(volumes[-5:])
+        vol_prior  = sum(volumes[-10:-5])
+        if vol_prior <= 0:
+            return 0.0
+        vol_surge  = vol_recent / vol_prior
+        price_chg  = abs((closes[-1] / closes[-6]) - 1.0) * 100 if closes[-6] > 0 else 999.0
+        if vol_surge >= 2.0 and price_chg < 1.5:
+            vol_score   = min((vol_surge - 2.0) / 3.0, 1.0)
+            price_score = 1.0 - min(price_chg / 1.5, 1.0)
+            return (vol_score + price_score) / 2.0
+        return 0.0
+
+    @staticmethod
+    def calc_hoga_pressure_score(total_ask_qty: int, total_bid_qty: int) -> float:
+        """
+        호가 매수 압력 점수 (0.0~1.0).
+
+        매수잔량 비율 > 55%이면 양수 점수. 55%=0.0, 75%=1.0.
+        실시간 호가창에서 사려는 사람이 팔려는 사람보다 많음을 직접 반영.
+        """
+        total = total_ask_qty + total_bid_qty
+        if total <= 0:
+            return 0.0
+        bid_ratio = total_bid_qty / total
+        if bid_ratio > 0.55:
+            return min((bid_ratio - 0.55) * 5.0, 1.0)
+        return 0.0
+
+    @staticmethod
+    def get_leading_score(snap: 'StockSnapshot') -> Optional[float]:
+        """
+        복합 선행 점수 (0.0~1.0) — 우상향 가능성 예측.
+
+        [방향 원칙]
+        "지금 막 매수세가 불붙고 있으면서 계속 강해지는가"를 확인.
+        단순히 지표가 높은 것(후행)이 아니라 변화와 가속이 함께 일어나야 함(선행).
+
+        PRIMARY 조건 (하나 이상 필수):
+          체결강도 반등 ≥ 0.25  — 명확한 매수세 점화 (강화됨: 0.15→0.25)
+          기관/외인 전환 ≥ 0.50  — 기관 방향 전환 (기존)
+
+        PRIMARY 없으면 0.0 반환 → 진입 차단.
+
+        가중합 (PRIMARY 통과 후):
+          체결강도 반등     35% — 핵심 선행 신호 (비중 ↓, 가속도로 보완)
+          체결강도 가속도   20% — 반등 후 계속 강해지는가 (신규)
+          거래량 축적       15% — 스마트머니 매집 징조 (비중 ↓)
+          호가 압력         15% — 실시간 매수 우위 (유지)
+          호가 속도         10% — 매수잔량이 계속 증가하는가 (신규)
+          외인+기관 전환     5% — 기관 방향 전환 (비중 ↓)
+
+        데이터 부족 시 None 반환 → 호출처에서 체크 생략.
+        """
+        hist = list(getattr(snap, 'chejan_history', None) or [])
+        vols = list(getattr(snap, 'volumes_1min',  None) or [])
+        if len(hist) < 8 or len(vols) < 11:
+            return None  # 데이터 부족 → 체크 생략
+
+        cr = IndicatorService.calc_chejan_reversal_score(hist)
+        ca = IndicatorService.calc_chejan_acceleration(hist)
+        ac = IndicatorService.calc_accumulation_score(
+            vols, list(getattr(snap, 'closes_1min', None) or []))
+        hp = IndicatorService.calc_hoga_pressure_score(
+            int(getattr(snap, 'total_ask_qty', 0) or 0),
+            int(getattr(snap, 'total_bid_qty', 0) or 0),
+        )
+        bid_qty_sums_hist = list(getattr(snap, 'bid_qty_sums_history', None) or [])
+        hv = IndicatorService.calc_hoga_velocity(bid_qty_sums_hist if bid_qty_sums_hist else None)
+        iv = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
+
+        # PRIMARY 조건: 더 강한 반등이거나 기관 전환이 있을 때만
+        # cr >= 0.25 (강화) OR iv >= 0.50
+        primary_ok = (cr >= 0.25) or (iv >= 0.50)
+        if not primary_ok:
+            return 0.0
+
+        # 가중합: 가속도를 통해 진정한 매수세 확인
+        return (cr * 0.35 + ca * 0.20 + ac * 0.15 + hp * 0.15 + hv * 0.10 + iv * 0.05)
+
     @staticmethod
     def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:
         """피봇 2차 저항선(R2) 계산. P=(고+저+종)/3, R2=P+(고-저)"""
