@@ -95,6 +95,20 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
                     f"= {_recent_avg/_prev_avg:.2f}x (기준 ≥ {_drop_thr:.2f}x)")
                 return None
 
+    # ── 선행 지표 복합 점수 필터
+    # 체결강도 반등 + 거래량 축적 + 호가 압력 합산
+    # None = 데이터 부족(장 초반) → 생략, 0.0~1.0 = 유효
+    _leading = IndicatorService.get_leading_score(snap)
+    if _leading is not None:
+        _leading_thr = float(getattr(cfg, "leading_score_min", 0.20))
+        if _leading < _leading_thr:
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_LEADING",
+                f"선행점수 미달 — {_leading:.2f} < {_leading_thr:.2f} "
+                f"(체결반등:{IndicatorService.calc_chejan_reversal_score(list(getattr(snap,'chejan_history',[]))):.2f}"
+                f" 축적:{IndicatorService.calc_accumulation_score(list(getattr(snap,'volumes_1min',[])),list(getattr(snap,'closes_1min',[]))):.2f}"
+                f" 호가:{IndicatorService.calc_hoga_pressure_score(int(getattr(snap,'total_ask_qty',0)),int(getattr(snap,'total_bid_qty',0))):.2f})")
+            return None
+
     # ── 거래대금 가속도 필터
     if getattr(cfg, "trade_amount_surge_enabled", True):
         surge_mult = float(getattr(cfg, "trade_amount_surge_mult", 2.0))

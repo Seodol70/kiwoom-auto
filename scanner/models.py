@@ -55,6 +55,11 @@ class InternalStockState:
     inv_inst: int = 0
     inv_score: int = 0
     inv_updated_at: Optional[datetime] = None
+    # 매수 전환 감지용 이력
+    inv_foreign_prev: int = 0          # 직전 외인 순매수
+    inv_inst_prev: int = 0             # 직전 기관 순매수
+    inv_score_prev: int = 0            # 직전 수급 점수 (-1/0/1)
+    inv_flip_at: Optional[datetime] = None  # 최근 매수 전환 시각
     
     # 추세/메타
     trend_level: int = 0
@@ -190,6 +195,7 @@ class StockSnapshot:
     foreign_net_buy: int = 0
     inst_net_buy: int = 0
     investor_score: int = 0
+    inv_flip_score: float = 0.0  # 외인+기관 동시 매수 전환 신선도 (0~1, 30분 감쇠)
 
     # 추세 상태 (Yosep 신호)
     trend_level: int = 0  # 추세 단계 0~3

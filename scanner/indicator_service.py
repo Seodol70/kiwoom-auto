@@ -151,6 +151,97 @@ class IndicatorService:
         if dist_atr >= 0.3: return 1
         return 0
 
+    # ── 선행 지표 (Leading Indicators) ─────────────────────────────────────────
+
+    @staticmethod
+    def calc_chejan_reversal_score(chejan_history: list) -> float:
+        """
+        체결강도 바닥 반등 점수 (0.0~1.0).
+
+        탐지: 이전 5틱이 조용하다가(< 115%) 최근 3틱이 갑자기 130%+로 상승.
+        이는 매수세가 막 점화되는 초입 순간을 잡는 선행 신호.
+        이미 130% 상태가 오래된 종목은 점수 0 (이미 늦음).
+        """
+        if len(chejan_history) < 8:
+            return 0.0
+        recent_avg = sum(chejan_history[-3:]) / 3
+        older_avg  = sum(chejan_history[-8:-3]) / 5
+        if older_avg <= 0:
+            return 0.0
+        was_quiet  = older_avg < 115.0
+        now_active = recent_avg > 130.0
+        rise_ratio = recent_avg / older_avg
+        if was_quiet and now_active and rise_ratio > 1.15:
+            return min((rise_ratio - 1.0) * 2.5, 1.0)
+        return 0.0
+
+    @staticmethod
+    def calc_accumulation_score(volumes: list, closes: list) -> float:
+        """
+        거래량 축적(Accumulation) 점수 (0.0~1.0).
+
+        탐지: 거래량은 2배↑ 폭증하는데 가격은 1.5% 이내로 안 오름.
+        스마트머니가 가격을 올리지 않고 조용히 매집 중 → 곧 상승 압력 개방.
+        """
+        if len(volumes) < 11 or len(closes) < 6:
+            return 0.0
+        vol_recent = sum(volumes[-5:])
+        vol_prior  = sum(volumes[-10:-5])
+        if vol_prior <= 0:
+            return 0.0
+        vol_surge  = vol_recent / vol_prior
+        price_chg  = abs((closes[-1] / closes[-6]) - 1.0) * 100 if closes[-6] > 0 else 999.0
+        if vol_surge >= 2.0 and price_chg < 1.5:
+            vol_score   = min((vol_surge - 2.0) / 3.0, 1.0)
+            price_score = 1.0 - min(price_chg / 1.5, 1.0)
+            return (vol_score + price_score) / 2.0
+        return 0.0
+
+    @staticmethod
+    def calc_hoga_pressure_score(total_ask_qty: int, total_bid_qty: int) -> float:
+        """
+        호가 매수 압력 점수 (0.0~1.0).
+
+        매수잔량 비율 > 55%이면 양수 점수. 55%=0.0, 75%=1.0.
+        실시간 호가창에서 사려는 사람이 팔려는 사람보다 많음을 직접 반영.
+        """
+        total = total_ask_qty + total_bid_qty
+        if total <= 0:
+            return 0.0
+        bid_ratio = total_bid_qty / total
+        if bid_ratio > 0.55:
+            return min((bid_ratio - 0.55) * 5.0, 1.0)
+        return 0.0
+
+    @staticmethod
+    def get_leading_score(snap: 'StockSnapshot') -> Optional[float]:
+        """
+        복합 선행 점수 (0.0~1.0) — 우상향 가능성 예측.
+
+        4가지 신호 가중합:
+          체결강도 반등  35% — 매수세 첫 점화
+          거래량 축적    30% — 스마트머니 선매수
+          호가 압력      20% — 실시간 매수 우위
+          외인+기관 전환 15% — 기관 방향 전환 (최강 신호, 30분 감쇠)
+
+        데이터 부족 시 None 반환 → 호출처에서 체크 생략.
+        기준값: 0.20 이상이면 진입 허용.
+        외인+기관 flip 단독 감지 시 0.15 → 임계값 통과.
+        """
+        hist = list(getattr(snap, 'chejan_history', None) or [])
+        vols = list(getattr(snap, 'volumes_1min',  None) or [])
+        if len(hist) < 8 or len(vols) < 11:
+            return None  # 데이터 부족 → 체크 생략
+        cr = IndicatorService.calc_chejan_reversal_score(hist)
+        ac = IndicatorService.calc_accumulation_score(
+            vols, list(getattr(snap, 'closes_1min', None) or []))
+        hp = IndicatorService.calc_hoga_pressure_score(
+            int(getattr(snap, 'total_ask_qty', 0) or 0),
+            int(getattr(snap, 'total_bid_qty', 0) or 0),
+        )
+        iv = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
+        return cr * 0.35 + ac * 0.30 + hp * 0.20 + iv * 0.15
+
     @staticmethod
     def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:
         """피봇 2차 저항선(R2) 계산. P=(고+저+종)/3, R2=P+(고-저)"""
