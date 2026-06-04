@@ -633,6 +633,13 @@ class TradingController(QObject):
         """
         if not self._order_mgr or not self._order_mgr.positions:
             return
+
+        # 장 외 시간 청산 평가 차단 — 재연결 후 야간에 RC4058 매도 주문 발송 방지
+        from datetime import time as _dtime
+        _now_t = datetime.now().time()
+        if not (_dtime(8, 55) <= _now_t <= _dtime(15, 35)):
+            return
+
         try:
             # 1. 보유 포지션 가격만 빠르게 갱신 (잔고 동기화 X, 가벼움)
             for pos in self._order_mgr.positions.values():
@@ -652,6 +659,12 @@ class TradingController(QObject):
 
     def check_and_exit_all(self) -> None:
         """모든 포지션 청산 판정 (5초 주기 호출)"""
+        # 장 외 시간 실행 차단 (tick_exit_check 외부에서 직접 호출되는 경우 대비)
+        from datetime import time as _dtime
+        _now_t = datetime.now().time()
+        if not (_dtime(8, 55) <= _now_t <= _dtime(15, 35)):
+            return
+
         count = 0
         # 현재 시간 슬롯 감지
         now = datetime.now()

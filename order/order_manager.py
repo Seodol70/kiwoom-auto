@@ -1240,6 +1240,19 @@ class OrderManager(QObject):
         Returns:
             주문번호 (실패 시 "0")
         """
+        # 장 운영 시간 외 매도 주문 차단 (RC4058 방지)
+        # 장 종료(15:30) 후 재연결 등으로 force_exit가 재호출될 수 있음
+        from datetime import time as _dtime
+        _now_t = datetime.now().time()
+        _MARKET_OPEN  = _dtime(8, 55)
+        _MARKET_CLOSE = _dtime(15, 35)
+        if not (_MARKET_OPEN <= _now_t <= _MARKET_CLOSE):
+            logger.warning(
+                "[force_exit] %s(%s) 장 외 시간 매도 보류 — 현재 %s (운영: 08:55~15:35)",
+                code, reason, _now_t.strftime("%H:%M:%S"),
+            )
+            return "0"
+
         # 이미 강제 매도 발령 중 → 체결 대기 (중복 발령 차단)
         if code in self._force_sell_issued:
             logger.debug("[force_exit] %s 이미 발령 중 — 중복 스킵", code)

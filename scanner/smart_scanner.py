@@ -1917,10 +1917,21 @@ class SmartScanner(QObject):
         """
         분봉 초기 로딩을 QTimer.singleShot 체인으로 1종목씩 비동기 처리한다.
 
-
         메인 스레드에서 동기 루프로 여러 TR 을 연속 호출하면 UI 가 얼어붙는다.
         각 종목을 350ms 간격 체인으로 분산시켜 이벤트 루프가 살아있게 유지한다.
         """
+        # 장 외 시간 + 초기 로딩이 이미 완료된 경우 → TR 호출 생략
+        # 재연결 후 opt10080/10081이 야간에 불필요하게 호출되어 일일 TR 한도를 소진하는 것을 방지
+        from datetime import time as _dtime
+        _t = datetime.now().time()
+        _MARKET_OPEN  = _dtime(8, 50)
+        _MARKET_CLOSE = _dtime(15, 40)
+        _outside_market = not (_MARKET_OPEN <= _t <= _MARKET_CLOSE)
+        if _outside_market and self._initial_candle_load_done:
+            if idx == 0:
+                logger.debug("[STEP-H] 장 외 시간 — 분봉 TR 호출 생략 (%s)", _t.strftime("%H:%M"))
+            return  # 전체 체인 중단
+
         if idx >= len(codes):
             logger.info("[STEP-H async] 완료 — 총 %d종목 처리", len(codes))
             if not self._initial_candle_load_done:
