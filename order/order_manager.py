@@ -902,20 +902,53 @@ class OrderManager(QObject):
             
             # 1. 하드 스탑 (-3.0% 등) — 즉시 탈출
             # [FIX 2026-05-29] 이미 블랙리스트 등록 = 이미 매도 주문 발행됨 → 중복 차단
-            # 기가레인(049080) 매 틱마다 하드스탑 WARNING 수십 회 → min_candle TIMEOUT 폭주 유발
             if pos.pnl_pct <= _hard:
                 if code in self._stop_loss_today:
-                    return  # 이미 하드스탑 실행됨 — 체결 대기 중, 중복 매도 차단
-                logger.warning("🚨 [하드스탑] %s(%s) 임계치 돌파 (%.2f%%) — 즉시 매도 및 블랙리스트 등록", pos.name, code, pos.pnl_pct)
+                    return
+                logger.warning("🚨 [하드스탑] %s(%s) 임계치 돌파 (%.2f%%) — 즉시 매도", pos.name, code, pos.pnl_pct)
                 self.mark_stop_loss(code)
                 self.force_exit(code, pos.name, pos.qty, "하드스탑")
                 return
 
-            # 2. 일반 손절 (-1.2% 등) — 3초 유예
-            # [FIX 2026-05-22] 이미 블랙리스트에 등록된 종목은 매도 주문 진행 중 → 재시도 차단
             if code in self._stop_loss_today:
-                pass  # 이미 손절 처리 중, 매 틱마다 로그 폭증 방지
-            elif pos.pnl_pct <= _sl:
+                return  # 이미 손절 처리 중
+
+            # 2. 트레일 스탑 — Stop Loss보다 먼저 체크 (틱 핸들러에서 check_and_exit_all 보다 빠름)
+            # [FIX 2026-06-04] Trail Stop이 0건이었던 원인:
+            # _on_price_updated(틱) 에서 Stop Loss만 체크 → Trail Stop 발동 전에 항상 SL이 먼저 잡음.
+            # 해결: 틱 핸들러에서도 Trail Stop을 SL보다 먼저 체크.
+            if pos.peak_price > 0 and pos.avg_price > 0:
+                _scfg = getattr(self, "_scan_cfg", None)
+                if _scfg is not None:
+                    _activation = float(getattr(_scfg, "trail_activation_pct", 1.0))
+                    _peak_chg = (pos.peak_price - pos.avg_price) / pos.avg_price * 100
+                    if _peak_chg >= _activation:
+                        # Tier 결정
+                        _t1_max = float(getattr(_scfg, "trail_tier1_max", 3.0))
+                        _t2_max = float(getattr(_scfg, "trail_tier2_max", 8.0))
+                        _t1     = float(getattr(_scfg, "trail_pct_tier1",  1.2))
+                        _t2     = float(getattr(_scfg, "trail_pct_tier2",  2.0))
+                        _t3     = float(getattr(_scfg, "trail_pct_tier3",  3.0))
+                        _trend  = int(getattr(pos, "trend_level", 0))
+                        _strong = _trend >= int(getattr(_scfg, "strong_trend_hold_level", 3))
+                        if _strong:
+                            _tp = _t2 if _peak_chg < _t2_max else _t3
+                        else:
+                            if _peak_chg < _t1_max:
+                                _tp = _t1
+                            elif _peak_chg < _t2_max:
+                                _tp = _t2
+                            else:
+                                _tp = _t3
+                        _trail_price = int(pos.peak_price * (1 - _tp / 100))
+                        if pos.current_price <= _trail_price:
+                            logger.info("🎯 [트레일스탑] %s(%s) 고점%s→현재%s (고점대비-%.1f%%) — 즉시 매도",
+                                        pos.name, code, f"{pos.peak_price:,}", f"{pos.current_price:,}", _tp)
+                            self.force_exit(code, pos.name, pos.qty, "트레일스탑")
+                            return
+
+            # 3. 일반 손절 (-1.2% 등) — 3초 유예
+            if pos.pnl_pct <= _sl:
                 if pos.sl_triggered_at is None:
                     pos.sl_triggered_at = datetime.now()
                     logger.info("⏳ [손절대기] %s(%s) 손절가 하회 (%.2f%%) — 3초 관찰 시작", pos.name, code, pos.pnl_pct)
@@ -923,7 +956,7 @@ class OrderManager(QObject):
                     elapsed = (datetime.now() - pos.sl_triggered_at).total_seconds()
                     if elapsed >= 3.0:
                         logger.warning("📉 [확정손절] %s(%s) 3초간 손절가 하회 — 매도 및 블랙리스트 등록", pos.name, code)
-                        self.mark_stop_loss(code)  # 블랙리스트 등록 → 다음 틱부터 위 분기로 차단됨
+                        self.mark_stop_loss(code)
                         self.force_exit(code, pos.name, pos.qty, "확정손절")
                     else:
                         logger.debug("⏳ [손절대기] %s 관찰 중... (%.1fs)", pos.name, elapsed)
