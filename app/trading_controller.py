@@ -110,6 +110,15 @@ class TradingController(QObject):
         from app.ai_filter import AIFilter
         self._ai_filter = AIFilter()
 
+        # EntryStrategyFilter / AIFilter가 ctx.order_mgr를 통해 접근하므로 주입
+        if self._order_mgr is not None:
+            self._order_mgr._ai_filter = self._ai_filter
+            self._order_mgr._strategy  = self._strategy
+
+        # [SignalFilterChain] 9개 필터 체인 초기화
+        from app.signal_filter import SignalFilterChain
+        self._filter_chain = SignalFilterChain()
+
         # [NEW] SmartScanner 신호를 주문 모듈과 연결 (2026-05-07 수정)
         if self._smart_scanner:
             self._smart_scanner.signal_detected.connect(self._on_signal_from_scanner)
@@ -211,254 +220,55 @@ class TradingController(QObject):
 
     @pyqtSlot(object)
     def handle_signal(self, sig: ScanSignal) -> bool:
-        """신호 필터링 (Phase1 태깅 + EntryStrategy 위임)"""
+        """신호 필터링 — SignalFilterChain을 통해 9개 필터를 순차 실행"""
 
-        # [2026-06-02] OVERHEAT_PULLBACK 자동매수 활성화
-        # 과열(Lv3) 후 눌림목(Lv1) 진입 — "한 번 오른 종목이 쉬는 구간에 사는" 방식
-        # 5/28 구현 후 1주 이상 경과, 다른 필터 체인(외인/기관/AI/RS)이 품질 보장
+        # ── 컨트롤러 고유 선결 조건 (체인 이전) ──────────────────────────────
 
-        # [BUG FIX 2026-05-26] MagicMock 단위테스트 신호가 실운영에 침투하는 버그 차단
-        # 10:14, 10:29에 code=000003, name=MagicMock 신호가 실운영 logger에 기록된 사례 발생
-        if (sig.code == "000003"
-                or "mock" in str(sig.name).lower()
-                or "MagicMock" in str(sig.name)):
-            logger.warning(
-                "[진입거절] %s(%s) 테스트 신호 차단 — 실운영 환경에서 Mock 신호 감지",
-                sig.name, sig.code
-            )
-            return False
-
-        # [P0-1 2026-05-21 / 확대 2026-05-22] 개장 직후 1시간(09:00~10:00) 분당 1건 진입 제한
-        # 5/22 데이터: 10:00~11:00에 -4.26% 신규 손실 발생 → 시간 확대
-        from datetime import datetime as _dt, timedelta as _td
-        _now = _dt.now()
-        if _dt.strptime("09:00", "%H:%M").time() <= _now.time() <= _dt.strptime("10:00", "%H:%M").time():
-            # 60초 이내 진입 건수 카운트
-            _one_min_ago = _now - _td(seconds=60)
-            self._opening_entry_times = [t for t in self._opening_entry_times if t > _one_min_ago]
-            if len(self._opening_entry_times) >= 1:
-                # [2026-05-22] 개장 1시간 거절은 INFO로 강등 (수 초마다 발생, UI 부하)
-                # signal_rejected는 유지 (UI에서 카운트 가능)
-                self.signal_rejected.emit(f"{sig.code}: 개장1시간 진입제한")
-                self._record_signal(sig)
-                return False
-
-        # trend_lv 필터 — 슬롯별 차등 적용
-        # [데이터 분석 2026-06-01]
-        # Lv2 진입: 승률 100%, 평균 +7.30% (이브이첨단소재+14%, 토마토시스템+0.4%)
-        # Lv3 진입: 승률 30%,  평균 -0.80% (OPENING 직후 정점 진입이 주원인)
-        # → OPENING(09:00~09:30)에서 Lv3 차단, 09:30 이후는 Lv2 이상 유지
-        _snap_lv = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
-        _trend_lv = int(getattr(_snap_lv, "trend_level", 0) or 0) if _snap_lv else 0
-
-        _is_opening = (_dt.strptime("09:00", "%H:%M").time()
-                       <= _now.time()
-                       < _dt.strptime("09:30", "%H:%M").time())
-
-        if _is_opening and _trend_lv == 3:
-            # OPENING Lv3 = 이미 강하게 오른 상태 = 정점 진입 위험
-            # 5/28 손절 7건 중 차백신·한성크린텍 등 OPENING Lv3가 대부분
-            logger.info(
-                "[진입거절] %s(%s) OPENING Lv3 차단 — 정점 진입 위험 (trend_lv=%d)",
-                sig.name, sig.code, _trend_lv
-            )
-            self.signal_rejected.emit(f"{sig.code}: OPENING Lv3 차단")
-            self._record_signal(sig)
-            return False
-
-        if _now.time() >= _dt.strptime("09:30", "%H:%M").time():
-            if _trend_lv < 2:
-                logger.info(
-                    "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
-                    sig.name, sig.code, _trend_lv
-                )
-                self.signal_rejected.emit(f"{sig.code}: 약한신호 (trend_lv={_trend_lv})")
-                self._record_signal(sig)
-                return False
-
-        # [FIX 2026-06-01] 해당 종목 시장의 지수가 약세이면 PULLBACK 차단
-        # 근거: PULLBACK은 EMA20 지지 전제 — 지수 약세 시 EMA20 자체가 하락 → 지지선이 저항으로 작동
-        # 코스닥 종목 → KOSDAQ 기준 / 코스피 종목 → KOSPI 기준 (시장별로 분리 적용)
-        # [2026-06-02] PULLBACK 지수 약세 차단 — 기본 비활성화
-        # 근거: 오늘 KOSPI -2%에도 아남전자+10%·네이처셀+13%·나무기술+7% 상승
-        # 지수와 무관하게 개별 종목 추세(trend_lv)·호가압력으로 판단하는 게 더 정확
-        if sig.signal_type == "PULLBACK" and getattr(self._scan_cfg, "pullback_index_filter_enabled", False):
-            _snap_for_mkt = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
-            _market = getattr(_snap_for_mkt, "market_type", "") if _snap_for_mkt else ""
-            _is_kosdaq = (_market == "10")
-            _limit = float(getattr(self._scan_cfg,
-                                   "pullback_kosdaq_min_pct" if _is_kosdaq else "pullback_kospi_min_pct",
-                                   -2.5))
-            _idx_pct = (
-                float(getattr(self, "_kosdaq_chg_pct", 0.0)) if _market == "10"
-                else float(getattr(self, "_kospi_chg_pct", 0.0)) if _market == "0"
-                else min(float(getattr(self, "_kospi_chg_pct", 0.0)),
-                         float(getattr(self, "_kosdaq_chg_pct", 0.0)))
-            )
-            if _idx_pct < _limit:
-                logger.info(
-                    "[진입거절] %s(%s) 지수 약세 PULLBACK 차단 — 시장=%s 등락=%.2f%% (기준 %.1f%%)",
-                    sig.name, sig.code, _market or "?", _idx_pct, _limit
-                )
-                self.signal_rejected.emit(
-                    f"{sig.code}: 지수약세({_idx_pct:.1f}%) PULLBACK차단")
-                self._record_signal(sig)
-                return False
-
-        # Phase1 태깅 및 한도 체크
-        if sig.signal_type == "OPENING_SCALP":
-            sig.entry_phase = 1
-            _ph1_max = int(getattr(self._scan_cfg, "phase1_max_positions", 3))
-            _ph1_count = sum(
-                1 for p in self._order_mgr.positions.values()
-                if getattr(p, "entry_phase", 0) == 1
-            )
-            if _ph1_count >= _ph1_max:
-                self.signal_rejected.emit(
-                    f"{sig.code}: Phase1 한도 — {_ph1_count}/{_ph1_max}"
-                )
-                self._record_signal(sig)
-                return False
-        else:
-            sig.entry_phase = 2
-
-        # 자동매매 자동 시작: 첫 신호 발생 시, 아직 활성화 안 됐고 급락 OFF 상태면
+        # 첫 신호 자동매매 시작 트리거
+        _now = datetime.now()
         if not self._auto_trading and not self._market_crash_off and not self._first_signal_received:
             self._first_signal_received = True
             self.auto_trade_started.emit()
             logger.info("[TradingController] 첫 신호 발생 — 자동매매 자동 시작 요청")
 
-        # 자동매매 OFF 상태 → 주문 처리 차단 (신호 기록은 계속)
+        # 자동매매 OFF → 차단 (신호 기록은 계속)
         if not self._auto_trading:
             self._record_signal(sig)
             return False
 
-        passed, reason = self._strategy.should_entry(sig, self._auto_trading)
+        # ── SignalFilterChain 실행 ────────────────────────────────────────────
+        from app.signal_filter import SignalFilterContext
+        ctx = SignalFilterContext(
+            order_mgr=self._order_mgr,
+            snap_store=self._snap_store,
+            trading_cfg=self._scan_cfg,
+            risk_mgr=self._risk_mgr,
+            app_state=self._ctx,
+            kiwoom=self._kiwoom,
+            news_analyzer=self._news_analyzer,
+            now=_now,
+            opening_entry_times=self._opening_entry_times,
+        )
+
+        passed, reason = self._filter_chain.validate(sig, ctx)
+
+        # OpeningTimeFilter가 ctx.opening_entry_times를 정리했을 수 있으므로 동기화
+        self._opening_entry_times = ctx.opening_entry_times
 
         if not passed:
-            msg = f"[진입거절] {sig.name}({sig.code}) {reason}"
-            logger.warning(msg)
-            self.log_message.emit(f"❌ {msg}")
+            logger.info("[진입거절] %s(%s) %s", sig.name, sig.code, reason)
+            self.log_message.emit(f"❌ [진입거절] {sig.name}({sig.code}) {reason}")
             self.signal_rejected.emit(f"{sig.code}: {reason}")
             self._record_signal(sig)
             return False
 
-        # ✅ [NEW 2026-05-26] 외인/기관 매매 동향 필터
-        # Phase 1: 데이터 없으면 즉시 갱신 (foreign=0 AND inst=0 인 경우)
-        # Phase 2: 외인+기관 둘 다 1,000주 이상 순매도면 진입 차단
-        # 주의: StockSnapshot은 foreign_net_buy, inst_net_buy 필드 사용 (inv_* 는 내부 state)
-        snap = self._snap_store.get_snapshot(sig.code) if self._snap_store else None
-        if snap:
-            foreign_net = int(getattr(snap, "foreign_net_buy", 0) or 0)
-            inst_net = int(getattr(snap, "inst_net_buy", 0) or 0)
-
-            # Phase 1: 수급 데이터가 없으면 10분 주기 워커(tick_investor_refresh)가 채움
-            # [FIX 2026-06-01] 신호 수신 시 즉시 TR 호출 완전 제거
-            # 배경: _tr_busy 체크로도 부족 — balance TIMEOUT 직후 _tr_busy=False이면 호출됨
-            #       포스코DX 09:28:00 신호 후 멈춤이 이 경로 (balance TIMEOUT→False→investor TR)
-            # 수급 데이터 없으면 그냥 통과 (false negative 방지 — 데이터 없을 때 차단 안 함)
-            if foreign_net == 0 and inst_net == 0:
-                logger.debug("[수급즉시갱신 스킵] %s — 10분 주기 워커에 위임", sig.code)
-
-            # Phase 2: 외인+기관 둘 다 1,000주 이상 순매도면 차단
-            # 안전장치: 둘 다 0이면 데이터 없음 → 통과 (false negative 방지)
-            INV_NET_SELL_THRESHOLD = -1000  # 1,000주 이상 순매도
-            if foreign_net != 0 or inst_net != 0:  # 데이터가 있을 때만
-                if foreign_net <= INV_NET_SELL_THRESHOLD and inst_net <= INV_NET_SELL_THRESHOLD:
-                    reject_msg = (
-                        f"[진입거절] {sig.name}({sig.code}) 수급악화 — "
-                        f"외인={foreign_net:+,} 기관={inst_net:+,} (둘 다 순매도)"
-                    )
-                    logger.info(reject_msg)  # INFO 레벨 (LogPanel 부하 방지)
-                    self.signal_rejected.emit(f"{sig.code}: 수급악화 (외인+기관 매도)")
-                    self._record_signal(sig)
-                    return False
-
-        # ✅ [NEW 2026-05-26] 뉴스 감정(호재/악재) 조회 — 매매 결정 가중치
-        # Phase 1: 캐시 조회 (즉시, 블로킹 없음). 결과 없으면 백그라운드 분석 시작.
-        # Phase 2: 가중치 적용은 아래 AI 필터 임계값 조정으로 처리.
-        news_sentiment = "NEUTRAL"
-        if self._news_analyzer is not None:
-            try:
-                cached = self._news_analyzer.get_cached_result(sig.code)
-                if cached is not None:
-                    news_sentiment = cached.sentiment  # POSITIVE | NEGATIVE | NEUTRAL
-                    logger.info(
-                        "[뉴스감정] %s(%s) %s — %s",
-                        sig.name, sig.code, news_sentiment,
-                        cached.headlines[0]["title"][:30] if cached.headlines else "헤드라인 없음"
-                    )
-                else:
-                    # 아직 분석 안 됨 → 백그라운드 분석 시작 (다음 신호부터 캐시 사용)
-                    self._news_analyzer.analyze(sig.code, sig.name)
-                    logger.debug("[뉴스분석요청] %s(%s)", sig.name, sig.code)
-            except Exception as e:
-                logger.warning("[뉴스감정조회실패] %s(%s): %s", sig.name, sig.code, e)
-
-        # ✅ AI 필터 검증 (필터 체인 마지막 단계)
-        if snap:
-            from analysis.feature_engineer import extract_ml_features
-            features = extract_ml_features(sig, snap, self._scan_cfg)
-
-            # AI 판정 실행 (설정된 임계값 사용)
-            ai_thr = float(getattr(self._scan_cfg, "ai_threshold", 0.5))
-
-            # [NEW 2026-05-26] 뉴스 감정에 따른 AI 임계값 가중치
-            # POSITIVE(호재): ÷1.15 (임계값 완화, 진입 기회 ↑)
-            # NEGATIVE(악재): ×1.20 (임계값 강화, 약한 신호 거절)
-            # NEUTRAL:        변화 없음
-            ai_thr_orig = ai_thr
-            if news_sentiment == "POSITIVE":
-                ai_thr = ai_thr / 1.15
-            elif news_sentiment == "NEGATIVE":
-                ai_thr = min(ai_thr * 1.20, 0.95)  # 상한 95%
-            if ai_thr != ai_thr_orig:
-                logger.info(
-                    "[뉴스가중] %s(%s) %s — AI 임계값 %.2f → %.2f",
-                    sig.name, sig.code, news_sentiment, ai_thr_orig, ai_thr
-                )
-
-            ai_passed, win_rate = self._ai_filter.should_enter(features, threshold=ai_thr)
-
-            msg = f"🤖 [AI분석] {sig.name}({sig.code}) 예상승률 {win_rate*100:.1f}%"
-            if not ai_passed:
-                reject_msg = f"[진입거절] {sig.name}({sig.code}) AI필터 거절 (예상승률 {win_rate*100:.1f}% < 기준 {ai_thr*100:.0f}%, 뉴스:{news_sentiment})"
-                logger.warning(reject_msg)
-                self.log_message.emit(f"❌ {reject_msg}")
-                self.signal_rejected.emit(f"{sig.code}: AI 거절 ({win_rate*100:.0f}%)")
-                return False
-
-            # 승인 시 로그 (모델이 준비된 경우만)
-            if self._ai_filter.is_ready:
-                self.log_message.emit(f"{msg} → 진입 승인 (기준 {ai_thr*100:.0f}%, 뉴스:{news_sentiment})")
-
-        # ✅ RS 필터 검증 (지수 대비 강도)
-        if snap and features:
-            # f_rs_score는 정규화 피처 (0~1 범위)로 저장됨
-            # snap.rs_score는 실제 RS 점수 (Stock% - Index%)로 조회
-            rs_score = snap.rs_score
-            rs_thr = float(getattr(self._scan_cfg, "rs_threshold", 0.0))
-            if rs_score < rs_thr:
-                reject_msg = f"[진입거절] {sig.name}({sig.code}) RS필터 거절 (RS={rs_score:.2f} < 기준 {rs_thr:.2f})"
-                logger.warning(reject_msg)
-                self.log_message.emit(f"❌ {reject_msg}")
-                self.signal_rejected.emit(f"{sig.code}: RS 필터 거절 ({rs_score:.2f})")
-                return False
-            else:
-                if getattr(self._scan_cfg, "exploration_mode", False):
-                    self.log_message.emit(f"📈 [RS필터] {sig.name} RS={rs_score:.2f} (기준 {rs_thr:.2f}) → 데이터 수집 통과")
-                else:
-                    self.log_message.emit(f"📈 [RS필터] {sig.name} RS={rs_score:.2f} (지수 대비 강세) → 통과")
-
-        # ✅ 모든 필터 통과 → 진입 신호 전송
+        # ── 모든 필터 통과 → 주문 실행 ──────────────────────────────────────
         self._order_mgr.handle_signal(sig)
         self._record_signal(sig)
 
-        # [P0-1 2026-05-21 / 확대 2026-05-22] 개장 1시간 내 진입 시각 기록
-        from datetime import datetime as _dt2
-        _now2 = _dt2.now()
-        if _dt2.strptime("09:00", "%H:%M").time() <= _now2.time() <= _dt2.strptime("10:00", "%H:%M").time():
-            self._opening_entry_times.append(_now2)
+        # 개장 1시간(09:00~10:00) 진입 시각 기록 — 다음 신호의 OpeningTimeFilter에서 사용
+        if datetime.strptime("09:00", "%H:%M").time() <= _now.time() <= datetime.strptime("10:00", "%H:%M").time():
+            self._opening_entry_times.append(_now)
 
         return True
 

@@ -137,25 +137,39 @@ class OpeningTimeFilter(SignalFilter):
 
 
 class WeakSignalFilter(SignalFilter):
-    """약한신호(trend_level<2) 차단 — 09:30 이후만 적용"""
+    """추세 레벨 기반 시간대별 진입 차단
+
+    - OPENING(09:00~09:30): Lv3 차단 — 갭상승 직후 정점 진입 위험
+    - 09:30 이후: Lv < 2 차단 — 약세 신호 진입 금지
+    """
 
     def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
         now = ctx.now or datetime.now()
 
-        threshold_time = datetime.strptime("09:30", "%H:%M").time()
-        if now.time() < threshold_time:
-            return True, ""
-
-        # 스냅샷에서 추세 레벨 확인
         snap = ctx.snap_store.get_snapshot(sig.code) if ctx.snap_store else None
         trend_lv = int(getattr(snap, "trend_level", 0) or 0) if snap else 0
 
-        if trend_lv < 2:
-            logger.info(
-                "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
-                sig.name, sig.code, trend_lv
-            )
-            return False, f"{sig.code}: 약한신호 (trend_lv={trend_lv})"
+        opening_start = datetime.strptime("09:00", "%H:%M").time()
+        opening_end   = datetime.strptime("09:30", "%H:%M").time()
+
+        # OPENING 구간: Lv3(극강 상승) = 이미 정점 가능성 → 차단
+        if opening_start <= now.time() < opening_end:
+            if trend_lv == 3:
+                logger.info(
+                    "[진입거절] %s(%s) OPENING Lv3 차단 — 정점 진입 위험",
+                    sig.name, sig.code,
+                )
+                return False, f"{sig.code}: OPENING Lv3 차단"
+            return True, ""
+
+        # 09:30 이후: Lv < 2 차단
+        if now.time() >= opening_end:
+            if trend_lv < 2:
+                logger.info(
+                    "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
+                    sig.name, sig.code, trend_lv,
+                )
+                return False, f"{sig.code}: 약한신호 (trend_lv={trend_lv})"
 
         return True, ""
 
