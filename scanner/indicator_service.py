@@ -218,20 +218,29 @@ class IndicatorService:
         """
         복합 선행 점수 (0.0~1.0) — 우상향 가능성 예측.
 
-        4가지 신호 가중합:
-          체결강도 반등  35% — 매수세 첫 점화
-          거래량 축적    30% — 스마트머니 선매수
-          호가 압력      20% — 실시간 매수 우위
-          외인+기관 전환 15% — 기관 방향 전환 (최강 신호, 30분 감쇠)
+        [방향 원칙]
+        "지금 막 매수세가 불붙고 있는가"를 확인.
+        단순히 지표가 높은 것(후행)이 아니라 변화가 일어나고 있는 것(선행)을 요구.
+
+        PRIMARY 조건 (하나 이상 필수):
+          체결강도 반등 ≥ 0.15  — 조용하다가 갑자기 매수 활성화
+          기관/외인 전환 ≥ 0.50  — 기관이 방향을 바꿔 매수 시작
+
+        PRIMARY 없으면 0.0 반환 → 진입 차단.
+
+        가중합 (PRIMARY 통과 후):
+          체결강도 반등  50% — 핵심 선행 신호 (비중 ↑)
+          거래량 축적    20% — 스마트머니 매집 징조
+          호가 압력      15% — 실시간 매수 우위
+          외인+기관 전환 15% — 기관 방향 전환
 
         데이터 부족 시 None 반환 → 호출처에서 체크 생략.
-        기준값: 0.20 이상이면 진입 허용.
-        외인+기관 flip 단독 감지 시 0.15 → 임계값 통과.
         """
         hist = list(getattr(snap, 'chejan_history', None) or [])
         vols = list(getattr(snap, 'volumes_1min',  None) or [])
         if len(hist) < 8 or len(vols) < 11:
             return None  # 데이터 부족 → 체크 생략
+
         cr = IndicatorService.calc_chejan_reversal_score(hist)
         ac = IndicatorService.calc_accumulation_score(
             vols, list(getattr(snap, 'closes_1min', None) or []))
@@ -240,7 +249,14 @@ class IndicatorService:
             int(getattr(snap, 'total_bid_qty', 0) or 0),
         )
         iv = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
-        return cr * 0.35 + ac * 0.30 + hp * 0.20 + iv * 0.15
+
+        # PRIMARY 조건: "변화"가 없으면 0점 → 진입 차단
+        # 체결강도가 반등하거나, 기관이 방향을 바꿨을 때만 의미 있는 점수
+        primary_ok = (cr >= 0.15) or (iv >= 0.50)
+        if not primary_ok:
+            return 0.0
+
+        return cr * 0.50 + ac * 0.20 + hp * 0.15 + iv * 0.15
 
     @staticmethod
     def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:
