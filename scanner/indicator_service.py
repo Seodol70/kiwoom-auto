@@ -201,23 +201,23 @@ class IndicatorService:
         return 0.0
 
     @staticmethod
-    def calc_hoga_velocity(bid_qtys: list[int] | None) -> float:
+    def calc_hoga_velocity(bid_qty_sums_history: list[int] | None) -> float:
         """
         호가 매수 속도 점수 (0.0~1.0).
 
-        탐지: 1~5호가 매수잔량이 계속 증가하는가 (한 번의 변화가 아니라 추세).
-        최근 5호가의 합 > 이전 5호가의 합 → 매수 잔량 증가 추세.
+        탐지: 1~5호가 매수잔량 합계가 지속적으로 증가하는가 (10스냅 이상 이력 필요).
+        최근 5스냅 평균 > 이전 5스냅 평균 → 매수 잔량 증가 추세.
         """
-        if bid_qtys is None or len(bid_qtys) < 10:
+        if bid_qty_sums_history is None or len(bid_qty_sums_history) < 10:
             return 0.0
 
-        recent_sum = sum(bid_qtys[-5:]) if len(bid_qtys) >= 5 else sum(bid_qtys)
-        prior_sum  = sum(bid_qtys[-10:-5]) if len(bid_qtys) >= 10 else 1
+        recent_avg = sum(bid_qty_sums_history[-5:]) / 5  # 최근 5스냅
+        prior_avg  = sum(bid_qty_sums_history[-10:-5]) / 5  # 이전 5스냅
 
-        if prior_sum <= 0:
+        if prior_avg <= 0:
             return 0.0
 
-        velocity_ratio = recent_sum / prior_sum
+        velocity_ratio = recent_avg / prior_avg
         if velocity_ratio > 1.1:  # 10% 이상 증가
             return min((velocity_ratio - 1.0) * 2.0, 1.0)
         return 0.0
@@ -287,7 +287,6 @@ class IndicatorService:
         """
         hist = list(getattr(snap, 'chejan_history', None) or [])
         vols = list(getattr(snap, 'volumes_1min',  None) or [])
-        bid_qtys = list(getattr(snap, 'bid_qtys', None) or [])
         if len(hist) < 8 or len(vols) < 11:
             return None  # 데이터 부족 → 체크 생략
 
@@ -299,7 +298,8 @@ class IndicatorService:
             int(getattr(snap, 'total_ask_qty', 0) or 0),
             int(getattr(snap, 'total_bid_qty', 0) or 0),
         )
-        hv = IndicatorService.calc_hoga_velocity(bid_qtys if bid_qtys else None)
+        bid_qty_sums_hist = list(getattr(snap, 'bid_qty_sums_history', None) or [])
+        hv = IndicatorService.calc_hoga_velocity(bid_qty_sums_hist if bid_qty_sums_hist else None)
         iv = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
 
         # PRIMARY 조건: 더 강한 반등이거나 기관 전환이 있을 때만
