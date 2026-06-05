@@ -56,7 +56,7 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         return None
 
     # [방향 A 2026-06-01] 최근 상승도 차단 — 체결강도 연동 허용 범위 확대
-    # 체결강도 900%+ = 강한 매수세가 실려있으면 뒤늦은 게 아님 → 허용 범위 확대
+    # [2026-06-05] 선행점수 >= 0.30이면 면제 — 지수 역행 급등 종목은 진짜 강세
     _c1min = [c for c in snap.closes_1min if c > 0]
     if len(_c1min) >= 6 and _c1min[-2] > 0 and _c1min[-6] > 0:
         recent_1min_chg = (_c1min[-1] - _c1min[-2]) / _c1min[-2] * 100
@@ -65,22 +65,27 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         recent_1min_max = float(getattr(cfg, "recent_candle_max_1min_pct", 2.0))
         recent_5min_max = float(getattr(cfg, "recent_candle_max_5min_pct", 5.0))
 
-        # 체결강도 900% 이상이면 허용 범위 확대 (강한 매수세 = 진짜 에너지)
         _chejan_for_surge = float(snap.chejan_strength) if hasattr(snap, 'chejan_strength') else 0
         _surge_chejan_thr = float(getattr(cfg, "surge_chejan_bonus_threshold", 900.0))
         if _chejan_for_surge >= _surge_chejan_thr:
             recent_1min_max = float(getattr(cfg, "recent_candle_max_1min_pct_strong", 3.0))
-            recent_5min_max = float(getattr(cfg, "recent_candle_max_5min_pct_strong", 7.0))
+            recent_5min_max = float(getattr(cfg, "recent_candle_max_5min_pct_strong", 15.0))
 
-        if recent_1min_chg >= recent_1min_max:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
-                f"1분 급등 차단 — {recent_1min_chg:+.2f}% (상한 {recent_1min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%)")
-            return None
+        # 선행점수 >= 0.30이면 급등 차단 면제 — 호가/거래량/체결 선행 신호가 강하면 정점이 아닌 상승 지속 판단
+        _leading_for_surge = IndicatorService.get_leading_score(snap)
+        _leading_surge_exempt = float(getattr(cfg, "surge_exempt_leading_min", 0.30))
+        if _leading_for_surge is not None and _leading_for_surge >= _leading_surge_exempt:
+            pass  # 선행점수 충분 → RECENT_SURGE 면제, 이후 JDM_LEADING이 최종 판정
+        else:
+            if recent_1min_chg >= recent_1min_max:
+                ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
+                    f"1분 급등 차단 — {recent_1min_chg:+.2f}% (상한 {recent_1min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%, 선행={_leading_for_surge:.2f})")
+                return None
 
-        if recent_5min_chg >= recent_5min_max:
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
-                f"5분 급등 차단 — {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%)")
-            return None
+            if recent_5min_chg >= recent_5min_max:
+                ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
+                    f"5분 급등 차단 — {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%, 선행={_leading_for_surge:.2f})")
+                return None
 
     # ── 체결강도 가속도 (모멘텀 방향) 필터
     # 체결강도가 "지금 높다"는 것만으로는 부족 — 상승 중이어야 진입 타이밍
