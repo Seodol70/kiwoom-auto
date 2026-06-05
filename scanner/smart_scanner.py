@@ -1699,11 +1699,15 @@ class SmartScanner(QObject):
 
     def _ensure_candle_data(self, top_codes: list[str]) -> None:
         """부족한 분봉 데이터를 비동기적으로 로딩하도록 예약한다. (장초반 Turbo 모드 포함)"""
+        # opt10080이 서킷브레이커에 의해 차단 중이면 로딩 시도 자체를 건너뜀
+        if getattr(self._kiwoom, "is_tr_banned", lambda _: False)("opt10080"):
+            return
+
         from datetime import time as _time
         now_t = datetime.now().time()
         # [NEW] 장 초반(09:00~09:10) Turbo 모드 판정
         is_opening = _time(9, 0) <= now_t <= _time(9, 10)
-        
+
         min_bars = 55
         load_max = 6
         codes_need_all = [c for c in top_codes if self.store.get_candle_count(c) < min_bars]
@@ -1946,6 +1950,10 @@ class SmartScanner(QObject):
                     except Exception as _e:
                         logger.warning("[STEP-H async] 1분봉 캐시 저장 실패: %s", _e)
                 _threading.Thread(target=_save, daemon=True).start()
+            # 1분봉 체인 완료 후 60분봉 체인 시작 (500ms 딜레이로 TR 분리)
+            if getattr(self.cfg, "h1_trend_enabled", True):
+                logger.info("[STEP-H async] 60분봉 별도 체인 시작 (500ms 후)")
+                QTimer.singleShot(500, lambda: self._load_h1_candles_async(codes, 0))
             return
 
 
@@ -1987,24 +1995,43 @@ class SmartScanner(QObject):
         except Exception as e:
             logger.warning("[STEP-H async] %s 1분봉 로딩 실패: %s", code, e)
 
-        # [2026-06-02] 60분봉 로드 — 1분봉 직후 연속 호출 (350ms 후 자연스럽게 분리)
-        if getattr(self.cfg, "h1_trend_enabled", True):
-            try:
-                h1_candles = self._kiwoom.get_min_candles(code, 60, 20)  # 최근 20개 60분봉
-                h1_ohlc = [c for c in reversed(h1_candles) if c.get("close")]
-                if h1_ohlc:
-                    self.store.set_h1_candles(code, h1_ohlc)
-                    logger.debug("[STEP-H async] %s 60분봉 %d개 로딩 완료", code, len(h1_ohlc))
-            except Exception as e:
-                logger.debug("[STEP-H async] %s 60분봉 로딩 실패: %s", code, e)
-
-
         # 다음 종목을 비동기 처리
         from datetime import time as _time
         is_opening = _time(9, 0) <= datetime.now().time() <= _time(9, 10)
         interval = 250 if is_opening else 350  # 장초반 Turbo: 0.25초 (최소 간격)
         QTimer.singleShot(interval, lambda: self._load_candles_async(codes, idx + 1))
 
+
+    # ── 60분봉 초기 로딩 (1분봉 체인 완료 후 별도 체인으로 분리) ─────────────────
+
+    def _load_h1_candles_async(self, codes: list, idx: int) -> None:
+        """
+        60분봉 로딩을 1분봉 체인과 분리된 별도 QTimer 체인으로 처리한다.
+        1분봉 체인 완료 후 500ms 딜레이를 두고 시작하며, 종목당 600ms 간격으로 분산한다.
+        동일 TR(opt10080) 연속 호출로 인한 -200 에러를 방지한다.
+        """
+        if idx >= len(codes):
+            logger.info("[H1 async] 60분봉 로딩 완료 — 총 %d종목", len(codes))
+            return
+
+        if not getattr(self.cfg, "h1_trend_enabled", True):
+            return
+
+        if getattr(self._kiwoom, "_tr_busy", False):
+            QTimer.singleShot(400, lambda: self._load_h1_candles_async(codes, idx))
+            return
+
+        code = codes[idx]
+        try:
+            h1_candles = self._kiwoom.get_min_candles(code, 60, 20)
+            h1_ohlc = [c for c in reversed(h1_candles) if c.get("close")]
+            if h1_ohlc:
+                self.store.set_h1_candles(code, h1_ohlc)
+                logger.debug("[H1 async] %s 60분봉 %d개 로딩 완료", code, len(h1_ohlc))
+        except Exception as e:
+            logger.debug("[H1 async] %s 60분봉 로딩 실패: %s", code, e)
+
+        QTimer.singleShot(600, lambda: self._load_h1_candles_async(codes, idx + 1))
 
     # ── 수급 필터: opt10059 10분 주기 갱신 ────────────────────────────────────
 

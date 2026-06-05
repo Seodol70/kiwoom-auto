@@ -71,7 +71,6 @@ class OverheatPullbackStrategy(BaseStrategy):
         # 실제 일봉으로 정확한 추세의 뼈대 검증 (이전: 1분봉 근사로 약했던 부분 강화)
         daily_ctx = {}
         if hasattr(snap, "daily_closes") and len(snap.daily_closes) >= 23:
-            from scanner.indicator_service import IndicatorService
             daily_ctx = IndicatorService.get_daily_context(
                 snap.daily_closes, snap.current_price
             )
