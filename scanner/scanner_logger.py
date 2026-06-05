@@ -129,6 +129,8 @@ class ScannerLogger:
         row.update(values)
 
         with cls._batch_lock:
+            if filename not in cls._write_buffers:
+                cls._write_buffers[filename] = []
             cls._write_buffers[filename].append(row)
             total = sum(len(v) for v in cls._write_buffers.values())
             if total >= cls._batch_size_limit:

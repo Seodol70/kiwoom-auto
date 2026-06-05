@@ -505,7 +505,7 @@ class TradingController(QObject):
                 # 대한전선 3회 반복 진입 원인: EMA20이탈/추세소멸로 청산 시
                 # mark_stop_loss 미호출 → 냉각 없이 즉시 재진입 가능
                 _is_loss_exit = (
-                    any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑"])
+                    any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑", "Distribution"])
                     or ("EMA20이탈" in reason and pos.price_change_pct_vs_avg < 0)
                     or ("추세소멸" in reason and pos.price_change_pct_vs_avg < 0)
                     or ("Time Cut" in reason and pos.price_change_pct_vs_avg < 0)

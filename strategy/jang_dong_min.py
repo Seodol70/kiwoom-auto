@@ -462,20 +462,27 @@ class JangDongMinStrategy(BaseStrategy):
         snap = self._snap_store.get_snapshot(pos.code) if self._snap_store else None
         if not snap or not snap.volumes_1min or len(snap.volumes_1min) < 2:
             return False
-            
+
+        # 진입 후 최소 3분은 보호 — 진입 직후 1분봉 노이즈로 즉시 청산되는 문제 방지
+        entry_time = getattr(pos, "entry_time", None)
+        if entry_time:
+            elapsed_sec = (datetime.now() - entry_time).total_seconds()
+            if elapsed_sec < 180:
+                return False
+
         # 현재가가 직전가 대비 하락 (음봉 기조)
         price_drop = pos.current_price < snap.closes_1min[-1]
-        
+
         # 거래량 평소보다 2.5배 이상 (세력 이탈 의심)
         avg_vol = np.mean(snap.volumes_1min[-21:-1]) if len(snap.volumes_1min) >= 21 else snap.volumes_1min[0]
         cur_vol = snap.volumes_1min[-1]
         is_high_vol = cur_vol >= avg_vol * 2.5
-        
+
         # 수익권이 아닐 때 거래량 실린 하락은 위험 신호
         # 수익권일 때는 트레일 스탑이 있으므로 조금 더 여유를 줌
         if float(pos.price_change_pct_vs_avg) < 0 and price_drop and is_high_vol:
             return True
-            
+
         return False
 
 # 기술지표 계산은 이제 scanner.indicator_service.IndicatorService 를 사용합니다.
