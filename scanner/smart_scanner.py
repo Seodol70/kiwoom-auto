@@ -915,14 +915,7 @@ class SmartScanner(QObject):
 
 
     def _emit(self, sig: ScanSignal) -> None:
-        # [CLEANUP 2026-05-27] WARNING → INFO 격하
-        # — 5/11 진단용 WARNING이었음. WARNING은 UI LogPanel에서 강조 처리되어 부하 큼.
-        # — 09:36:00 같은 동시 다발 신호 시 WARNING 폭주로 UI 멈춤 재발 (2026-05-27 09:36:00)
-        # — [신호수신] / [진입거절] 등 후속 INFO로 충분히 추적 가능
-        logger.info("[신호발생] %s(%s) [%s] 가격=%d 사유=%s",
-                    sig.name, sig.code, sig.signal_type, int(sig.price), sig.reason)
-
-        # 동일 종목/신호 재발행 쿨다운
+        # 동일 종목/신호 재발행 쿨다운 — 로그 전에 체크 (로그 노이즈 방지)
         now_ts = time.monotonic()
         cooldown = float(getattr(self.cfg, "signal_cooldown_sec", 0.0) or 0.0)
         key = (sig.code, sig.signal_type)
@@ -934,6 +927,9 @@ class SmartScanner(QObject):
             )
             return
         self._last_signal_ts[key] = now_ts
+
+        logger.info("[신호발생] %s(%s) [%s] 가격=%d 사유=%s",
+                    sig.name, sig.code, sig.signal_type, int(sig.price), sig.reason)
 
         # [NEW] SQLite DB에 신호 및 AI 피처 저장 (비동기 처리로 UI 프리징 방지)
         try:

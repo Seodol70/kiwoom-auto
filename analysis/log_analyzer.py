@@ -256,6 +256,124 @@ class LogAnalyzer:
 
     # ── 텔레그램 리포트 포맷 ─────────────────────────────────────────────────
 
+    def analyze_leading_indicators(self, target_date: date) -> Optional[str]:
+        """
+        scanner_signal.csv + position.log를 매칭해 선행지표별 승률 요약 문자열을 반환.
+        데이터 부족 시 None 반환.
+        """
+        from datetime import datetime, timedelta
+        import re as _re
+        from collections import defaultdict as _defaultdict
+
+        LEADING_COLS = ["li_bs", "li_vb", "li_cr", "li_ca", "li_hp", "li_hv", "li_leading"]
+        THRESHOLDS = {"li_bs": 0.30, "li_vb": 0.40, "li_cr": 0.25,
+                      "li_ca": 0.20, "li_hp": 0.50, "li_hv": 0.30, "li_leading": 0.10}
+        LABELS = {"li_bs": "매수1호가↑", "li_vb": "거래량폭발", "li_cr": "체결반등",
+                  "li_ca": "체결가속",  "li_hp": "호가압력",  "li_hv": "호가속도",
+                  "li_leading": "선행합산"}
+
+        date_str = target_date.strftime("%Y-%m-%d")
+        since = datetime.strptime(date_str, "%Y-%m-%d")
+        until = since + timedelta(days=1)
+
+        # 1) position.log 파싱
+        trades_map: dict = _defaultdict(list)
+        pending: dict = {}
+        entry_pat = _re.compile(
+            r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*\[포지션생성\].*?\((\w+)\).*체결가=(\d+)")
+        exit_pat = _re.compile(
+            r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*\[포지션청산\].*?\((\w+)\).*손익=([+-]?\d+\.?\d*%?)")
+
+        pos_log = self.log_dir / "position.log"
+        try:
+            for line in pos_log.read_text(encoding="utf-8", errors="replace").splitlines():
+                m = entry_pat.search(line)
+                if m:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    if since <= ts < until:
+                        pending[m.group(2)] = ts  # group(2) = code
+                    continue
+                m = exit_pat.search(line)
+                if m:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                    code, pnl_str = m.group(2), m.group(3)  # group(2)=code, group(3)=손익
+                    if code in pending:
+                        trades_map[code].append({
+                            "entry_time": pending.pop(code),
+                            "pnl_pct": float(pnl_str.replace("%", "")),
+                        })
+        except FileNotFoundError:
+            pass
+
+        # 2) scanner_signal.csv 파싱 (날짜별 파일 우선, fallback: 통합 파일)
+        signals = []
+        dated_csv = self.log_dir / f"scanner_signal_{target_date.strftime('%Y%m%d')}.csv"
+        sig_csv = dated_csv if dated_csv.exists() else self.log_dir / "scanner_signal.csv"
+        try:
+            with open(sig_csv, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if not any(col in row for col in LEADING_COLS):
+                        continue
+                    ts_str = row.get("timestamp", "")
+                    try:
+                        ts = datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
+                    if since <= ts < until:
+                        signals.append(row)
+        except FileNotFoundError:
+            pass
+
+        if not signals:
+            return None
+
+        # 3) 매칭
+        matched = []
+        for sig in signals:
+            code = sig.get("code", "")
+            try:
+                sig_ts = datetime.fromisoformat(sig.get("timestamp", ""))
+            except ValueError:
+                continue
+            best = None
+            best_gap = timedelta(minutes=5)
+            for trade in trades_map.get(code, []):
+                gap = abs(trade["entry_time"] - sig_ts)
+                if gap < best_gap:
+                    best_gap, best = gap, trade
+            if best is None:
+                continue
+            row = {"pnl_pct": best["pnl_pct"]}
+            for col in LEADING_COLS:
+                try:
+                    row[col] = float(sig.get(col, 0) or 0)
+                except (ValueError, TypeError):
+                    row[col] = 0.0
+            matched.append(row)
+
+        if not matched:
+            return None
+
+        total = len(matched)
+        wins  = sum(1 for r in matched if r["pnl_pct"] > 0)
+        avg   = sum(r["pnl_pct"] for r in matched) / total
+
+        lines = [f"🔬 선행지표 효과 ({total}건 매칭, 승률 {wins*100//total}%, 평균 {avg:+.2f}%)"]
+        for col in ["li_bs", "li_vb", "li_cr", "li_hp", "li_leading"]:
+            thr = THRESHOLDS[col]
+            strong = [r for r in matched if r[col] >= thr]
+            if not strong:
+                continue
+            n = len(strong)
+            w = sum(1 for r in strong if r["pnl_pct"] > 0)
+            a = sum(r["pnl_pct"] for r in strong) / n
+            diff = (w * 100 // n) - (wins * 100 // total)
+            arrow = "▲" if diff > 0 else ("▼" if diff < 0 else "─")
+            lines.append(f"  {LABELS[col]}≥{thr}: {n}건 {w*100//n}%{arrow} {a:+.2f}%")
+
+        return "\n".join(lines)
+
     def format_telegram_report(
         self,
         scanner:              ScannerLogStats,
@@ -316,6 +434,12 @@ class LogAnalyzer:
             for step, cnt in top_steps:
                 pct = int(cnt * 100 / scanner.total_fail) if scanner.total_fail else 0
                 lines.append(f"   {step}: {cnt:,}건 ({pct}%)")
+            lines.append("")
+
+        # ── 선행지표 효과
+        leading_section = self.analyze_leading_indicators(d)
+        if leading_section:
+            lines.append(leading_section)
             lines.append("")
 
         # ── 파라미터 조정

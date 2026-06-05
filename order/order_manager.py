@@ -1170,13 +1170,6 @@ class OrderManager(QObject):
             self.order_failed.emit(msg)
             return False
 
-        # 0-2) 시장 급락 확인 — AppState의 crash 플래그
-        if self.state and self.state._is_crash:
-            msg = f"매수 차단 — 지수 급락 감지 (시장 급락 상태)"
-            logger.warning(msg)
-            self.order_failed.emit(msg)
-            return False
-
         # 1) 이름 키워드 차단
         if not is_pure_equity_name(name):
             msg = f"매수 차단 — ETF/ETN/파생 종목 ({name} {code})"

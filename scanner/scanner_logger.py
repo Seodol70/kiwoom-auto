@@ -175,11 +175,11 @@ class ScannerLogger:
 
     @staticmethod
     def signal(sig) -> None:
-        """최종 신호 기록."""
+        """최종 신호 기록 — 날짜별 파일로 저장하여 컬럼 변경 시 헤더 충돌 방지."""
         reason = f"[{sig.signal_type}] {sig.reason}"
-        # Handler 형식: "PASS/FAIL\tcode\tname\tstep\treason" (신호는 PASS 취급)
         scan_log.warning("PASS\t%s\t%s\tSIGNAL\t%s", sig.code, sig.name, reason)
-        ScannerLogger._buffer_csv("scanner_signal.csv", sig.code, sig.name, reason, sig.values or {})
+        today = datetime.now().strftime("%Y%m%d")
+        ScannerLogger._buffer_csv(f"scanner_signal_{today}.csv", sig.code, sig.name, reason, sig.values or {})
 
     @staticmethod
     def near_miss(

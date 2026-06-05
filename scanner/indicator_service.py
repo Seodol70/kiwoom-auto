@@ -228,22 +228,19 @@ class IndicatorService:
         """
         거래량 폭증 가속도 점수 (0.0~1.0) — 선행 지표.
 
-        탐지: 직전 3분이 조용하다가 최근 2분에 거래량이 갑자기 3배↑ 폭증.
-        이미 오래 폭증 중인 종목은 점수 0 (이미 늦음) — 반드시 '막 터지는' 시점만.
+        탐지: 최근 2분 평균이 직전 3분 평균 대비 2배↑ 이상 가속.
+        "조용함" 조건 제거 — 이미 활성 종목도 갑자기 더 터지면 포착.
+        2.0배=0.5점, 4.0배=1.0점.
         """
-        if len(volumes) < 8:
+        if len(volumes) < 5:
             return 0.0
         recent_2 = sum(volumes[-2:]) / 2
         prior_3  = sum(volumes[-5:-2]) / 3
-        older_3  = sum(volumes[-8:-5]) / 3
-        if prior_3 <= 0 or older_3 <= 0:
+        if prior_3 <= 0:
             return 0.0
-        # 직전 3분은 조용해야 함 (전전 대비 1.5배 미만)
-        was_quiet = (prior_3 / older_3) < 1.5
-        # 최근 2분이 직전 3분 대비 3배↑
         burst_ratio = recent_2 / prior_3
-        if was_quiet and burst_ratio >= 3.0:
-            return min((burst_ratio - 3.0) / 4.0 + 0.5, 1.0)
+        if burst_ratio >= 2.0:
+            return min((burst_ratio - 2.0) / 2.0 + 0.5, 1.0)
         return 0.0
 
     @staticmethod
@@ -266,6 +263,24 @@ class IndicatorService:
             vol_score   = min((vol_surge - 2.0) / 3.0, 1.0)
             price_score = 1.0 - min(price_chg / 1.5, 1.0)
             return (vol_score + price_score) / 2.0
+        return 0.0
+
+    @staticmethod
+    def calc_bid1_slope_score(bid1_history: list) -> float:
+        """
+        매수1호가 우상향 기울기 점수 (0.0~1.0) — 선행 지표.
+
+        탐지: 최근 5틱 동안 매수1호가가 지속적으로 올라가는가.
+        살 사람이 점점 더 높은 가격을 제시 = 가장 강한 수요 선행 신호.
+        +0.05% 이상부터 점수 발생, +0.30% 이상이면 1.0.
+        """
+        h = [p for p in list(bid1_history) if p > 0]
+        if len(h) < 5:
+            return 0.0
+        h = h[-5:]
+        slope_pct = (h[-1] - h[0]) / h[0] * 100
+        if slope_pct >= 0.05:
+            return min((slope_pct - 0.05) / 0.25, 1.0)
         return 0.0
 
     @staticmethod
@@ -295,19 +310,22 @@ class IndicatorService:
         조용하다가 갑자기 터지는 변화의 초입을 잡는다(선행).
 
         PRIMARY 조건 (하나 이상 필수):
-          거래량 폭발 ≥ 0.50  — 직전 3분 조용 → 최근 2분 3배↑ 폭발 (가장 선행)
-          체결강도 반등 ≥ 0.25 — 체결강도 바닥→110%+ 반등
-          기관/외인 전환 ≥ 0.50 — 기관 방향 전환
+          매수1호가 우상향 ≥ 0.30 — 살 사람이 점점 더 높은 가격 제시 (가장 직접적 선행)
+          거래량 폭발 ≥ 0.50      — 직전 3분 조용 → 최근 2분 3배↑ 폭발
+          체결강도 반등 ≥ 0.25   — 체결강도 바닥→110%+ 반등 (매수세 점화)
+          기관/외인 전환 ≥ 0.50  — 기관 방향 전환
+          호가 압력 ≥ 0.70       — 매수잔량이 매도잔량을 크게 압도
 
         PRIMARY 없으면 0.0 반환 → 진입 차단.
 
         가중합 (PRIMARY 통과 후):
-          거래량 폭발       35% — 가장 선행하는 신호 (신규 추가)
-          체결강도 반등     25% — 매수세 점화 확인
-          체결강도 가속도   15% — 반등 후 계속 강해지는가
-          호가 압력         10% — 실시간 매수 우위
-          호가 속도         10% — 매수잔량 증가 추세
-          거래량 축적        5% — 스마트머니 매집 (보조)
+          매수1호가 기울기   30% — 수요자가 직접 가격 올려가며 사는 신호 (신규)
+          거래량 폭발       25% — 거래량 폭발 직전 포착
+          체결강도 반등     20% — 매수세 점화 확인
+          체결강도 가속도   10% — 반등 후 계속 강해지는가
+          호가 압력          8% — 실시간 매수 우위
+          호가 속도          5% — 매수잔량 증가 추세
+          거래량 축적        2% — 스마트머니 매집 (보조)
 
         데이터 부족 시 None 반환 → 호출처에서 체크 생략.
         """
@@ -328,17 +346,16 @@ class IndicatorService:
         bid_qty_sums_hist = list(getattr(snap, 'bid_qty_sums_history', None) or [])
         hv  = IndicatorService.calc_hoga_velocity(bid_qty_sums_hist if bid_qty_sums_hist else None)
         iv  = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
+        bs  = IndicatorService.calc_bid1_slope_score(
+            list(getattr(snap, 'bid1_history', None) or []))
 
         # PRIMARY 조건: "막 불붙기 시작"하는 신호 중 하나 이상 필수
-        # vb >= 0.50: 거래량 직전 3분 조용 → 최근 2분 3배↑ 폭발 (가장 선행)
-        # cr >= 0.25: 체결강도 바닥→110%+ 반등 (매수세 점화)
-        # iv >= 0.50: 기관/외인 방향 전환
-        primary_ok = (vb >= 0.50) or (cr >= 0.25) or (iv >= 0.50)
+        primary_ok = (bs >= 0.30) or (vb >= 0.40) or (cr >= 0.25) or (iv >= 0.50) or (hp >= 0.50)
         if not primary_ok:
             return 0.0
 
-        # 가중합: 거래량 폭발을 최우선, 체결강도 가속도로 확인
-        return (vb * 0.35 + cr * 0.25 + ca * 0.15 + hp * 0.10 + hv * 0.10 + ac * 0.05 + iv * 0.00)
+        # 가중합: 매수1호가 우상향을 최우선, 거래량 폭발로 확인
+        return (bs * 0.30 + vb * 0.25 + cr * 0.20 + ca * 0.10 + hp * 0.08 + hv * 0.05 + ac * 0.02 + iv * 0.00)
 
     @staticmethod
     def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:

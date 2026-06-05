@@ -37,6 +37,22 @@ class JdmStrategy(BaseStrategy):
         # AI 피처 추출 (학습용 데이터 수집)
         ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
 
+        # 선행지표 원시값 기록 — B안: 진입 시점 선행지표 vs 청산 수익률 추적용
+        ai_features["li_bs"] = round(IndicatorService.calc_bid1_slope_score(
+            list(getattr(snap, "bid1_history", None) or [])), 3)
+        ai_features["li_vb"] = round(IndicatorService.calc_vol_burst_score(
+            list(getattr(snap, "volumes_1min", None) or [])), 3)
+        ai_features["li_cr"] = round(IndicatorService.calc_chejan_reversal_score(
+            list(getattr(snap, "chejan_history", None) or [])), 3)
+        ai_features["li_ca"] = round(IndicatorService.calc_chejan_acceleration(
+            list(getattr(snap, "chejan_history", None) or [])), 3)
+        ai_features["li_hp"] = round(IndicatorService.calc_hoga_pressure_score(
+            int(getattr(snap, "total_ask_qty", 0) or 0),
+            int(getattr(snap, "total_bid_qty", 0) or 0)), 3)
+        ai_features["li_hv"] = round(IndicatorService.calc_hoga_velocity(
+            list(getattr(snap, "bid_qty_sums_history", None) or []) or None), 3)
+        ai_features["li_leading"] = round(IndicatorService.get_leading_score(snap) or 0.0, 3)
+
         # 신호 생성
         is_warmup = "WARMUP" in reason
         entry_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0

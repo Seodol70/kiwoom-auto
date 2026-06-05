@@ -738,14 +738,9 @@ class TradingController(QObject):
             self._scan_cfg.kospi_chg_pct = self._kospi_chg_pct
             self._scan_cfg.kosdaq_chg_pct = self._kosdaq_chg_pct
 
-        # 급락 여부 판단 (기준: -3.0% — 2026-05-12: -2.0→-3.0, 학습 데이터 축적)
-        crash_limit = -3.0
-        is_crash = (self._kospi_chg_pct <= crash_limit or self._kosdaq_chg_pct <= crash_limit)
+        # 지수 급락 차단 비활성화 — 개별 종목 신호 기반 매매 (JDM 필터가 종목 선별)
+        is_crash = False
 
-        # 급락 감지 시 신호 발행 (이미 중지된 상태면 중복 발행 방지)
-        if is_crash and not self._market_crash_off:
-            self.market_crash_detected.emit(self._kospi_chg_pct, self._kosdaq_chg_pct)
-        
         # UI 업데이트 신호 발생
         self.market_data_updated.emit(
             self._kospi_cur, self._kospi_chg_pct,
