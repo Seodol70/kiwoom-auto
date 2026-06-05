@@ -57,9 +57,10 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
 
     # [방향 A 2026-06-01] 최근 상승도 차단 — 체결강도 연동 허용 범위 확대
     # 체결강도 900%+ = 강한 매수세가 실려있으면 뒤늦은 게 아님 → 허용 범위 확대
-    if len(snap.closes_1min) >= 6 and snap.closes_1min[-2] > 0:
-        recent_1min_chg = (snap.closes_1min[-1] - snap.closes_1min[-2]) / snap.closes_1min[-2] * 100
-        recent_5min_chg = (snap.closes_1min[-1] - snap.closes_1min[-6]) / snap.closes_1min[-6] * 100
+    _c1min = [c for c in snap.closes_1min if c > 0]
+    if len(_c1min) >= 6 and _c1min[-2] > 0 and _c1min[-6] > 0:
+        recent_1min_chg = (_c1min[-1] - _c1min[-2]) / _c1min[-2] * 100
+        recent_5min_chg = (_c1min[-1] - _c1min[-6]) / _c1min[-6] * 100
 
         recent_1min_max = float(getattr(cfg, "recent_candle_max_1min_pct", 2.0))
         recent_5min_max = float(getattr(cfg, "recent_candle_max_5min_pct", 5.0))
@@ -104,11 +105,12 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
     if _leading is not None:
         _leading_thr = float(getattr(cfg, "leading_score_min", 0.25))
         if _leading < _leading_thr:
+            _vb = IndicatorService.calc_vol_burst_score(list(getattr(snap, 'volumes_1min', [])))
+            _cr = IndicatorService.calc_chejan_reversal_score(list(getattr(snap, 'chejan_history', [])))
+            _hp = IndicatorService.calc_hoga_pressure_score(int(getattr(snap, 'total_ask_qty', 0)), int(getattr(snap, 'total_bid_qty', 0)))
             ScannerLogger.rejected(snap.code, snap.name, "JDM_LEADING",
                 f"선행점수 미달 — {_leading:.2f} < {_leading_thr:.2f} "
-                f"(체결반등:{IndicatorService.calc_chejan_reversal_score(list(getattr(snap,'chejan_history',[]))):.2f}"
-                f" 축적:{IndicatorService.calc_accumulation_score(list(getattr(snap,'volumes_1min',[])),list(getattr(snap,'closes_1min',[]))):.2f}"
-                f" 호가:{IndicatorService.calc_hoga_pressure_score(int(getattr(snap,'total_ask_qty',0)),int(getattr(snap,'total_bid_qty',0))):.2f})")
+                f"(거래량폭발:{_vb:.2f} 체결반등:{_cr:.2f} 호가:{_hp:.2f})")
             return None
         _ctx_leading = _leading  # 임계값 통과: 점수를 ctx에 전달
 
@@ -229,14 +231,20 @@ def _jdm_check_trend_and_ma(
             _tf1_slope = getattr(snap, "mtf_tf1_slope", 0.0)
             _tf5_slope = getattr(snap, "mtf_tf5_slope", 0.0)
             _tf5_bars  = getattr(snap, "mtf_tf5_bars", 0)
-            ScannerLogger.rejected(
-                snap.code, snap.name, "JDM_MTF",
-                f"MTF 추세 불일치 [{ctx.slot}] — "
-                f"1분EMA기울기={_tf1_slope:+.1f} "
-                f"5분EMA기울기={_tf5_slope:+.1f} "
-                f"(5분봉{_tf5_bars}개)"
-            )
-            return None
+            # 5분봉이 강한 상승 중이면 1분봉 일시 눌림 허용 (눌림목 패턴)
+            _mtf_tf5_strong = float(getattr(cfg, "mtf_tf5_strong_slope", 5.0))
+            if _tf5_slope >= _mtf_tf5_strong:
+                ScannerLogger.passed(snap.code, snap.name, "JDM_MTF_PULLBACK",
+                    f"5분EMA강세({_tf5_slope:+.1f}) 1분눌림({_tf1_slope:+.1f}) 허용")
+            else:
+                ScannerLogger.rejected(
+                    snap.code, snap.name, "JDM_MTF",
+                    f"MTF 추세 불일치 [{ctx.slot}] — "
+                    f"1분EMA기울기={_tf1_slope:+.1f} "
+                    f"5분EMA기울기={_tf5_slope:+.1f} "
+                    f"(5분봉{_tf5_bars}개)"
+                )
+                return None
 
     # ── 60분봉 추세 방향 필터
     # [2026-06-02] 60분봉이 하락 방향이면 1분봉 반등이어도 차단 — 큰 그림 역행 방지
@@ -249,8 +257,17 @@ def _jdm_check_trend_and_ma(
 
             # 60분봉 EMA 기울기가 하락이고 trend_lv도 0이면 차단
             # (단, 1분봉 trend_lv가 3 이상인 강한 폭등은 스킵 — 갭 상승 등)
+            # (단, H1 RSI ≤ 20 극단적 과매도는 반등 가능성으로 스킵)
+            # (단, 5분봉 EMA 강세 상승 중이면 60분봉 하락 방향 우회 — 단기 추세 역전 진행 중)
             _skip_h1 = ctx.trend_lv >= int(getattr(cfg, "h1_skip_tf1_trend_lv", 3))
-            if not _skip_h1 and _h1_slope < 0 and _h1_trend == 0:
+            _h1_oversold = _h1_rsi is not None and _h1_rsi <= 20.0
+            _h1_tf5_strong_slope = float(getattr(cfg, "mtf_tf5_strong_slope", 5.0))
+            _h1_tf5_bypass = float(getattr(snap, "mtf_tf5_slope", 0.0)) >= _h1_tf5_strong_slope
+            if _h1_tf5_bypass and _h1_slope < 0 and _h1_trend == 0:
+                _tf5s = float(getattr(snap, "mtf_tf5_slope", 0.0))
+                ScannerLogger.passed(snap.code, snap.name, "JDM_H1_TF5_BYPASS",
+                    f"5분EMA강세({_tf5s:+.1f}) 60분봉하락 우회 — H1={_h1_slope:+.1f}")
+            if not _skip_h1 and not _h1_oversold and not _h1_tf5_bypass and _h1_slope < 0 and _h1_trend == 0:
                 ScannerLogger.rejected(snap.code, snap.name, "JDM_H1_TREND",
                     f"60분봉 하락 방향 — EMA기울기={_h1_slope:+.1f} trend_lv={_h1_trend} "
                     f"RSI={_h1_rsi:.0f}" if _h1_rsi else
@@ -426,13 +443,21 @@ def _jdm_check_execution_quality(
     if not ctx.lite_mode and rsi is not None:
         eff_rsi_high = cfg.jdm_rsi_high  # 기본 60 (변경: 70→60, 상한만 사용)
 
-        # 선행 강세 시 RSI 상한만 완화 (하한은 제거)
+        # 선행 강세 시 RSI 상한 완화
         _ls_strong_thr = float(getattr(cfg, "leading_score_strong", 0.50))
+        _ls_weak_thr   = float(getattr(cfg, "leading_score_min", 0.05))
         if ctx.leading_score >= _ls_strong_thr:
-            _rsi_high_boost = float(getattr(cfg, "jdm_rsi_high_strong_leading", 70.0))
+            _rsi_high_boost = float(getattr(cfg, "jdm_rsi_high_strong_leading", 75.0))
             eff_rsi_high = max(eff_rsi_high, _rsi_high_boost)
             ScannerLogger.passed(snap.code, snap.name, "JDM_LEADING_BOOST",
                 f"선행 강세 → RSI 상한 완화 (상한={eff_rsi_high:.0f}) "
+                f"leading={ctx.leading_score:.2f} RSI={rsi:.1f}")
+        elif ctx.leading_score >= _ls_weak_thr:
+            # 약한 선행 신호도 RSI 상한 소폭 완화 (70→75)
+            _rsi_high_weak = float(getattr(cfg, "jdm_rsi_high_weak_leading", 75.0))
+            eff_rsi_high = max(eff_rsi_high, _rsi_high_weak)
+            ScannerLogger.passed(snap.code, snap.name, "JDM_LEADING_WEAK_BOOST",
+                f"약한선행 → RSI 상한 완화 (상한={eff_rsi_high:.0f}) "
                 f"leading={ctx.leading_score:.2f} RSI={rsi:.1f}")
 
         # 과매수만 차단 (RSI >= 상한)

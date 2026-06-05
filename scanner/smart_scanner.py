@@ -271,9 +271,8 @@ class SmartScanner(QObject):
         self._universe_paused: bool = False
 
 
-        # 캔들 마감 게이팅: 분이 바뀔 때만 _evaluate() 실행 (틱 기반 고점 진입 방지)
-        self._eval_min: dict[str, int] = {}
-        self._eval_min_lock = threading.Lock()  # _eval_min race condition 방지
+        # 평가 쿨다운: 종목당 30초 간격 제한
+        self._last_eval_ts: dict[str, float] = {}
         self._last_real_tick_time: float = time.monotonic()  # [NEW] 실시간 데이터 하트비트
 
         # WATCH 모드 예비 종목 갱신 주기 (스코어링 기반)
@@ -693,9 +692,28 @@ class SmartScanner(QObject):
                     
                     ui_rows = []
                     subscribed = set(self.watch_q.subscribed)
-                    
+
+                    # vol_burst 점수로 평가 순서 재조정 — "막 터지는 종목" 우선 평가
+                    # top_df는 거래대금 순이지만, 실시간 거래량 폭발 종목을 앞으로 당김
+                    eval_order = list(top_df.index)
+                    try:
+                        burst_scores = {}
+                        for code in eval_order:
+                            if code in subscribed:
+                                sn = self.store.get_snapshot(code)
+                                if sn:
+                                    vols = list(getattr(sn, "volumes_1min", None) or [])
+                                    burst_scores[code] = IndicatorService.calc_vol_burst_score(vols)
+                        if burst_scores:
+                            eval_order.sort(
+                                key=lambda c: burst_scores.get(c, 0.0),
+                                reverse=True
+                            )
+                    except Exception:
+                        pass  # 정렬 실패 시 기존 거래대금 순 유지
+
                     # 1. 상위 종목들에 대해 데이터 수집 및 감시 대상 평가
-                    for code, row in top_df.iterrows():
+                    for code in eval_order:
                         snap = self.store.get_snapshot(code)
                         if not snap: continue
 
@@ -783,22 +801,14 @@ class SmartScanner(QObject):
             return None
 
 
-        # ① 캔들 마감 게이팅
-        # - exploration_mode: 0.5초 간격으로 제한 (과도한 CPU 점유 방지)
-        # - 일반 모드: 분 단위 게이팅
+        # ① 평가 쿨다운 게이팅 — 종목당 최소 30초 간격 (exploration_mode: 0.5초)
         now_ts = time.monotonic()
-        if getattr(self.cfg, "exploration_mode", False):
-            last_eval = getattr(self, "_last_eval_ts", {})
-            if now_ts - last_eval.get(snap.code, 0) < 0.5:
-                return
-            last_eval[snap.code] = now_ts
-            self._last_eval_ts = last_eval
-        else:
-            cur_min = datetime.now().minute
-            with self._eval_min_lock:
-                if self._eval_min.get(snap.code, -1) == cur_min:
-                    return None
-                self._eval_min[snap.code] = cur_min
+        _cooldown = 0.5 if getattr(self.cfg, "exploration_mode", False) else 30.0
+        if not hasattr(self, "_last_eval_ts"):
+            self._last_eval_ts = {}
+        if now_ts - self._last_eval_ts.get(snap.code, 0) < _cooldown:
+            return None
+        self._last_eval_ts[snap.code] = now_ts
 
 
         # ② 등락률 범위 (하한~상한)
@@ -1165,9 +1175,8 @@ class SmartScanner(QObject):
             if price > 0 and snap_now is not None:
                 trend_level = int(getattr(snap_now, "trend_level", 0))
                 self.price_updated.emit(code, price, float(snap_now.change_pct), trend_level)
-                
-                # ② 실시간 신호 판단 (데이터 정합성 보장 후 실행)
-                self._evaluate(snap_now)
+                # [FIX 2026-06-05] _evaluate 호출 제거 — _realtime_loop(1초 주기)에서 평가
+                # 틱마다 호출하면 분 게이팅이 있어도 race condition으로 중복 신호 발생
 
 
             # watch_q.refresh — SetRealReg/Remove를 매 틱 호출하면 API 과부하

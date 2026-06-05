@@ -169,7 +169,8 @@ class IndicatorService:
         if older_avg <= 0:
             return 0.0
         was_quiet  = older_avg < 115.0
-        now_active = recent_avg > 130.0
+        # 하락장 적응: 130%→110% (전약후강이면 충분)
+        now_active = recent_avg > 110.0
         rise_ratio = recent_avg / older_avg
         if was_quiet and now_active and rise_ratio > 1.15:
             return min((rise_ratio - 1.0) * 2.5, 1.0)
@@ -223,6 +224,29 @@ class IndicatorService:
         return 0.0
 
     @staticmethod
+    def calc_vol_burst_score(volumes: list) -> float:
+        """
+        거래량 폭증 가속도 점수 (0.0~1.0) — 선행 지표.
+
+        탐지: 직전 3분이 조용하다가 최근 2분에 거래량이 갑자기 3배↑ 폭증.
+        이미 오래 폭증 중인 종목은 점수 0 (이미 늦음) — 반드시 '막 터지는' 시점만.
+        """
+        if len(volumes) < 8:
+            return 0.0
+        recent_2 = sum(volumes[-2:]) / 2
+        prior_3  = sum(volumes[-5:-2]) / 3
+        older_3  = sum(volumes[-8:-5]) / 3
+        if prior_3 <= 0 or older_3 <= 0:
+            return 0.0
+        # 직전 3분은 조용해야 함 (전전 대비 1.5배 미만)
+        was_quiet = (prior_3 / older_3) < 1.5
+        # 최근 2분이 직전 3분 대비 3배↑
+        burst_ratio = recent_2 / prior_3
+        if was_quiet and burst_ratio >= 3.0:
+            return min((burst_ratio - 3.0) / 4.0 + 0.5, 1.0)
+        return 0.0
+
+    @staticmethod
     def calc_accumulation_score(volumes: list, closes: list) -> float:
         """
         거래량 축적(Accumulation) 점수 (0.0~1.0).
@@ -266,22 +290,24 @@ class IndicatorService:
         복합 선행 점수 (0.0~1.0) — 우상향 가능성 예측.
 
         [방향 원칙]
-        "지금 막 매수세가 불붙고 있으면서 계속 강해지는가"를 확인.
-        단순히 지표가 높은 것(후행)이 아니라 변화와 가속이 함께 일어나야 함(선행).
+        "지금 막 거래량과 매수세가 폭발하기 시작하는 순간"을 포착.
+        이미 오른 후 지표가 높은 것(후행)이 아니라,
+        조용하다가 갑자기 터지는 변화의 초입을 잡는다(선행).
 
         PRIMARY 조건 (하나 이상 필수):
-          체결강도 반등 ≥ 0.25  — 명확한 매수세 점화 (강화됨: 0.15→0.25)
-          기관/외인 전환 ≥ 0.50  — 기관 방향 전환 (기존)
+          거래량 폭발 ≥ 0.50  — 직전 3분 조용 → 최근 2분 3배↑ 폭발 (가장 선행)
+          체결강도 반등 ≥ 0.25 — 체결강도 바닥→110%+ 반등
+          기관/외인 전환 ≥ 0.50 — 기관 방향 전환
 
         PRIMARY 없으면 0.0 반환 → 진입 차단.
 
         가중합 (PRIMARY 통과 후):
-          체결강도 반등     35% — 핵심 선행 신호 (비중 ↓, 가속도로 보완)
-          체결강도 가속도   20% — 반등 후 계속 강해지는가 (신규)
-          거래량 축적       15% — 스마트머니 매집 징조 (비중 ↓)
-          호가 압력         15% — 실시간 매수 우위 (유지)
-          호가 속도         10% — 매수잔량이 계속 증가하는가 (신규)
-          외인+기관 전환     5% — 기관 방향 전환 (비중 ↓)
+          거래량 폭발       35% — 가장 선행하는 신호 (신규 추가)
+          체결강도 반등     25% — 매수세 점화 확인
+          체결강도 가속도   15% — 반등 후 계속 강해지는가
+          호가 압력         10% — 실시간 매수 우위
+          호가 속도         10% — 매수잔량 증가 추세
+          거래량 축적        5% — 스마트머니 매집 (보조)
 
         데이터 부족 시 None 반환 → 호출처에서 체크 생략.
         """
@@ -290,28 +316,29 @@ class IndicatorService:
         if len(hist) < 8 or len(vols) < 11:
             return None  # 데이터 부족 → 체크 생략
 
-        cr = IndicatorService.calc_chejan_reversal_score(hist)
-        ca = IndicatorService.calc_chejan_acceleration(hist)
-        ac = IndicatorService.calc_accumulation_score(
+        cr  = IndicatorService.calc_chejan_reversal_score(hist)
+        ca  = IndicatorService.calc_chejan_acceleration(hist)
+        vb  = IndicatorService.calc_vol_burst_score(vols)
+        ac  = IndicatorService.calc_accumulation_score(
             vols, list(getattr(snap, 'closes_1min', None) or []))
-        hp = IndicatorService.calc_hoga_pressure_score(
+        hp  = IndicatorService.calc_hoga_pressure_score(
             int(getattr(snap, 'total_ask_qty', 0) or 0),
             int(getattr(snap, 'total_bid_qty', 0) or 0),
         )
         bid_qty_sums_hist = list(getattr(snap, 'bid_qty_sums_history', None) or [])
-        hv = IndicatorService.calc_hoga_velocity(bid_qty_sums_hist if bid_qty_sums_hist else None)
-        iv = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
+        hv  = IndicatorService.calc_hoga_velocity(bid_qty_sums_hist if bid_qty_sums_hist else None)
+        iv  = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
 
-        # PRIMARY 조건: 세 가지 중 하나 이상 충족
-        # cr >= 0.25: 체결강도 바닥→130%+ 반등 (강한 매수세 점화)
-        # iv >= 0.50: 기관/외인 방향 전환 (급락장에서 거의 0이라 실효 없음)
-        # hp >= 0.30: 호가 압력 매수우위 (실시간 매수잔량 > 매도잔량 × 1.6배 이상)
-        primary_ok = (cr >= 0.25) or (iv >= 0.50) or (hp >= 0.30)
+        # PRIMARY 조건: "막 불붙기 시작"하는 신호 중 하나 이상 필수
+        # vb >= 0.50: 거래량 직전 3분 조용 → 최근 2분 3배↑ 폭발 (가장 선행)
+        # cr >= 0.25: 체결강도 바닥→110%+ 반등 (매수세 점화)
+        # iv >= 0.50: 기관/외인 방향 전환
+        primary_ok = (vb >= 0.50) or (cr >= 0.25) or (iv >= 0.50)
         if not primary_ok:
             return 0.0
 
-        # 가중합: 가속도를 통해 진정한 매수세 확인
-        return (cr * 0.35 + ca * 0.20 + ac * 0.15 + hp * 0.15 + hv * 0.10 + iv * 0.05)
+        # 가중합: 거래량 폭발을 최우선, 체결강도 가속도로 확인
+        return (vb * 0.35 + cr * 0.25 + ca * 0.15 + hp * 0.10 + hv * 0.10 + ac * 0.05 + iv * 0.00)
 
     @staticmethod
     def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:

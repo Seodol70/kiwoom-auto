@@ -134,11 +134,11 @@ class UniverseManager:
             w_vol = 0.2
             w_chg = 0.4
             is_early = False
-        # Phase 3: 09:15 이후 (사용자 설정 가중치 - 등락률 중심)
+        # Phase 3: 09:15 이후 — 거래량 증가율 중심 (이미 오른 종목 대신 막 불붙는 종목 포착)
         else:
-            w_amt = getattr(self.cfg, "universe_trade_amt_weight", 0.2) if self.cfg else 0.2
-            w_vol = getattr(self.cfg, "universe_vol_ratio_weight", 0.2) if self.cfg else 0.2
-            w_chg = getattr(self.cfg, "universe_chg_pct_weight", 0.6) if self.cfg else 0.6
+            w_amt = getattr(self.cfg, "universe_trade_amt_weight", 0.3) if self.cfg else 0.3
+            w_vol = getattr(self.cfg, "universe_vol_ratio_weight", 0.5) if self.cfg else 0.5
+            w_chg = getattr(self.cfg, "universe_chg_pct_weight",  0.2) if self.cfg else 0.2
             is_early = False
         
         # 2. 상대 순위 산정 (Rank-based Scoring)
@@ -154,26 +154,52 @@ class UniverseManager:
         sorted_by_chg = sorted(rows, key=lambda r: float(r.get("change_pct", 0) or 0), reverse=True)
         chg_rank = {r["code"]: 1.0 - (i / max(n - 1, 1)) for i, r in enumerate(sorted_by_chg)}
         
+        # 전일 캐시 유무 확인 — 없으면 거래대금 페이스 fallback 사용
+        has_prev_cache = any(self._prev_volumes.get(r["code"], 0) > 0 for r in rows)
+
+        # Fallback: 전일 캐시 없을 때 "분당 거래대금 속도" 기준 페이스 계산
+        # 장 경과 분 수로 거래대금을 나누면 → 빨리 거래대금이 쌓이는 종목이 상위
+        # 같은 거래대금이라도 장 초반에 쌓인 종목이 더 높은 페이스 점수를 받음
+        if not has_prev_cache:
+            now_t2 = datetime.now().time()
+            elapsed_min = max((now_t2.hour * 60 + now_t2.minute) - 9 * 60, 5)
+            amt_pace_map = {
+                r["code"]: int(r.get("trade_amount", 0) or 0) / elapsed_min
+                for r in rows
+            }
+            sorted_by_pace = sorted(rows, key=lambda r2: amt_pace_map.get(r2["code"], 0), reverse=True)
+            pace_rank = {r2["code"]: 1.0 - (i / max(n - 1, 1)) for i, r2 in enumerate(sorted_by_pace)}
+        else:
+            pace_rank = {}
+            amt_pace_map = {}
+
         scored = []
         for r in rows:
             code = r["code"]
-            
+
             # 거래대금 스코어: 장 초반에는 전일 순위와 당일 순위를 혼합
             if is_early:
                 s_amt = (prev_vol_rank.get(code, 0.5) * 0.7) + (today_amt_rank.get(code, 0.5) * 0.3)
             else:
                 s_amt = today_amt_rank.get(code, 0.5)
-            
+
             # 거래량 페이스 스코어
             today_vol = int(r.get("volume", 0) or 0)
             pv = self._prev_volumes.get(code, 0)
-            pace = self._calculate_vol_pace(today_vol, pv)
-            r["vol_ratio"] = round(pace, 4)
-            s_vol = min(pace / 3.0, 1.0) if pace > 0 else 0.5
-            
+            if has_prev_cache:
+                # 전일 캐시 있음: 전일 거래량 대비 오늘 페이스
+                pace = self._calculate_vol_pace(today_vol, pv)
+                r["vol_ratio"] = round(pace, 4)
+                s_vol = min(pace / 3.0, 1.0) if pace > 0 else 0.5
+            else:
+                # 전일 캐시 없음 fallback: 당일 거래대금의 시간대별 상대 페이스 순위
+                # "지금 이 시간대에 이 종목이 얼마나 빠르게 거래대금을 쌓고 있나"
+                s_vol = pace_rank.get(code, 0.5)
+                r["vol_ratio"] = round(amt_pace_map.get(code, 1.0), 4)
+
             # 등락률 스코어: 절대값 대신 상대적 순위 사용 (등락률 높은 순서대로 높은 점수)
             s_chg = chg_rank.get(code, 0.0)
-            
+
             # 최종 스코어 합산
             score = s_amt * w_amt + s_vol * w_vol + s_chg * w_chg
             scored.append((score, r))
