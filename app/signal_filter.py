@@ -148,8 +148,10 @@ class WeakSignalFilter(SignalFilter):
             return True, ""
 
         # 09:30 이후: Lv < 2 차단
+        # GAP_PULLBACK/OVERHEAT_PULLBACK은 자체 조건으로 강세 검증하므로 면제
         if now.time() >= opening_end:
-            if trend_lv < 2:
+            exempt_types = {"GAP_PULLBACK", "OVERHEAT_PULLBACK"}
+            if sig.signal_type not in exempt_types and trend_lv < 2:
                 logger.info(
                     "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
                     sig.name, sig.code, trend_lv,

@@ -302,9 +302,11 @@ class IndicatorService:
         hv = IndicatorService.calc_hoga_velocity(bid_qty_sums_hist if bid_qty_sums_hist else None)
         iv = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
 
-        # PRIMARY 조건: 더 강한 반등이거나 기관 전환이 있을 때만
-        # cr >= 0.25 (강화) OR iv >= 0.50
-        primary_ok = (cr >= 0.25) or (iv >= 0.50)
+        # PRIMARY 조건: 세 가지 중 하나 이상 충족
+        # cr >= 0.25: 체결강도 바닥→130%+ 반등 (강한 매수세 점화)
+        # iv >= 0.50: 기관/외인 방향 전환 (급락장에서 거의 0이라 실효 없음)
+        # hp >= 0.30: 호가 압력 매수우위 (실시간 매수잔량 > 매도잔량 × 1.6배 이상)
+        primary_ok = (cr >= 0.25) or (iv >= 0.50) or (hp >= 0.30)
         if not primary_ok:
             return 0.0
 

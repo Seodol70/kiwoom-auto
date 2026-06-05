@@ -273,6 +273,7 @@ class SmartScanner(QObject):
 
         # 캔들 마감 게이팅: 분이 바뀔 때만 _evaluate() 실행 (틱 기반 고점 진입 방지)
         self._eval_min: dict[str, int] = {}
+        self._eval_min_lock = threading.Lock()  # _eval_min race condition 방지
         self._last_real_tick_time: float = time.monotonic()  # [NEW] 실시간 데이터 하트비트
 
         # WATCH 모드 예비 종목 갱신 주기 (스코어링 기반)
@@ -794,9 +795,10 @@ class SmartScanner(QObject):
             self._last_eval_ts = last_eval
         else:
             cur_min = datetime.now().minute
-            if self._eval_min.get(snap.code, -1) == cur_min:
-                return None
-            self._eval_min[snap.code] = cur_min
+            with self._eval_min_lock:
+                if self._eval_min.get(snap.code, -1) == cur_min:
+                    return None
+                self._eval_min[snap.code] = cur_min
 
 
         # ② 등락률 범위 (하한~상한)
