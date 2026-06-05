@@ -1365,7 +1365,10 @@ class SmartScanner(QObject):
                 self._last_volume_updated = time.monotonic()
                 return rows[:target]
             else:
-                logger.warning("[opt10030] 0개 반환 — 파라미터 확인 필요")
+                logger.warning("[opt10030] 0개 반환 — TR 재진입 차단 또는 서버 오류. 기존 캐시 %d종목 유지", len(self._last_volume_rows))
+                # 기존 캐시가 있으면 그대로 반환 (대시보드 초기화 방지)
+                if self._last_volume_rows:
+                    return self._last_volume_rows[:target]
                 return []
 
         except Exception as e:
