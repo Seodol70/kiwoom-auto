@@ -127,6 +127,8 @@ class MainWindowSlots:
     def _on_auto_trade_toggle(self, enabled: bool) -> None:
         """자동매매 토글 처리"""
         self.state.auto_trading = enabled
+        if hasattr(self, "trading_controller"):
+            self.trading_controller.set_auto_trading(enabled)
 
         state = "시작" if enabled else "정지"
         self.append_log(f"{'🟢' if enabled else '🔴'} 자동매매 {state}")

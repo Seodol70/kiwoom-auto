@@ -172,6 +172,9 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
             self.state.auto_trading = True
             self.header.set_auto_checked(True)
             self.append_log("🟢 [자동시작] 자동매매 시스템이 자동으로 시작되었습니다.")
+        # trading_controller._auto_trading은 state와 별도 — 항상 동기화
+        if hasattr(self, "trading_controller"):
+            self.trading_controller.set_auto_trading(True)
 
         self.append_log("🚀 [시스템] 로그인 후 자동 동기화 및 스캔 시작")
 

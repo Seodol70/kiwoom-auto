@@ -291,6 +291,8 @@ class SmartScanner(QObject):
         self._last_volume_rows: list[dict] = []
         self._last_volume_updated: float = 0.0  # 마지막 캐시 갱신 시각 (time.monotonic)
         self._opt10030_fetching: bool = False   # opt10030 중복 호출 방지 플래그
+        # [FIX 2026-06-05] 재시작 시 당일 opt10030 캐시 즉시 복원
+        self._load_opt10030_cache()
         # 전일 거래량 캐시 (UniverseManager에서 관리)
         self._prev_volumes = self.universe_mgr._prev_volumes
         # 동일 종목/신호 중복 emit 방지 (signal_cooldown_sec)
@@ -1295,6 +1297,46 @@ class SmartScanner(QObject):
             logger.warning("[opt10030 BG] 갱신 실패: %s", e)
 
 
+    def _opt10030_cache_path(self) -> str:
+        """당일 opt10030 캐시 파일 경로"""
+        today = datetime.now().strftime("%Y%m%d")
+        return os.path.join("params", f"opt10030_{today}.json")
+
+    def _save_opt10030_cache(self, rows: list[dict]) -> None:
+        """opt10030 결과를 당일 파일로 저장 (재시작 시 재조회 방지)"""
+        import json
+        try:
+            path = self._opt10030_cache_path()
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(rows, f, ensure_ascii=False)
+            logger.debug("[opt10030] 당일 캐시 저장 완료 — %d종목 → %s", len(rows), path)
+        except Exception as e:
+            logger.warning("[opt10030] 캐시 저장 실패: %s", e)
+
+    def _load_opt10030_cache(self) -> None:
+        """재시작 시 당일 opt10030 캐시 복원 — 5분 이내면 즉시 재사용 가능 상태로 로드"""
+        import json
+        try:
+            path = self._opt10030_cache_path()
+            if not os.path.exists(path):
+                return
+            mtime = os.path.getmtime(path)
+            age = time.time() - mtime
+            # 당일 파일이면 나이에 관계없이 로드 (같은 날이면 종목 구성 유사)
+            with open(path, "r", encoding="utf-8") as f:
+                rows = json.load(f)
+            if rows:
+                self._last_volume_rows = rows
+                # 파일 나이가 300초 미만이면 캐시 유효로 처리 (재조회 건너뜀)
+                if age < 300:
+                    self._last_volume_updated = time.monotonic() - age
+                    logger.info("[opt10030] 당일 캐시 복원 완료 — %d종목 (나이 %.0f초, 유효)", len(rows), age)
+                else:
+                    # 나이가 오래됐어도 데이터는 있으므로 실패 시 fallback으로 사용
+                    logger.info("[opt10030] 당일 캐시 복원 완료 — %d종목 (나이 %.0f초, 재조회 필요)", len(rows), age)
+        except Exception as e:
+            logger.warning("[opt10030] 캐시 로드 실패: %s", e)
+
     def _fetch_top_volume_rows(
         self,
         target: int = 200,
@@ -1363,6 +1405,8 @@ class SmartScanner(QObject):
                 logger.info("[opt10030] 성공 — %d개 종목 수신", len(rows))
                 self._last_volume_rows = rows
                 self._last_volume_updated = time.monotonic()
+                # [FIX 2026-06-05] 당일 캐시 파일로 저장 — 재시작 시 즉시 재사용
+                self._save_opt10030_cache(rows)
                 return rows[:target]
             else:
                 logger.warning("[opt10030] 0개 반환 — TR 재진입 차단 또는 서버 오류. 기존 캐시 %d종목 유지", len(self._last_volume_rows))
@@ -1708,27 +1752,32 @@ class SmartScanner(QObject):
 
         from datetime import time as _time
         now_t = datetime.now().time()
-        # [NEW] 장 초반(09:00~09:10) Turbo 모드 판정
+        # 장 초반(09:00~09:10) 여부 — 이 시간대만 진짜 TurboWarmup
         is_opening = _time(9, 0) <= now_t <= _time(9, 10)
 
         min_bars = 55
         load_max = 6
         codes_need_all = [c for c in top_codes if self.store.get_candle_count(c) < min_bars]
 
-        # [FIX 2026-06-01] TurboWarmup 상한 20종목으로 제한
-        # 50종목 전체 → min_candle TIMEOUT 연속 → TR 큐 독점 → UI 멈춤
-        # 250ms × 20종목 = 5초로 단축, 나머지는 다음 주기에 순차 로딩
+        # [FIX 2026-06-05] TurboWarmup은 09:00~09:10에만 적용
+        # 이전: not _initial_candle_load_done이면 시간대 무관하게 20종목 일괄 → -200 반복
+        # 수정: 09:10 이후 재시작 시에는 일반 load_max(6종목/주기)로 제한
         TURBO_MAX = 20
-        if not self._initial_candle_load_done or is_opening:
+        if is_opening:
             codes_need = codes_need_all[:TURBO_MAX]
             if codes_need:
-                logger.info("[TurboWarmup] 장초반 로딩 시작 (%d종목, 상한 %d)",
+                logger.info("[TurboWarmup] 09:00~09:10 장초반 로딩 (%d종목, 상한 %d)",
                             len(codes_need), TURBO_MAX)
+        elif not self._initial_candle_load_done:
+            # 장중 재시작: 6종목씩 나눠서 로딩 (TR 부하 방지)
+            codes_need = codes_need_all[:load_max]
+            if codes_need:
+                logger.info("[캔들로딩] 장중 재시작 분봉 보충 (%d종목, 총 부족 %d종목)",
+                            len(codes_need), len(codes_need_all))
         else:
             codes_need = codes_need_all[:load_max]
 
         if codes_need:
-            # 장초반에는 200ms 후 즉시 시작
             delay = 200 if is_opening else 500
             QTimer.singleShot(delay, lambda c=list(codes_need): self._load_candles_async(c, 0))
 
