@@ -42,8 +42,11 @@ class InternalStockState:
     # [2026-06-04 Phase3] 매수1호가 가격 이력 — 우상향 기울기 감지용 (최근 10틱)
     bid1_history: _Deque = field(default_factory=lambda: _Deque(maxlen=10))
     # [2026-06-04 Phase3-FIX] 매수호가 수량 이력 — 호가 속도(velocity) 계산용 (최근 10스냅)
-    # 매 호가 수신마다 [1호가, 2호가, ..., 5호가]의 합계만 저장 (크기 최적화)
     bid_qty_sums_history: _Deque = field(default_factory=lambda: _Deque(maxlen=10))
+    # [2026-06-05 P1] 매도1호가 수량 이력 — 매도벽 급감 감지용 (최근 10틱)
+    ask1_qty_history: _Deque = field(default_factory=lambda: _Deque(maxlen=10))
+    # [2026-06-05 P2] 틱 단위 체결량 이력 — 실시간 체결속도 감지용 (최근 20틱)
+    tick_vol_history: _Deque = field(default_factory=lambda: _Deque(maxlen=20))
 
     # 분봉 (1분봉 OHLCV)
     mins: List[float] = field(default_factory=list)
@@ -130,6 +133,10 @@ class StockSnapshot:
     bid1_history: list = field(default_factory=list)
     # [2026-06-04 Phase3-FIX] 매수호가 수량 이력 (최근 10스냅) — 호가 속도 계산용
     bid_qty_sums_history: list = field(default_factory=list)
+    # [2026-06-05 P1] 매도1호가 수량 이력 (최근 10틱) — 매도벽 급감 감지용
+    ask1_qty_history: list = field(default_factory=list)
+    # [2026-06-05 P2] 틱 단위 체결량 이력 (최근 20틱) — 실시간 체결속도 감지용
+    tick_vol_history: list = field(default_factory=list)
 
     @property
     def hoga_pressure(self) -> float:

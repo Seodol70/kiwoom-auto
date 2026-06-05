@@ -33,9 +33,11 @@ def get_signal_csv(target_date: datetime | None = None) -> Path:
     return LOG_DIR / "scanner_signal.csv"
 
 # 선행지표 컬럼 정의
-LEADING_COLS = ["li_bs", "li_vb", "li_cr", "li_ca", "li_hp", "li_hv", "li_leading"]
+LEADING_COLS = ["li_bs", "li_aw", "li_tv", "li_vb", "li_cr", "li_ca", "li_hp", "li_hv", "li_leading"]
 LEADING_LABELS = {
     "li_bs":      "매수1호가기울기",
+    "li_aw":      "매도벽급감",
+    "li_tv":      "틱체결속도",
     "li_vb":      "거래량폭발",
     "li_cr":      "체결강도반등",
     "li_ca":      "체결강도가속",
@@ -44,9 +46,10 @@ LEADING_LABELS = {
     "li_leading": "선행점수합산",
 }
 
-# 분석 기준 구간 (지표값 >= 임계값이면 "강한 신호"로 분류)
 THRESHOLDS = {
     "li_bs":      0.30,
+    "li_aw":      0.50,
+    "li_tv":      0.50,
     "li_vb":      0.40,
     "li_cr":      0.25,
     "li_ca":      0.20,

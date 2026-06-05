@@ -315,9 +315,11 @@ class SnapshotStore:
                 if st.cumulative_volume > 0:
                     tick_vol = max(0, cum_vol - st.cumulative_volume)
                 else:
-                    # 최초 수신 시에는 현재 틱 거래량을 알 수 없으므로 0 혹은 volume(보통 0으로 처리)
                     tick_vol = 0
                 st.cumulative_volume = cum_vol
+            # [2026-06-05 P2] 틱 체결량 이력 누적 — 실시간 체결속도 감지용
+            if tick_vol > 0:
+                st.tick_vol_history.append(tick_vol)
             
             if cum_amt > 0:
                 st.cumulative_amount = cum_amt
@@ -502,6 +504,8 @@ class SnapshotStore:
             hoga_updated_at = getattr(st, "hoga_updated_at", None),
             bid1_history    = list(getattr(st, "bid1_history", [])),
             bid_qty_sums_history = list(getattr(st, "bid_qty_sums_history", [])),
+            ask1_qty_history = list(getattr(st, "ask1_qty_history", [])),
+            tick_vol_history = list(getattr(st, "tick_vol_history", [])),
             closes_1min   = closes_list,
             opens_1min    = list(st.min_opens),
             highs_1min    = highs_list,
@@ -576,6 +580,9 @@ class SnapshotStore:
                 st.ask_prices = list(ask_prices)
             if ask_qtys is not None:
                 st.ask_qtys = list(ask_qtys)
+                # [2026-06-05 P1] 매도1호가 수량 이력 누적 — 매도벽 급감 감지용
+                if ask_qtys[0] > 0:
+                    st.ask1_qty_history.append(ask_qtys[0])
             if bid_prices is not None:
                 st.bid_prices = list(bid_prices)
                 # [2026-06-04 Phase3] 매수1호가 이력 누적 — 우상향 기울기 감지용

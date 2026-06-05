@@ -284,6 +284,49 @@ class IndicatorService:
         return 0.0
 
     @staticmethod
+    def calc_tick_vol_accel_score(tick_vol_history: list) -> float:
+        """
+        틱 단위 체결속도 가속도 점수 (0.0~1.0) — 선행 지표.
+
+        1분봉 집계를 기다리지 않고 즉시 체결 폭발 감지.
+        최근 5틱 평균 / 이전 5틱 평균 >= 2.0이면 점수 발생.
+        5.0배 이상이면 1.0.
+        """
+        h = [v for v in list(tick_vol_history) if v > 0]
+        if len(h) < 10:
+            return 0.0
+        recent = sum(h[-5:]) / 5
+        prior  = sum(h[-10:-5]) / 5
+        if prior <= 0:
+            return 0.0
+        ratio = recent / prior
+        if ratio >= 2.0:
+            return min((ratio - 2.0) / 3.0, 1.0)
+        return 0.0
+
+    @staticmethod
+    def calc_ask1_wall_collapse_score(ask1_qty_history: list) -> float:
+        """
+        매도1호가 수량 급감 점수 (0.0~1.0) — 선행 지표.
+
+        매도벽이 얇아지는 순간 = 상승 돌파 직전.
+        최근 5틱에서 peak 대비 현재가 50% 이하면 점수 발생.
+        peak 대비 80% 감소(현재=20%)이면 1.0.
+        """
+        h = [q for q in list(ask1_qty_history) if q > 0]
+        if len(h) < 5:
+            return 0.0
+        h = h[-5:]
+        peak = max(h[:-1])  # 직전 4틱 중 최대 (현재 제외)
+        current = h[-1]
+        if peak <= 0:
+            return 0.0
+        collapse_ratio = 1.0 - (current / peak)  # 0=유지, 1=완전소멸
+        if collapse_ratio >= 0.50:  # 50% 이상 감소부터 점수
+            return min((collapse_ratio - 0.50) / 0.30, 1.0)
+        return 0.0
+
+    @staticmethod
     def calc_hoga_pressure_score(total_ask_qty: int, total_bid_qty: int) -> float:
         """
         호가 매수 압력 점수 (0.0~1.0).
@@ -348,14 +391,18 @@ class IndicatorService:
         iv  = min(float(getattr(snap, 'inv_flip_score', 0.0) or 0.0), 1.0)
         bs  = IndicatorService.calc_bid1_slope_score(
             list(getattr(snap, 'bid1_history', None) or []))
+        aw  = IndicatorService.calc_ask1_wall_collapse_score(
+            list(getattr(snap, 'ask1_qty_history', None) or []))
+        tv  = IndicatorService.calc_tick_vol_accel_score(
+            list(getattr(snap, 'tick_vol_history', None) or []))
 
         # PRIMARY 조건: "막 불붙기 시작"하는 신호 중 하나 이상 필수
-        primary_ok = (bs >= 0.30) or (vb >= 0.40) or (cr >= 0.25) or (iv >= 0.50) or (hp >= 0.50)
+        primary_ok = (bs >= 0.30) or (vb >= 0.40) or (cr >= 0.25) or (iv >= 0.50) or (hp >= 0.50) or (aw >= 0.50) or (tv >= 0.50)
         if not primary_ok:
             return 0.0
 
-        # 가중합: 매수1호가 우상향을 최우선, 거래량 폭발로 확인
-        return (bs * 0.30 + vb * 0.25 + cr * 0.20 + ca * 0.10 + hp * 0.08 + hv * 0.05 + ac * 0.02 + iv * 0.00)
+        # 가중합: bs/aw/tv 최우선 — 틱 레벨 선행 3총사
+        return (bs * 0.22 + aw * 0.22 + tv * 0.18 + vb * 0.15 + cr * 0.12 + ca * 0.05 + hp * 0.03 + hv * 0.02 + ac * 0.01 + iv * 0.00)
 
     @staticmethod
     def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:

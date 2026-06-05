@@ -51,6 +51,10 @@ class JdmStrategy(BaseStrategy):
             int(getattr(snap, "total_bid_qty", 0) or 0)), 3)
         ai_features["li_hv"] = round(IndicatorService.calc_hoga_velocity(
             list(getattr(snap, "bid_qty_sums_history", None) or []) or None), 3)
+        ai_features["li_aw"] = round(IndicatorService.calc_ask1_wall_collapse_score(
+            list(getattr(snap, "ask1_qty_history", None) or [])), 3)
+        ai_features["li_tv"] = round(IndicatorService.calc_tick_vol_accel_score(
+            list(getattr(snap, "tick_vol_history", None) or [])), 3)
         ai_features["li_leading"] = round(IndicatorService.get_leading_score(snap) or 0.0, 3)
 
         # 신호 생성

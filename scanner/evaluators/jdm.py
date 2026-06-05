@@ -114,9 +114,11 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
             _vb = IndicatorService.calc_vol_burst_score(list(getattr(snap, 'volumes_1min', [])))
             _cr = IndicatorService.calc_chejan_reversal_score(list(getattr(snap, 'chejan_history', [])))
             _hp = IndicatorService.calc_hoga_pressure_score(int(getattr(snap, 'total_ask_qty', 0)), int(getattr(snap, 'total_bid_qty', 0)))
+            _aw = IndicatorService.calc_ask1_wall_collapse_score(list(getattr(snap, 'ask1_qty_history', [])))
+            _tv = IndicatorService.calc_tick_vol_accel_score(list(getattr(snap, 'tick_vol_history', [])))
             ScannerLogger.rejected(snap.code, snap.name, "JDM_LEADING",
                 f"선행점수 미달 — {_leading:.2f} < {_leading_thr:.2f} "
-                f"(매수1호가기울기:{_bs:.2f} 거래량폭발:{_vb:.2f} 체결반등:{_cr:.2f} 호가:{_hp:.2f})")
+                f"(매수1호가기울기:{_bs:.2f} 거래량폭발:{_vb:.2f} 체결반등:{_cr:.2f} 호가:{_hp:.2f} 매도벽급감:{_aw:.2f} 틱속도:{_tv:.2f})")
             return None
         _ctx_leading = _leading  # 임계값 통과: 점수를 ctx에 전달
 
