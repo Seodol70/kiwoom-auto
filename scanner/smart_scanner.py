@@ -425,6 +425,12 @@ class SmartScanner(QObject):
         self._opt10030_refresh_timer.timeout.connect(self._bg_fetch_opt10030)
         self._opt10030_refresh_timer.start(5 * 60 * 1000)  # 5분마다 갱신
 
+        # 장 중 시작 시 즉시 패치 — 첫 발동이 5분 후이므로 대시보드가 공백인 문제 해결
+        # 장 전(09:00 이전)에는 opt10030이 0건 반환하므로 TR 슬롯 낭비 방지를 위해 장 중만 실행
+        _now_t = datetime.now().time()
+        if dtime(9, 0) <= _now_t <= dtime(15, 30):
+            QTimer.singleShot(3000, self._bg_fetch_opt10030)
+
 
     def stop(self) -> None:
         self._running = False
@@ -686,9 +692,18 @@ class SmartScanner(QObject):
                     _top_n = max(120, int(getattr(self.cfg, "display_top_n", 50)))
                     top_df = self.store.top_by_trade_amount(_top_n)
                     if top_df.empty:
-                        logger.info("[2단계] SEARCH 모드 시작 — store에 아직 데이터 없음 (부팅 초기 정상)")
+                        if not getattr(self, "_search_no_data_warned", False):
+                            logger.info("[2단계] SEARCH 모드 시작 — store에 아직 데이터 없음 (부팅 초기 정상)")
+                            self._search_no_data_warned = True
                     elif len(top_df) < 10:
-                        logger.info("[2단계] SEARCH 모드 — 종목 수 부족: %d개 (부팅 직후)", len(top_df))
+                        _prev_cnt = getattr(self, "_search_few_data_count", -1)
+                        if _prev_cnt != len(top_df):
+                            logger.info("[2단계] SEARCH 모드 — 종목 수 부족: %d개 (부팅 직후)", len(top_df))
+                            self._search_few_data_count = len(top_df)
+                    else:
+                        # 데이터 정상 → 플래그 리셋 (재부팅 시 재로깅 가능)
+                        self._search_no_data_warned = False
+                        self._search_few_data_count = -1
                     
                     ui_rows = []
                     subscribed = set(self.watch_q.subscribed)
@@ -1293,12 +1308,13 @@ class SmartScanner(QObject):
 
         logger.debug("[opt10030 BG] 백그라운드 갱신 시작")
         try:
-            was_empty = not self._last_volume_rows  # 최초 캐시 여부
+            df_was_empty = self.store._df.empty  # 스토어 미초기화 여부
             rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, retry=1)
             logger.info("[opt10030 BG] 갱신 완료 — %d종목 캐시", len(rows))
-            # 시작 시 캐시가 비어있다가 처음 채워졌으면 즉시 재스캔 — 5종목 → 400종목 즉시 반영
-            if was_empty and rows:
-                logger.info("[opt10030 BG] 최초 캐시 완료 → 즉시 재스캔 예약")
+            # _df가 비어있으면(재시작 직후 or 당일 첫 실행) run_periodic_scan으로 즉시 초기화
+            # was_empty 조건 제거: 캐시가 이미 있어도 _df가 비어있으면 스캔 필요
+            if df_was_empty and rows:
+                logger.info("[opt10030 BG] store 미초기화 → 즉시 재스캔 예약")
                 QTimer.singleShot(200, self.run_periodic_scan)
         except Exception as e:
             logger.warning("[opt10030 BG] 갱신 실패: %s", e)

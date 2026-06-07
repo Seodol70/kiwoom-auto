@@ -300,6 +300,8 @@ class MainWindowSlots:
         if hasattr(self, 'tc') and self.tc is not None:
             # [Step 3 Phase 3] ExitValidatorChain으로 청산 (MarketCloseValidator가 처리)
             self.tc.tick_exit_check()
+            # 전일 거래량 캐시 저장 — 다음날 유니버스 스코어링에 사용
+            self.tc.on_market_closing()
 
     @pyqtSlot()
     def _on_feedback_triggered(self) -> None:
