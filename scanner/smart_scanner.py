@@ -248,7 +248,6 @@ class SmartScanner(QObject):
         self._initial_candle_load_done: bool = False
         # 큐 및 상태
         self._tr_q_last_ts = 0.0
-        self._last_signal_ts:  dict[str, float] = {}
         self.on_index_update:  Optional[Callable[[str, float, float], None]] = None  # (idx_code, current, chg_pct)
 
 

@@ -13,6 +13,7 @@ gap_pullback.py — C전략: 갭 상승 첫 눌림목 진입
 """
 from __future__ import annotations
 import logging
+import time
 from typing import Optional, TYPE_CHECKING
 from datetime import datetime, time as dtime
 
@@ -31,6 +32,9 @@ logger = logging.getLogger(__name__)
 class GapPullbackStrategy(BaseStrategy):
     """C전략: 갭 상승 첫 눌림목 진입."""
 
+    # 종목별 마지막 신호 시각 — _emit() 쿨다운과 별개로 전략 레벨에서 차단
+    _last_signal_ts: dict[str, float] = {}
+
     def __init__(self):
         super().__init__("GAP_PULLBACK")
 
@@ -42,6 +46,13 @@ class GapPullbackStrategy(BaseStrategy):
     ) -> Optional["ScanSignal"]:
 
         if not getattr(cfg, "gap_pullback_enabled", True):
+            return None
+
+        # ── 종목별 쿨다운 (기본 300초 = 5분) — 동일 종목 신호 스팸 방지
+        _cooldown = float(getattr(cfg, "gap_pullback_cooldown_sec", 300.0))
+        _now_ts = time.monotonic()
+        _last_ts = GapPullbackStrategy._last_signal_ts.get(snap.code, 0.0)
+        if _now_ts - _last_ts < _cooldown:
             return None
 
         # ── 시간 제한: 09:30~10:30 (갭 첫 눌림 발생 구간)
@@ -130,6 +141,9 @@ class GapPullbackStrategy(BaseStrategy):
             f"시가 {open_price:,}"
         )
         ScannerLogger.passed(snap.code, snap.name, "GAP_PULLBACK", reason)
+
+        # 쿨다운 타임스탬프 갱신
+        GapPullbackStrategy._last_signal_ts[snap.code] = _now_ts
 
         ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
         ai_features["gap_pct"] = gap_pct

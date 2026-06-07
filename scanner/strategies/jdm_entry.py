@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import time
 from typing import Optional, TYPE_CHECKING
 
 from scanner.strategies.base import BaseStrategy
@@ -20,6 +21,9 @@ class JdmStrategy(BaseStrategy):
     모든 판정 로직은 signal_evaluator.check_jdm_entry()에 위임됨.
     """
 
+    # 종목별 마지막 신호 시각 — 동일 종목 신호 스팸 방지
+    _last_signal_ts: dict[str, float] = {}
+
     def __init__(self):
         super().__init__("JDM_ENTRY")
 
@@ -28,6 +32,12 @@ class JdmStrategy(BaseStrategy):
         """
         신호 판정을 수행하고 ScanSignal 객체를 생성하여 반환한다.
         """
+        # 종목별 쿨다운 — _emit() 쿨다운과 독립적으로 전략 레벨에서 차단
+        _cooldown = float(getattr(cfg, "signal_cooldown_sec", 60.0))
+        _now_ts = time.monotonic()
+        if _now_ts - JdmStrategy._last_signal_ts.get(snap.code, 0.0) < _cooldown:
+            return None
+
         # 핵심 판정 로직 위임
         reason = check_jdm_entry(snap, cfg)
         # [2026-05-22] WARNING 로그 2건 제거 (종목당 1건 발생, 메인 스레드 부하)
@@ -56,6 +66,9 @@ class JdmStrategy(BaseStrategy):
         ai_features["li_tv"] = round(IndicatorService.calc_tick_vol_accel_score(
             list(getattr(snap, "tick_vol_history", None) or [])), 3)
         ai_features["li_leading"] = round(IndicatorService.get_leading_score(snap) or 0.0, 3)
+
+        # 쿨다운 타임스탬프 갱신
+        JdmStrategy._last_signal_ts[snap.code] = _now_ts
 
         # 신호 생성
         is_warmup = "WARMUP" in reason
