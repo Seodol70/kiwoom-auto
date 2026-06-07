@@ -425,8 +425,11 @@ class SmartScanner(QObject):
         self._opt10030_refresh_timer.timeout.connect(self._bg_fetch_opt10030)
         self._opt10030_refresh_timer.start(5 * 60 * 1000)  # 5분마다 갱신
 
-        # 시작 직후 3초 후 1회 즉시 패치 — 첫 발동이 5분 후이므로 대시보드가 공백인 문제 해결
-        QTimer.singleShot(3000, self._bg_fetch_opt10030)
+        # 장 중 시작 시 즉시 패치 — 첫 발동이 5분 후이므로 대시보드가 공백인 문제 해결
+        # 장 전(09:00 이전)에는 opt10030이 0건 반환하므로 TR 슬롯 낭비 방지를 위해 장 중만 실행
+        _now_t = datetime.now().time()
+        if dtime(9, 0) <= _now_t <= dtime(15, 30):
+            QTimer.singleShot(3000, self._bg_fetch_opt10030)
 
 
     def stop(self) -> None:
