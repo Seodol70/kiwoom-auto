@@ -686,9 +686,18 @@ class SmartScanner(QObject):
                     _top_n = max(120, int(getattr(self.cfg, "display_top_n", 50)))
                     top_df = self.store.top_by_trade_amount(_top_n)
                     if top_df.empty:
-                        logger.info("[2단계] SEARCH 모드 시작 — store에 아직 데이터 없음 (부팅 초기 정상)")
+                        if not getattr(self, "_search_no_data_warned", False):
+                            logger.info("[2단계] SEARCH 모드 시작 — store에 아직 데이터 없음 (부팅 초기 정상)")
+                            self._search_no_data_warned = True
                     elif len(top_df) < 10:
-                        logger.info("[2단계] SEARCH 모드 — 종목 수 부족: %d개 (부팅 직후)", len(top_df))
+                        _prev_cnt = getattr(self, "_search_few_data_count", -1)
+                        if _prev_cnt != len(top_df):
+                            logger.info("[2단계] SEARCH 모드 — 종목 수 부족: %d개 (부팅 직후)", len(top_df))
+                            self._search_few_data_count = len(top_df)
+                    else:
+                        # 데이터 정상 → 플래그 리셋 (재부팅 시 재로깅 가능)
+                        self._search_no_data_warned = False
+                        self._search_few_data_count = -1
                     
                     ui_rows = []
                     subscribed = set(self.watch_q.subscribed)
