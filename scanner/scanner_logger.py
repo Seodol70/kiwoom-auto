@@ -46,6 +46,12 @@ scan_log.info("--- ScannerLogger Initialized (Session Start: %s) ---", datetime.
 # CSV 컬럼 정의
 _CSV_BASE_FIELDS = ["timestamp", "code", "name", "reason"]
 
+# 신호 CSV에 반드시 포함할 선행지표 컬럼 —
+# 첫 신호가 JDM 타입이 아닐 때도 헤더 일관성을 보장하기 위해 명시적으로 선언.
+_SIGNAL_LI_COLS = [
+    "li_bs", "li_vb", "li_cr", "li_ca", "li_hp", "li_hv", "li_aw", "li_tv", "li_leading"
+]
+
 
 class ScannerLogger:
     """신호 선정/탈락 기록 담당 — 배치 기록 방식으로 I/O 최적화"""
@@ -102,8 +108,8 @@ class ScannerLogger:
             file_exists = csv_path.exists()
             try:
                 with open(csv_path, "a", newline="", encoding="utf-8") as f:
-                    # 첫 행을 헤더 기준으로 삼음
-                    fieldnames = list(rows[0].keys())
+                    # 배치 내 모든 행의 키 합집합으로 헤더 결정 (삽입 순서 보존)
+                    fieldnames = list(dict.fromkeys(k for row in rows for k in row.keys()))
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
                     if not file_exists:
                         writer.writeheader()
@@ -179,7 +185,12 @@ class ScannerLogger:
         reason = f"[{sig.signal_type}] {sig.reason}"
         scan_log.warning("PASS\t%s\t%s\tSIGNAL\t%s", sig.code, sig.name, reason)
         today = datetime.now().strftime("%Y%m%d")
-        ScannerLogger._buffer_csv(f"scanner_signal_{today}.csv", sig.code, sig.name, reason, sig.values or {})
+        values = dict(sig.values or {})
+        # GAP_PULLBACK 등 JDM 외 신호가 먼저 기록되어도 li_ 헤더가 누락되지 않도록
+        # 모든 선행지표 컬럼을 기본값("")으로 보장
+        for col in _SIGNAL_LI_COLS:
+            values.setdefault(col, "")
+        ScannerLogger._buffer_csv(f"scanner_signal_{today}.csv", sig.code, sig.name, reason, values)
 
     @staticmethod
     def near_miss(
