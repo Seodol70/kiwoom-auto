@@ -56,9 +56,11 @@ class RiskManager(QObject):
             logger.info("[RiskManager] AppState 연동 완료 (ProfitLock=%s, LossCut=%s)",
                         self._state.profit_locked, self._state.loss_cut_locked)
 
-        # 체결 신호 연결 (연속 손실 추적용)
+        # 체결 신호 연결: 연속 손실 추적 + P&L 한도 체크
+        # check()는 매도 체결 시마다 호출 → daily_realized_pnl이 갱신된 직후 동작
         if hasattr(self._order_mgr, 'order_filled'):
             self._order_mgr.order_filled.connect(self._on_order_filled)
+            self._order_mgr.order_filled.connect(lambda *_: self.check())
 
     def update_config(self, scan_cfg: SmartScannerConfig) -> None:
         """설정 객체 참조를 갱신한다."""
@@ -99,8 +101,8 @@ class RiskManager(QObject):
             self._state.profit_locked = True
             self.daily_profit_locked.emit()
 
-        # 손절 체크
-        if (daily_pnl <= -self._scan_cfg.daily_loss_cut_won
+        # 손절 체크 (daily_loss_cut_won은 음수로 저장됨, 예: -50_000)
+        if (daily_pnl <= self._scan_cfg.daily_loss_cut_won
                 and not self._state.loss_cut_locked):
             self._state.loss_cut_locked = True
             self.daily_loss_cut.emit()

@@ -916,10 +916,6 @@ class SmartScanner(QObject):
                 logger.error("[_evaluate 오류] %s(%s) [%s] %s", snap.code, snap.name, strategy_name, e)
         
         return None
-        if not getattr(self.cfg, "exploration_mode", False):
-            # 탐색 모드가 아닐 때만 너무 잦은 로그 방지용으로 필터링
-            from scanner.scanner_logger import ScannerLogger as _SL
-            _SL.rejected(snap.code, snap.name, "STRATEGY", "모든 전략 조건 미달 (탈락)")
 
 
 
