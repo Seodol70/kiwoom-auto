@@ -396,13 +396,23 @@ class SmartScanner(QObject):
             t.daemon = True
             t.start()
             logger.warning("⏳ [SmartScanner] Pre-Filter %.0f초(= %s) 후 실행 예약", secs, (datetime.now() + timedelta(seconds=secs)).time())
-            # [FIX 2026-06-01] 장 시작 전이어도 분봉 캐시가 있으면 즉시 UI 활성화
-            # → 이전 거래일 캐시 종목으로 감시 목록 표시 (09:00 Pre-Filter 실행 시 갱신)
-            # → 5분 제한 제거: 08:11 기동처럼 수십 분 전에 켜도 감시 목록 표시
-            cached_code_count = len(getattr(self.store, '_min_candle_cache', {}))
+            # 장 시작 전이어도 opt10030 캐시가 있으면 top_mgr + watch_q를 미리 활성화
+            # → 이전 세션 캐시 종목으로 대시보드 표시, 09:00 Pre-Filter 실행 시 갱신됨
             if not self._prefiltered:
+                cached_rows = getattr(self, '_last_volume_rows', [])
+                if cached_rows:
+                    self.top_mgr.clear()
+                    for _row in cached_rows:
+                        _code = _row.get("code", "")
+                        _amt  = int(_row.get("trade_amount") or 0)
+                        if _code:
+                            self.top_mgr.update(_code, _amt)
+                    _top = self.top_mgr.get_top_codes()
+                    if _top:
+                        self._refresh_realtime_watch(_top)
+                cached_code_count = len(self.top_mgr.get_top_codes())
                 self._prefiltered = True
-                logger.info("[2단계] Pre-Filter 대기 중(%.0f초) — 캐시 %d종목으로 UI 즉시 활성화", secs, cached_code_count)
+                logger.info("[2단계] Pre-Filter 대기 중(%.0f초) — 캐시 %d종목으로 감시 목록 표시", secs, cached_code_count)
 
 
         # 2단계 루프
