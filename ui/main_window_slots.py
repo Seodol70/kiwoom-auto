@@ -297,11 +297,12 @@ class MainWindowSlots:
     def _on_market_closing(self) -> None:
         """장 마감 임박 처리 — 보유 포지션 전량 강제청산"""
         self.append_log("⌛ [장마감] 장 종료가 임박했습니다. 미체결 정리 및 당일청산을 준비합니다.")
-        if hasattr(self, 'tc') and self.tc is not None:
-            # [Step 3 Phase 3] ExitValidatorChain으로 청산 (MarketCloseValidator가 처리)
-            self.tc.tick_exit_check()
+        tc = getattr(self, 'trading_controller', None)
+        if tc is not None:
+            tc.liquidate_all_positions()
+            tc.tick_exit_check()
             # 전일 거래량 캐시 저장 — 다음날 유니버스 스코어링에 사용
-            self.tc.on_market_closing()
+            tc.on_market_closing()
 
     @pyqtSlot()
     def _on_feedback_triggered(self) -> None:

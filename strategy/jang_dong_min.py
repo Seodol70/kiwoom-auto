@@ -133,8 +133,9 @@ class JangDongMinStrategy(BaseStrategy):
                 remaining = loss_cooldown_min - elapsed_min
                 return False, f"손절 복구 대기 ({remaining:.0f}분)"
             else:
-                # 냉각 기간 종료 → 기록 삭제
+                # 냉각 기간 종료 → 기록 삭제 후 파일에도 반영
                 del self._loss_exit_dict[sig.code]
+                self._save_loss_exit_dict()
 
         # 6. 섹터 쏠림 확인
         sector = getattr(sig, "sector", "")

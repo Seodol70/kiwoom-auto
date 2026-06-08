@@ -1746,6 +1746,9 @@ class OrderManager(QObject):
         pos.qty -= filled_qty
         remaining_qty = pos.qty
 
+        # cash는 분할/완전 체결 모두에서 갱신해야 하며, 대기 신호 처리 전에 반영해야 함
+        self.cash += filled_qty * filled_price
+
         if pos.qty <= 0:
             _pnl_pct = (filled_price - avg_buy_for_log) / avg_buy_for_log * 100 if avg_buy_for_log else 0
             position_log.info("[포지션청산] %s(%s) 매도가=%d 손익=%+.2f%%", name, code, filled_price, _pnl_pct)
@@ -1757,8 +1760,6 @@ class OrderManager(QObject):
                 queued = self._queued_signal
                 self._queued_signal = None
                 self.handle_signal(queued)
-
-        self.cash += filled_qty * filled_price
         self._finalize_fill(code, name, filled_qty, filled_price, OrderType.SELL, realized, avg_buy_for_log, remaining_qty=remaining_qty)
 
     def _finalize_fill(self, code, name, filled_qty, filled_price, order_type, realized=0, avg_buy=None, remaining_qty: int = 0):

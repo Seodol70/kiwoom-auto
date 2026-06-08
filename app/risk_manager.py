@@ -137,6 +137,8 @@ class RiskManager(QObject):
             self._state.profit_locked = False
             self._state.loss_cut_locked = False
         self._manual_unlock_active = False
+        self._consecutive_losses = 0
+        self._cooling_off_until = None
 
     def unlock_entry_manual(self) -> None:
         """수동으로 신규 매수 락 해제 (사용자 버튼)"""
@@ -170,7 +172,7 @@ class RiskManager(QObject):
         if realized < 0:
             self._consecutive_losses += 1
             limit = int(getattr(self._scan_cfg, "consecutive_loss_limit", 3))
-            if self._consecutive_losses >= limit:
+            if self._consecutive_losses >= limit and not self._manual_unlock_active:
                 # 냉각기 발동 (동적 시간: 1회 5분, 2회 10분, 3회 15분... 최대 30분)
                 from datetime import datetime, timedelta
                 from logging_config import order_log

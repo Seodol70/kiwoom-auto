@@ -511,6 +511,9 @@ class TradingController(QObject):
 
 
             qty_today = getattr(pos, "qty_buy_today_app", 0) or 0
+            # 수동 포지션(opened_by_app=False)은 자동 청산 제외 — liquidate_all_positions와 정책 일치
+            if qty_today <= 0 and not getattr(pos, "opened_by_app", False):
+                continue
             if qty_today <= 0:
                 qty_today = pos.qty
             sell_qty = min(pos.qty, qty_today)
