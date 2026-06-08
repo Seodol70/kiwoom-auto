@@ -63,9 +63,6 @@ class SignalManager:
         # 첫 신호 자동매매 시작 — TC에서 판단, UI만 반응
         self.tc.auto_trade_started.connect(self.win._on_auto_trade_started)
 
-        # [NEW] 당일 실현손익 업데이트 연동
-        self.state.pnl_updated.connect(self.win.header.set_pnl)
-
         # 지수 급락 감지 신호 연결 (상태 변경)
         self.tc.market_crash_detected.connect(self.tc._on_market_crash_detected)
 

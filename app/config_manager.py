@@ -152,7 +152,28 @@ def reload_adaptive(scan_cfg) -> str:
 
         new_cfg = SmartScannerConfig.from_adaptive("params/adaptive_params.json")
 
-        # config.py를 단일 진실 소스로 하여 SmartScannerConfig에 주입
+        # adaptive_params.json의 params 섹션 전체를 new_cfg에 직접 적용
+        # from_adaptive()는 클래스 기본값만 적용하므로 JSON override를 명시적으로 수행
+        import json as _json_mod
+        import os as _os
+        _json_path = "params/adaptive_params.json"
+        if _os.path.exists(_json_path):
+            try:
+                with open(_json_path, "r", encoding="utf-8") as _jf:
+                    _jparams = _json_mod.load(_jf).get("params", {})
+                for _k, _v in _jparams.items():
+                    if not hasattr(new_cfg, _k):
+                        continue
+                    _existing = getattr(new_cfg, _k)
+                    try:
+                        _cast = tuple(_v) if isinstance(_existing, tuple) and isinstance(_v, list) else type(_existing)(_v)
+                        setattr(new_cfg, _k, _cast)
+                    except (TypeError, ValueError):
+                        setattr(new_cfg, _k, _v)
+            except Exception as _je:
+                logger.warning("[AdaptiveReload] JSON params 직접 적용 실패: %s", _je)
+
+        # config.py를 단일 진실 소스로 하여 SmartScannerConfig에 주입 (JSON보다 우선)
         new_cfg.max_change_pct      = float(_RISK.get("max_change_pct", 22.0))
         new_cfg.min_change_pct      = float(_RISK.get("min_change_pct", -1.5))
         new_cfg.signal_cooldown_sec = float(_RISK.get("signal_cooldown_sec", 45.0))
