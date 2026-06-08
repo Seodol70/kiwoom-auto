@@ -528,11 +528,15 @@ class TradingController(QObject):
                 # [FIX 2026-06-01] EMA20이탈·추세소멸도 손절 냉각 적용
                 # 대한전선 3회 반복 진입 원인: EMA20이탈/추세소멸로 청산 시
                 # mark_stop_loss 미호출 → 냉각 없이 즉시 재진입 가능
+                _chg = pos.price_change_pct_vs_avg
                 _is_loss_exit = (
                     any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑", "Distribution"])
-                    or ("EMA20이탈" in reason and pos.price_change_pct_vs_avg < 0)
-                    or ("추세소멸" in reason and pos.price_change_pct_vs_avg < 0)
-                    or ("Time Cut" in reason and pos.price_change_pct_vs_avg < 0)
+                    or ("EMA20이탈"  in reason and _chg < 0)
+                    or ("추세소멸"   in reason and _chg < 0)
+                    or ("Time Cut"  in reason and _chg < 0)
+                    # Trail Stop이 평단 손실 구간에서 발동한 경우도 냉각 적용
+                    # (trail_activation=2% 기준 이론상 수익권이지만 gap_sl 등으로 손실 가능)
+                    or ("Trail Stop" in reason and _chg < 0)
                 )
                 if _is_loss_exit:
                     self._order_mgr.mark_stop_loss(pos.code)
@@ -615,9 +619,10 @@ class TradingController(QObject):
                 ),
                 trail_activation=self._scan_cfg.trail_activation_pct,
                 trail_tier1=float(
-                    getattr(
-                        self._scan_cfg, "trail_pct_tier1", 0.8
-                    )
+                    # trail_pct_tier1_afternoon 전용 키 우선, 없으면 기본 tier1 사용
+                    # 오후는 수익을 빠르게 확정하므로 tier1을 기본보다 좁게 설정 가능
+                    getattr(self._scan_cfg, "trail_pct_tier1_afternoon",
+                            self._scan_cfg.trail_pct_tier1)
                 ),
                 trail_tier2=self._scan_cfg.trail_pct_tier2,
                 trail_tier3=self._scan_cfg.trail_pct_tier3,

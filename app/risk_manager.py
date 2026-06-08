@@ -126,8 +126,10 @@ class RiskManager(QObject):
         if self._cooling_off_until and datetime.now() >= self._cooling_off_until:
             self._cooling_off_until = None
             if self._state: self._state.profit_locked = False
+            # 카운트 초기화 — 미초기화 시 다음 손절 1회만으로 즉시 냉각기 재발동
+            self._consecutive_losses = 0
             from logging_config import order_log
-            order_log.info("[리스크] 냉각기 종료 — 신규 매수 차단 해제")
+            order_log.info("[리스크] 냉각기 종료 — 신규 매수 차단 해제, 연속손절 카운트 초기화")
 
     def reset(self) -> None:
         """자정 리셋"""

@@ -157,8 +157,15 @@ class JangDongMinStrategy(BaseStrategy):
         return sector_count >= 3
 
     def mark_today_entry(self, code: str, name: str) -> None:
-        """진입 시점 기록 — 청산 사유 무관 당일 재진입 90분 차단"""
-        self._today_entry_dict[code] = datetime.now()
+        """진입 시점 기록 — 청산 사유 무관 당일 재진입 90분 차단.
+        날짜가 바뀌었으면 이전 날 이력 전체 삭제 (자정 이후 재시작 없이 운영 시 방어).
+        """
+        now = datetime.now()
+        today = now.date()
+        stale = [c for c, t in self._today_entry_dict.items() if t.date() < today]
+        for c in stale:
+            del self._today_entry_dict[c]
+        self._today_entry_dict[code] = now
         from logging_config import order_log
         order_log.info("[전략] %s(%s) 당일 진입 기록 — 90분 재진입 차단", code, name)
 
@@ -292,8 +299,9 @@ class JangDongMinStrategy(BaseStrategy):
                 # 갭 동적 활성 (09:00~10:00 갭 종목): Hard Stop = gap_sl × 1.5
                 # 예: gap_sl=-2.5% → hard_stop=-3.75% (음수 비교, min으로 더 깊은 값 선택)
                 _hard_stop = min(_hard_stop, _gap_sl * 1.5)
-            elif _dtime(9, 0) <= _et <= _dtime(9, 30):
-                # 갭 비활성(갭<2%) + OPENING 진입: 기존 -1.5% 강화 유지
+            elif _dtime(9, 0) <= _et < _dtime(9, 30):
+                # 갭 비활성(갭<2%) + OPENING 진입 (09:00~09:29): 기존 -1.5% 강화 유지
+                # 9:30 이후는 ExitContext else 블록(기본 sl_pct)을 따르므로 포함 안 함
                 _hard_stop = max(_hard_stop, -1.5)
         if chg <= _hard_stop:
             return True, f"Hard Stop ({_hard_stop:.1f}%)"
@@ -402,7 +410,11 @@ class JangDongMinStrategy(BaseStrategy):
         is_strong = int(getattr(pos, "trend_level", 0)) >= strong_lv
 
         if is_strong:
-            if peak_chg < cfg.trail_tier2_max:
+            # 강세(trend_level >= 3): 초기 구간부터 tier2 이상 여유 부여 (큰 수익 추구)
+            # tier1 구간(0~trail_tier1_max)도 tier2 폭을 사용 — 의도적 설계
+            if peak_chg < cfg.trail_tier1_max:
+                _tp = tier2_pct  # 초기 구간도 tier2로 여유 있게 홀딩
+            elif peak_chg < cfg.trail_tier2_max:
                 _tp = tier2_pct
             else:
                 _tp = tier3_pct
