@@ -420,6 +420,12 @@ class JangDongMinStrategy(BaseStrategy):
     def _should_ema20_exit(self, pos: Any) -> bool:
         if not getattr(self._scan_cfg, "ema20_exit_enabled", False):
             return False
+        # 진입 후 N분 내 EMA20 이탈은 일시적 노이즈 — 즉시 청산 방지
+        # 매수 직후 0.3% 하락만으로도 EMA20 아래 진입 시 조기 손절되는 문제 방지
+        _ema20_min_hold_sec = float(getattr(self._scan_cfg, "ema20_exit_min_hold_sec", 300))
+        entry_time = getattr(pos, "entry_time", None)
+        if entry_time and (datetime.now() - entry_time).total_seconds() < _ema20_min_hold_sec:
+            return False
         if not self._snap_store:
             return False
         snap = self._snap_store.get_snapshot(pos.code)
@@ -485,11 +491,12 @@ class JangDongMinStrategy(BaseStrategy):
         if not snap or not snap.volumes_1min or len(snap.volumes_1min) < 2:
             return False
 
-        # 진입 후 최소 3분은 보호 — 진입 직후 1분봉 노이즈로 즉시 청산되는 문제 방지
+        # 진입 후 최소 5분은 보호 — 진입 직후 틱 노이즈·거래량 급증으로 즉시 청산되는 문제 방지
         entry_time = getattr(pos, "entry_time", None)
         if entry_time:
             elapsed_sec = (datetime.now() - entry_time).total_seconds()
-            if elapsed_sec < 180:
+            _dist_min_hold_sec = float(getattr(self._scan_cfg, "distribution_min_hold_sec", 300))
+            if elapsed_sec < _dist_min_hold_sec:
                 return False
 
         # 현재가가 직전가 대비 하락 (음봉 기조)
