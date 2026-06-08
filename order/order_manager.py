@@ -935,7 +935,8 @@ class OrderManager(QObject):
                             _tp = _t2 if _peak_chg < _t2_max else _t3
                         else:
                             if _peak_chg < _t1_max:
-                                _tp = _t1
+                                # 분할익절 완료 후 잔여 포지션은 Tier2 폭으로 여유 부여
+                                _tp = _t2 if getattr(pos, "partial_sold", False) else _t1
                             elif _peak_chg < _t2_max:
                                 _tp = _t2
                             else:

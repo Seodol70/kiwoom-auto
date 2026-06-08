@@ -379,7 +379,8 @@ class JangDongMinStrategy(BaseStrategy):
                 _tp = cfg.trail_pct_tier3
         else:
             if peak_chg < cfg.trail_tier1_max:
-                _tp = cfg.trail_pct_tier1
+                # 분할익절 완료 후 잔여 포지션은 Tier2 폭으로 여유 부여
+                _tp = cfg.trail_pct_tier2 if getattr(pos, "partial_sold", False) else cfg.trail_pct_tier1
             elif peak_chg < cfg.trail_tier2_max:
                 _tp = cfg.trail_pct_tier2
             else:
