@@ -24,6 +24,15 @@ def check_pullback_entry(
             f"추세 레벨 부족 — trend_lv={tlv} (요구: >={_min_tlv})")
         return None
 
+    # 선행지표 체크 — 반등 시점에 매수 압력(bs/aw 등) 없으면 차단
+    # JDM(0.25)보다 낮은 0.15: 눌림목은 rs가 낮아도 다른 지표로 통과 가능
+    _leading = IndicatorService.get_leading_score(snap)
+    _lead_thr = float(getattr(cfg, "pullback_leading_score_min", 0.15))
+    if _leading is not None and _leading < _lead_thr:
+        ScannerLogger.rejected(snap.code, snap.name, "PULLBACK_LEADING",
+            f"선행지표 부족 — score={_leading:.2f} (요구: >={_lead_thr:.2f})")
+        return None
+
     closes = snap.closes_1min
     if len(closes) < 20:
         return None

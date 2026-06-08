@@ -43,6 +43,9 @@ class PullbackStrategy(BaseStrategy):
 
         # ScanSignal 생성 (신호 메타데이터 빌딩은 strategy 책임)
         ai_features = IndicatorService.get_ai_features(snap, index_history=index_history, config=cfg)
+        ai_features["li_rs"]      = round(IndicatorService.calc_rs_leading_score(
+            float(getattr(snap, "rs_score", 0.0) or 0.0)), 3)
+        ai_features["li_leading"] = round(IndicatorService.get_leading_score(snap) or 0.0, 3)
         candle_low = int(snap.lows_1min[-1]) if snap.lows_1min else 0
         change_pct = float(getattr(snap, "change_pct", 0) or 0)
         if candle_low > 0:
