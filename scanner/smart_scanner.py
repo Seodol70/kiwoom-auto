@@ -940,6 +940,26 @@ class SmartScanner(QObject):
                 sig.name, sig.code, sig.signal_type, (now_ts - last_ts), cooldown,
             )
             return
+
+        # 손절 냉각 중인 종목 신호는 발행 자체를 스킵 (로그/DB/콜백 낭비 방지)
+        try:
+            strategy = getattr(self._order_mgr, "_strategy", None) if self._order_mgr else None
+            if strategy is not None:
+                loss_exit_dict = getattr(strategy, "_loss_exit_dict", {})
+                loss_time = loss_exit_dict.get(sig.code)
+                if loss_time is not None:
+                    from datetime import datetime as _dt
+                    cooldown_min = float(getattr(self.cfg, "loss_exit_cooldown_minutes", 60.0))
+                    elapsed_min = (_dt.now() - loss_time).total_seconds() / 60.0
+                    if elapsed_min < cooldown_min:
+                        logger.debug(
+                            "[SignalSkip] %s(%s) 손절 냉각 중 (%.0f분 남음) — 신호 발행 스킵",
+                            sig.name, sig.code, cooldown_min - elapsed_min,
+                        )
+                        return
+        except Exception:
+            pass
+
         self._last_signal_ts[key] = now_ts
 
         logger.info("[신호발생] %s(%s) [%s] 가격=%d 사유=%s",

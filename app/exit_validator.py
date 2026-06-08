@@ -103,7 +103,7 @@ class EODDayTargetValidator(ExitValidator):
             return True, reason, 1.0
 
         # 익절 체크
-        tp_pct = float(getattr(ctx.trading_cfg, "take_profit_pct", 2.5))
+        tp_pct = float(getattr(ctx.trading_cfg, "jdm_take_profit_pct", getattr(ctx.trading_cfg, "take_profit_pct", 3.0)))
         if pnl_pct >= tp_pct:
             reason = f"익절 ({pnl_pct:.2f}% >= {tp_pct}%)"
             logger.info("[익절] %s(%s) %s", pos.name, pos.code, reason)

@@ -756,7 +756,7 @@ class TradingController(QObject):
 
     def check_eod_daytime_targets(self) -> None:
         """EOD 포지션 당일 수익률 목표 확인 (Stage 2)"""
-        _tp_pct = float(getattr(self._scan_cfg, 'take_profit_pct', 2.5))
+        _tp_pct = float(getattr(self._scan_cfg, 'jdm_take_profit_pct', getattr(self._scan_cfg, 'take_profit_pct', 3.0)))
         _pp_pct = float(getattr(self._scan_cfg, 'partial_profit_pct', 1.5))
         _sl_pct = float(getattr(self._scan_cfg, 'stop_loss_pct', -1.5))
 

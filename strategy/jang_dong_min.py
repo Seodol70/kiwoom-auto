@@ -35,8 +35,8 @@ class StrategyConfig:
     bb_period: int = 20
     bb_std: float = 2.0
     holding_minutes: int = 60
-    stop_loss_pct: float = -1.2
-    take_profit_pct: float = 2.5
+    stop_loss_pct: float = -1.0
+    take_profit_pct: float = 3.0
     order_qty: int = 1
 
 # ---------------------------------------------------------------------------
@@ -294,7 +294,7 @@ class JangDongMinStrategy(BaseStrategy):
                              float(getattr(pos, "entry_gap_pct", 0.0)),
                              _gap_sl, _gap_tp)
             else:
-                _tp_pct = float(getattr(self._scan_cfg, "take_profit_pct", 2.5))
+                _tp_pct = float(getattr(self._scan_cfg, "jdm_take_profit_pct", getattr(self._scan_cfg, "take_profit_pct", 3.0)))
             if chg >= _tp_pct:
                 return True, f"Take Profit ({_tp_pct:.1f}%)"
 
