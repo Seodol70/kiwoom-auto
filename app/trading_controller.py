@@ -236,6 +236,14 @@ class TradingController(QObject):
             self._record_signal(sig)
             return False
 
+        # 수익 목표 달성 / 냉각기 — 신규 매수 차단
+        if self._risk_mgr and self._risk_mgr.is_new_entry_locked:
+            reason = "당일 수익 목표 달성 — 신규 매수 차단"
+            logger.info("[진입거절] %s(%s) %s", sig.name, sig.code, reason)
+            self.signal_rejected.emit(f"{sig.code}: {reason}")
+            self._record_signal(sig)
+            return False
+
         # ── SignalFilterChain 실행 ────────────────────────────────────────────
         from app.signal_filter import SignalFilterContext
         ctx = SignalFilterContext(
@@ -447,13 +455,23 @@ class TradingController(QObject):
         3. AppState 갱신 (UI에 현재가/평가손익 반영)
         — 잔고 동기화와 완전히 분리되어 독립적으로 작동.
         """
-        if not self._order_mgr or not self._order_mgr.positions:
+        if not self._order_mgr:
             return
 
         # 장 외 시간 청산 평가 차단 — 재연결 후 야간에 RC4058 매도 주문 발송 방지
         from datetime import time as _dtime
         _now_t = datetime.now().time()
         if not (_dtime(8, 55) <= _now_t <= _dtime(15, 35)):
+            return
+
+        # 리스크 한도 / 냉각기 만료 체크 — 포지션이 없어도 실행 (냉각기 해제 타이밍)
+        if self._risk_mgr:
+            try:
+                self._risk_mgr.check()
+            except Exception as e:
+                logger.warning("[tick_exit_check] risk_mgr.check() 오류: %s", e)
+
+        if not self._order_mgr.positions:
             return
 
         try:
@@ -468,7 +486,7 @@ class TradingController(QObject):
             if self._ctx:
                 self._ctx.update_portfolio(self._order_mgr.cash, dict(self._order_mgr.positions))
 
-            # 3. 청산 평가 (가장 중요한 부분 — 손절/익절 트리거)
+            # 3. 청산 평가 (손절/익절 트리거)
             self.check_and_exit_all()
         except Exception as e:
             logger.warning("[tick_exit_check] 오류: %s", e)
