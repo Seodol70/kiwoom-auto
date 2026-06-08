@@ -18,7 +18,10 @@ def check_pullback_entry(
     상승 추세(trend_level >= 2) 종목이 EMA20 근처까지 눌렸을 때 진입.
     """
     tlv = int(getattr(snap, "trend_level", 0))
-    if tlv < 2:
+    _min_tlv = int(getattr(cfg, "pullback_min_trend_lv", 3))
+    if tlv < _min_tlv:
+        ScannerLogger.rejected(snap.code, snap.name, "PULLBACK_TREND",
+            f"추세 레벨 부족 — trend_lv={tlv} (요구: >={_min_tlv})")
         return None
 
     closes = snap.closes_1min
@@ -86,9 +89,10 @@ def check_pullback_entry(
     if len(vols) >= 4:
         _dip_avg_vol = (vols[-3] + vols[-2]) / 2  # 눌리는 동안 거래량
         _bounce_vol  = vols[-1]                    # 반등 봉 거래량
-        if _dip_avg_vol > 0 and _bounce_vol < _dip_avg_vol * 0.8:
+        _energy_mult = float(getattr(cfg, "pullback_bounce_energy", 1.2))
+        if _dip_avg_vol > 0 and _bounce_vol < _dip_avg_vol * _energy_mult:
             ScannerLogger.rejected(snap.code, snap.name, "PULLBACK_ENERGY",
-                f"반등 에너지 부족 — 반등봉 {_bounce_vol:,}주 < 눌림평균 {_dip_avg_vol:,.0f}주 × 0.8")
+                f"반등 에너지 부족 — 반등봉 {_bounce_vol:,}주 < 눌림평균 {_dip_avg_vol:,.0f}주 × {_energy_mult}")
             return None
 
     # 4. VWAP 필터 — 활성화 (2026-05-13: 거짓 신호 필터링)

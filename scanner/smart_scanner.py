@@ -155,7 +155,7 @@ from scanner.signal_evaluator import (
     check_ema20_filter, check_bullish_engulfing, check_bullish_pin_bar,
     check_breakout_gate, check_pre_surge, check_opening_surge,
     check_opening_scalp, check_eod_entry, check_jdm_entry,
-    check_pullback_entry, check_vwap_filter
+    check_vwap_filter
 )
 
 

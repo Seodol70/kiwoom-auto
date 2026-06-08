@@ -35,8 +35,8 @@ class StrategyConfig:
     bb_period: int = 20
     bb_std: float = 2.0
     holding_minutes: int = 60
-    stop_loss_pct: float = -1.0
-    take_profit_pct: float = 3.0
+    stop_loss_pct: float = -2.0
+    take_profit_pct: float = 5.0
     order_qty: int = 1
 
 # ---------------------------------------------------------------------------
