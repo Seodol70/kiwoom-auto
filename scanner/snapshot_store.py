@@ -532,6 +532,7 @@ class SnapshotStore:
             h1_closes        = list(getattr(st, "h1_closes", [])),
             h1_highs         = list(getattr(st, "h1_highs",  [])),
             h1_lows          = list(getattr(st, "h1_lows",   [])),
+            rs_score         = float(getattr(st, "rs_score", 0.0)),
         )
 
     def set_h1_candles(self, code: str, ohlc: list[dict]) -> None:
@@ -559,6 +560,11 @@ class SnapshotStore:
         if strength > 0:
             with self._lock:
                 self._get_state(code).chejan_str = strength
+
+    def update_rs_score(self, code: str, rs: float) -> None:
+        """지수 대비 상대강도 갱신. rs = stock.change_pct - index.change_pct."""
+        with self._lock:
+            self._get_state(code).rs_score = float(rs)
 
     def update_hoga(
         self,

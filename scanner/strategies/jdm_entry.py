@@ -65,6 +65,8 @@ class JdmStrategy(BaseStrategy):
             list(getattr(snap, "ask1_qty_history", None) or [])), 3)
         ai_features["li_tv"] = round(IndicatorService.calc_tick_vol_accel_score(
             list(getattr(snap, "tick_vol_history", None) or [])), 3)
+        ai_features["li_rs"] = round(IndicatorService.calc_rs_leading_score(
+            float(getattr(snap, "rs_score", 0.0) or 0.0)), 3)
         ai_features["li_leading"] = round(IndicatorService.get_leading_score(snap) or 0.0, 3)
 
         # 쿨다운 타임스탬프 갱신

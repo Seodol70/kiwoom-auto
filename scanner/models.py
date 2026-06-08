@@ -87,6 +87,9 @@ class InternalStockState:
     h1_lows:   List[float] = field(default_factory=list)
     h1_updated_at: Optional[datetime] = None
 
+    # 지수 대비 상대강도 (stock.change_pct - index.change_pct)
+    rs_score: float = 0.0
+
     # [NEW] 성능 최적화용 지표 캐시 및 갱신 제어
     rsi_cached: float = 0.0
     exec_vel_cached: float = 0.0

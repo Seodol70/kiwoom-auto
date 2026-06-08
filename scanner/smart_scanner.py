@@ -1195,6 +1195,13 @@ class SmartScanner(QObject):
             self._touch_trade_amt_baseline(code, amt)
             self.top_mgr.update(code, amt)
 
+            # RS 선행지표: 지수 대비 상대강도 실시간 갱신
+            # 폭락장(지수 -8%)에서 종목이 +2%면 rs_score = +10.0 → 스마트머니 매집 신호
+            if pct != 0.0:
+                _st_tmp = self.store.get_internal_state(code)
+                _mtype  = getattr(_st_tmp, "market_type", "10") if _st_tmp else "10"
+                _idx_pct = self.cfg.kospi_chg_pct if _mtype == "0" else self.cfg.kosdaq_chg_pct
+                self.store.update_rs_score(code, pct - _idx_pct)
 
             # [NEW] 체결강도 저장 (FID 20)
             if strength > 0:

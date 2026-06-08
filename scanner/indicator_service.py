@@ -154,6 +154,27 @@ class IndicatorService:
     # ── 선행 지표 (Leading Indicators) ─────────────────────────────────────────
 
     @staticmethod
+    def calc_rs_leading_score(rs_score: float) -> float:
+        """
+        지수 대비 상대강도 점수 (0.0~1.0) — 폭락장 역행 상승 포착.
+
+        rs_score = stock.change_pct - index.change_pct
+        KOSPI -8%, 종목 +2%  → rs_score = +10.0 → 1.0 (극강)
+        KOSPI -3%, 종목 +1%  → rs_score = +4.0  → 0.75
+        KOSPI  0%, 종목 +1%  → rs_score = +1.0  → 0.35
+        rs_score < +0.5      → 0.0 (지수보다 약하거나 비슷)
+
+        스마트머니가 폭락 속에서도 특정 종목을 적극 매집한다는 의미.
+        기존 지표(체결강도, 거래량, 호가)와 독립적인 시장 맥락 신호.
+        """
+        if rs_score >= 8.0:  return 1.0
+        if rs_score >= 5.0:  return 0.85
+        if rs_score >= 3.0:  return 0.65
+        if rs_score >= 1.5:  return 0.45
+        if rs_score >= 0.5:  return 0.25
+        return 0.0
+
+    @staticmethod
     def calc_chejan_reversal_score(chejan_history: list) -> float:
         """
         체결강도 바닥 반등 점수 (0.0~1.0).
@@ -367,19 +388,21 @@ class IndicatorService:
           호가 압력(보조 확인 필수) — hp ≥ 0.50 + (bs/cr/vb/tv 중 1개 이상)
           매도벽 급감 ≥ 0.50       — 매도1호가 수량 50%↑ 급감 (돌파 직전)
           틱속도 가속(방향보정) ≥ 0.50 — 가격 상승 중 틱속도 폭발
+          RS ≥ 0.65 (rs_score ≥ +3.0%) — 폭락장 역행 상승 (스마트머니 컨텍스트 단독 진입)
 
         PRIMARY 없으면 0.0 반환 → 진입 차단.
 
         가중합 (PRIMARY 통과 후):
-          매수1호가 기울기(단조성 보정)  22% — 수요자가 직접 가격 올려가며 사는 신호
-          매도벽 급감                   22% — 상승 돌파 직전 저항 소멸
-          틱속도 가속(방향보정)         15% — 가격 상승 중 체결 폭발 확인
-          거래량 폭발(방향보정)         12% — 분봉 거래량 추세 확인
-          체결강도 반등                 12% — 매수세 점화 확인
+          매수1호가 기울기(단조성 보정)  19% — 수요자가 직접 가격 올려가며 사는 신호
+          매도벽 급감                   19% — 상승 돌파 직전 저항 소멸
+          지수 대비 상대강도(RS)        15% — 폭락장 역행 상승 = 스마트머니 매집 컨텍스트
+          틱속도 가속(방향보정)         12% — 가격 상승 중 체결 폭발 확인
+          거래량 폭발(방향보정)         11% — 분봉 거래량 추세 확인
+          체결강도 반등                 10% — 매수세 점화 확인
           체결강도 가속도                5% — 반등 후 계속 강해지는가
-          기관/외인 전환                 6% — 스마트머니 방향 전환 (복원)
-          호가 압력                      3% — 실시간 매수 우위
-          호가 속도                      2% — 매수잔량 증가 추세
+          기관/외인 전환                 5% — 스마트머니 방향 전환
+          호가 압력                      2% — 실시간 매수 우위
+          호가 속도                      1% — 매수잔량 증가 추세
           거래량 축적                    1% — 스마트머니 매집 (보조)
 
         데이터 부족 시 None 반환 → 호출처에서 체크 생략.
@@ -408,6 +431,9 @@ class IndicatorService:
         tv  = IndicatorService.calc_tick_vol_accel_score(
             list(getattr(snap, 'tick_vol_history', None) or []))
 
+        # 지수 대비 상대강도 (RS): 폭락장 역행 상승 = 스마트머니 매집 신호
+        rs  = IndicatorService.calc_rs_leading_score(float(getattr(snap, 'rs_score', 0.0) or 0.0))
+
         # [개선 1] vb/tv 방향성 보정: 가격 하락 중이면 70% 할인 (패닉셀 false positive 방지)
         # 데이터 부족 시 보정 생략 (보수적 채택)
         if len(closes_1m) >= 3:
@@ -422,21 +448,24 @@ class IndicatorService:
         hp_primary = (hp >= 0.50) and (bs >= 0.10 or cr >= 0.10 or vb_dir >= 0.15 or tv_dir >= 0.15)
 
         # PRIMARY 조건: "막 불붙기 시작"하는 신호 중 하나 이상 필수
+        # rs >= 0.65: rs_score >= 3.0% (지수 3%p 이상 역행 상승 = 의미있는 스마트머니 신호)
         primary_ok = (
             (bs >= 0.30) or (vb_dir >= 0.40) or (cr >= 0.25) or
-            (iv >= 0.50) or hp_primary or (aw >= 0.50) or (tv_dir >= 0.50)
+            (iv >= 0.50) or hp_primary or (aw >= 0.50) or (tv_dir >= 0.50) or
+            (rs >= 0.65)
         )
         if not primary_ok:
             return 0.0
 
-        # [개선 3] 가중합: iv 0%→6% 복원 (vb −3%, tv −3%)
-        # 합계: 0.22+0.22+0.15+0.12+0.12+0.05+0.06+0.03+0.02+0.01 = 1.00
+        # [개선 4] RS 추가 (15%): bs/aw 각 3%p씩 인하, tv 3%p 인하
+        # 합계: 0.19+0.19+0.15+0.12+0.11+0.10+0.05+0.05+0.02+0.01+0.01 = 1.00
         return (
-            bs    * 0.22 + aw    * 0.22 +
-            tv_dir* 0.15 + vb_dir* 0.12 +
-            cr    * 0.12 + ca    * 0.05 +
-            iv    * 0.06 + hp    * 0.03 +
-            hv    * 0.02 + ac    * 0.01
+            bs    * 0.19 + aw    * 0.19 +
+            rs    * 0.15 +
+            tv_dir* 0.12 + vb_dir* 0.11 +
+            cr    * 0.10 + ca    * 0.05 +
+            iv    * 0.05 + hp    * 0.02 +
+            hv    * 0.01 + ac    * 0.01
         )
 
     @staticmethod
