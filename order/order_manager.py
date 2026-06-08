@@ -254,6 +254,8 @@ class OrderManager(QObject):
         # 포지션 실시간 현재가 구독 콜백 (SmartScanner에서 주입)
         self.on_position_opened: Optional[Callable[[str], None]] = None
         self.on_position_closed: Optional[Callable[[str], None]] = None
+        # 틱 손절(hard stop / 확정손절) 발동 시 strategy.mark_loss_exit() 호출 경로
+        self.on_tick_loss_exit: Optional[Callable] = None  # Callable[[Position], None]
         
         self._snap_store = None # [NEW] 호가 잔량 확인용
 
@@ -907,6 +909,8 @@ class OrderManager(QObject):
                     return
                 logger.warning("🚨 [하드스탑] %s(%s) 임계치 돌파 (%.2f%%) — 즉시 매도", pos.name, code, pos.pnl_pct)
                 self.mark_stop_loss(code)
+                if self.on_tick_loss_exit:
+                    self.on_tick_loss_exit(pos)
                 self.force_exit(code, pos.name, pos.qty, "하드스탑")
                 return
 
@@ -958,6 +962,8 @@ class OrderManager(QObject):
                     if elapsed >= 3.0:
                         logger.warning("📉 [확정손절] %s(%s) 3초간 손절가 하회 — 매도 및 블랙리스트 등록", pos.name, code)
                         self.mark_stop_loss(code)
+                        if self.on_tick_loss_exit:
+                            self.on_tick_loss_exit(pos)
                         self.force_exit(code, pos.name, pos.qty, "확정손절")
                     else:
                         logger.debug("⏳ [손절대기] %s 관찰 중... (%.1fs)", pos.name, elapsed)

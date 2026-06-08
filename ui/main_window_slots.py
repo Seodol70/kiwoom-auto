@@ -169,8 +169,13 @@ class MainWindowSlots:
     @pyqtSlot()
     def _on_loss_cut(self) -> None:
         """RiskManager: 손절 한도 도달 알림"""
-        QMessageBox.critical(self, "리스크 관리", "당일 손절 한도에 도달하여 모든 포지션을 청산하고 매수를 중단합니다.")
         self.append_log("🔴 [리스크] 당일 손절 한도 도달 — 시스템 가동 중지")
+        # liquidate_all_positions 슬롯이 먼저 실행되도록 모달을 500ms 지연
+        from PyQt5.QtCore import QTimer
+        QTimer.singleShot(500, lambda: QMessageBox.critical(
+            self, "리스크 관리",
+            "당일 손절 한도에 도달하여 모든 포지션을 청산하고 매수를 중단합니다."
+        ))
 
     @pyqtSlot()
     def _on_profit_locked(self) -> None:

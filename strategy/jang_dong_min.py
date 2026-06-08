@@ -528,7 +528,8 @@ class JangDongMinStrategy(BaseStrategy):
         # 거래량 평소보다 2.5배 이상 (세력 이탈 의심)
         avg_vol = np.mean(snap.volumes_1min[-21:-1]) if len(snap.volumes_1min) >= 21 else snap.volumes_1min[0]
         cur_vol = snap.volumes_1min[-1]
-        is_high_vol = cur_vol >= avg_vol * 2.5
+        # avg_vol=0이면 is_high_vol이 항상 True가 되어 오발동하므로 방어
+        is_high_vol = avg_vol > 0 and cur_vol >= avg_vol * 2.5
 
         # 수익권이 아닐 때 거래량 실린 하락은 위험 신호
         # 수익권일 때는 트레일 스탑이 있으므로 조금 더 여유를 줌

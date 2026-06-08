@@ -126,6 +126,11 @@ class TradingController(QObject):
                 lambda: self.log_message.emit("💰 [리스크] 당일 수익 목표 달성 — 신규 매수 차단")
             )
 
+        # 틱 손절(hard stop / 확정손절) 경로에서 strategy.mark_loss_exit() 호출 연결
+        # check_and_exit_all과 달리 _on_price_updated는 order_manager에 있어 strategy 미접근
+        if self._order_mgr and self._strategy:
+            self._order_mgr.on_tick_loss_exit = self._strategy.mark_loss_exit
+
         # [NEW] SmartScanner 신호를 주문 모듈과 연결 (2026-05-07 수정)
         if self._smart_scanner:
             self._smart_scanner.signal_detected.connect(self._on_signal_from_scanner)
@@ -561,9 +566,10 @@ class TradingController(QObject):
     def _get_exit_context(self, now: datetime) -> ExitContext:
         """현재 시간에 따른 청산 파라미터 조회"""
         now_min = now.hour * 60 + now.minute
-        _is_opening = (9 * 60) <= now_min < (9.5 * 60)
-        _is_midday = (11 * 60) <= now_min < (13 * 60)
-        _is_afternoon = (13 * 60) <= now_min < (14.5 * 60)  # 13:00~14:30
+        _is_opening      = (9 * 60) <= now_min < 570        # 09:00~09:29
+        _is_midday       = (11 * 60) <= now_min < (13 * 60) # 11:00~12:59
+        _is_afternoon    = (13 * 60) <= now_min < 870        # 13:00~14:29
+        _is_late_closing = now_min >= 870                    # 14:30~ (장 막판)
 
 
         partial_profit_pct = float(getattr(self._scan_cfg, "partial_profit_pct", 0.0))
@@ -637,7 +643,24 @@ class TradingController(QObject):
                 partial_profit_pct=partial_profit_pct,
                 atr_trail_enabled=atr_trail_enabled,
             )
+        elif _is_late_closing:
+            # 장 막판(14:30~15:35) — AFTERNOON보다 손절/타임컷 더 타이트하게
+            return ExitContext(
+                sl_pct=float(
+                    getattr(self._scan_cfg, "stop_loss_pct_late_closing", -0.8)
+                ),
+                trail_activation=self._scan_cfg.trail_activation_pct,
+                trail_tier1=self._scan_cfg.trail_pct_tier1,
+                trail_tier2=self._scan_cfg.trail_pct_tier2,
+                trail_tier3=self._scan_cfg.trail_pct_tier3,
+                time_cut_min=int(
+                    getattr(self._scan_cfg, "time_cut_minutes_late_closing", 8)
+                ),
+                partial_profit_pct=partial_profit_pct,
+                atr_trail_enabled=atr_trail_enabled,
+            )
         else:
+            # 09:30~10:59 (오전 일반 구간)
             return ExitContext(
                 sl_pct=getattr(self._scan_cfg, "jdm_stop_loss_pct", -1.2),
                 trail_activation=self._scan_cfg.trail_activation_pct,
