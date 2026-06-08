@@ -119,6 +119,13 @@ class TradingController(QObject):
         from app.signal_filter import SignalFilterChain
         self._filter_chain = SignalFilterChain()
 
+        # 리스크 매니저 시그널 연결 — __init__에서 1회만 연결 (중복 방지)
+        if self._risk_mgr:
+            self._risk_mgr.daily_loss_cut.connect(self.liquidate_all_positions)
+            self._risk_mgr.daily_profit_locked.connect(
+                lambda: self.log_message.emit("💰 [리스크] 당일 수익 목표 달성 — 신규 매수 차단")
+            )
+
         # [NEW] SmartScanner 신호를 주문 모듈과 연결 (2026-05-07 수정)
         if self._smart_scanner:
             self._smart_scanner.signal_detected.connect(self._on_signal_from_scanner)
@@ -191,13 +198,6 @@ class TradingController(QObject):
         # [AI] 신호 필터 초기화
         from app.ai_filter import AIFilter
         self._ai_filter = AIFilter()
-
-        # 리스크 매니저 신호 연결
-        if self._risk_mgr:
-            self._risk_mgr.daily_loss_cut.connect(self.liquidate_all_positions)
-            self._risk_mgr.daily_profit_locked.connect(
-                lambda: self.log_message.emit("💰 [리스크] 당일 수익 목표 달성 — 신규 매수 차단")
-            )
 
 
     @pyqtSlot(bool)
@@ -519,8 +519,8 @@ class TradingController(QObject):
 
 
             # 청산 판정 순서 (hard stop부터 시작)
-            # 상태 갱신 (peak_price 등)
-            self._strategy.update_state(pos)
+            # 상태 갱신 (peak_price 등) — ctx 전달로 시간대별 trail_activation 반영
+            self._strategy.update_state(pos, exit_ctx)
 
             should_exit, reason = self._strategy.should_exit(pos, exit_ctx)
             if should_exit:

@@ -220,12 +220,12 @@ class JangDongMinStrategy(BaseStrategy):
         except Exception as e:
             logger.warning("[손절이력로드실패] %s", e)
 
-    def update_state(self, pos: Any) -> None:
+    def update_state(self, pos: Any, ctx: "ExitContext | None" = None) -> None:
         """현재가 기반 peak_price 갱신 (기존 ExitStrategy.update_peak_price 통합)"""
         if not pos or pos.current_price <= 0 or pos.avg_price <= 0:
             return
-            
-        activation = pos.avg_price * (1 + self._scan_cfg.trail_activation_pct / 100)
+        activation_pct = ctx.trail_activation if (ctx and ctx.trail_activation > 0) else self._scan_cfg.trail_activation_pct
+        activation = pos.avg_price * (1 + activation_pct / 100)
         if pos.current_price >= activation and pos.current_price > pos.peak_price:
             pos.peak_price = pos.current_price
 
@@ -301,7 +301,7 @@ class JangDongMinStrategy(BaseStrategy):
         # 2. 트레일 스탑 — 우선 순위 높음 (활성화되면 익절 무시)
         trail_price = 0
         if not _is_eod_pre_gap:
-            trail_price = self.get_trail_price(pos)
+            trail_price = self.get_trail_price(pos, ctx)
             if trail_price > 0 and pos.current_price <= trail_price:
                 return True, f"Trail Stop (Peak {pos.peak_price:,} -> {trail_price:,})"
 
@@ -379,34 +379,42 @@ class JangDongMinStrategy(BaseStrategy):
 
     # ─── 내부 유틸리티 ──────────────────────────────────────────────────
 
-    def get_trail_price(self, pos: Any) -> int:
-        """트레일 스탑 가격 계산"""
+    def get_trail_price(self, pos: Any, ctx: "ExitContext | None" = None) -> int:
+        """트레일 스탑 가격 계산.
+        ctx가 있으면 시간대별 trail 파라미터를 ctx에서 읽고, 없으면 scan_cfg 기본값 사용.
+        """
         if not pos or pos.peak_price <= 0 or pos.avg_price <= 0:
             return 0
-            
+
         peak_chg = (pos.peak_price - pos.avg_price) / pos.avg_price * 100
         cfg = self._scan_cfg
-        
-        if peak_chg < cfg.trail_activation_pct:
+
+        # ctx가 제공된 경우 시간대 오버라이드 값 우선 사용
+        activation_pct = ctx.trail_activation if (ctx and ctx.trail_activation > 0) else cfg.trail_activation_pct
+        tier1_pct      = ctx.trail_tier1      if (ctx and ctx.trail_tier1 > 0)      else cfg.trail_pct_tier1
+        tier2_pct      = ctx.trail_tier2      if (ctx and ctx.trail_tier2 > 0)      else cfg.trail_pct_tier2
+        tier3_pct      = ctx.trail_tier3      if (ctx and ctx.trail_tier3 > 0)      else cfg.trail_pct_tier3
+
+        if peak_chg < activation_pct:
             return 0
-            
+
         strong_lv = int(getattr(cfg, "strong_trend_hold_level", 3))
         is_strong = int(getattr(pos, "trend_level", 0)) >= strong_lv
-        
+
         if is_strong:
             if peak_chg < cfg.trail_tier2_max:
-                _tp = cfg.trail_pct_tier2
+                _tp = tier2_pct
             else:
-                _tp = cfg.trail_pct_tier3
+                _tp = tier3_pct
         else:
             if peak_chg < cfg.trail_tier1_max:
                 # 분할익절 완료 후 잔여 포지션은 Tier2 폭으로 여유 부여
-                _tp = cfg.trail_pct_tier2 if getattr(pos, "partial_sold", False) else cfg.trail_pct_tier1
+                _tp = tier2_pct if getattr(pos, "partial_sold", False) else tier1_pct
             elif peak_chg < cfg.trail_tier2_max:
-                _tp = cfg.trail_pct_tier2
+                _tp = tier2_pct
             else:
-                _tp = cfg.trail_pct_tier3
-                
+                _tp = tier3_pct
+
         return int(pos.peak_price * (1 - _tp / 100))
 
     def _should_breakeven_stop(self, pos: Any) -> bool:
@@ -489,6 +497,8 @@ class JangDongMinStrategy(BaseStrategy):
         """거래량 실린 음봉/하락 시 탈출 (손절가 도달 전이라도)"""
         snap = self._snap_store.get_snapshot(pos.code) if self._snap_store else None
         if not snap or not snap.volumes_1min or len(snap.volumes_1min) < 2:
+            return False
+        if not snap.closes_1min:
             return False
 
         # 진입 후 최소 5분은 보호 — 진입 직후 틱 노이즈·거래량 급증으로 즉시 청산되는 문제 방지

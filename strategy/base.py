@@ -68,9 +68,10 @@ class BaseStrategy(ABC):
         pass
 
     @abstractmethod
-    def update_state(self, pos: Any) -> None:
+    def update_state(self, pos: Any, ctx: Optional["ExitContext"] = None) -> None:
         """
         실시간 가격 데이터에 따라 포지션의 상태(최고가 등)를 업데이트합니다.
+        ctx가 있으면 시간대별 trail_activation 파라미터를 우선 적용합니다.
         """
         pass
 

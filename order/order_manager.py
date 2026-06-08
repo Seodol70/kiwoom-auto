@@ -983,12 +983,14 @@ class OrderManager(QObject):
     def should_exit_on_trend_decay(self, code: str) -> bool:
         """
         요셉 시그널 추세 소멸 기반 청산 판정.
-        Strong(3) → No Trend(0) 전환 시 True 반환.
+        Strong(3)에서 Weak(1) 이하로 전환 시 True 반환.
+        기존 3→0만 감지하던 조건 완화: 실제로 3→0 즉각 전환은 거의 발생하지 않음.
+        3→2→1 단계적 하락 시 1 도달 시점에 청산해 추가 손실 방지.
         """
         pos = self.positions.get(code)
         if pos is None:
             return False
-        return int(pos.trend_prev_level) == 3 and int(pos.trend_level) == 0
+        return int(pos.trend_prev_level) == 3 and int(pos.trend_level) <= 1
 
     def is_pending(self, code: str) -> bool:
         if code not in self._pending:
