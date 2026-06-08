@@ -257,15 +257,15 @@ class OrderManager(QObject):
         # 틱 손절(hard stop / 확정손절) 발동 시 strategy.mark_loss_exit() 호출 경로
         self.on_tick_loss_exit: Optional[Callable] = None  # Callable[[Position], None]
         
-        self._snap_store = None # [NEW] 호가 잔량 확인용
+        self._snap_store = None  # [NEW] 호가 잔량 확인용
+        # 외부 주입 객체 — set_state / set_health_monitor / core.py에서 주입
+        self.state   = None   # AppState
+        self._health = None   # HealthMonitor
+        self._audit  = None   # AuditLogger
 
     def set_snapshot_store(self, store) -> None:
         """호가 잔량 확인을 위해 SnapshotStore 인스턴스를 주입받는다."""
         self._snap_store = store
-
-        self.state = None  # AppState 주입용
-        self._health = None  # HealthMonitor 주입용
-
         self._connect_chejan()
 
     def set_account(self, account: str):
@@ -917,10 +917,11 @@ class OrderManager(QObject):
             if code in self._stop_loss_today:
                 return  # 이미 손절 처리 중
 
+            # 틱마다 peak_price 갱신 — update_state()는 캔들 주기에서만 호출되므로 여기서 직접 갱신
+            if pos.current_price > pos.peak_price:
+                pos.peak_price = pos.current_price
+
             # 2. 트레일 스탑 — Stop Loss보다 먼저 체크 (틱 핸들러에서 check_and_exit_all 보다 빠름)
-            # [FIX 2026-06-04] Trail Stop이 0건이었던 원인:
-            # _on_price_updated(틱) 에서 Stop Loss만 체크 → Trail Stop 발동 전에 항상 SL이 먼저 잡음.
-            # 해결: 틱 핸들러에서도 Trail Stop을 SL보다 먼저 체크.
             if pos.peak_price > 0 and pos.avg_price > 0:
                 _scfg = getattr(self, "_scan_cfg", None)
                 if _scfg is not None:

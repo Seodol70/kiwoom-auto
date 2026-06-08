@@ -124,6 +124,9 @@ class SignalManager:
             
             rm.daily_profit_locked.connect(self.win._on_profit_locked)
             rm.daily_profit_locked.connect(lambda: self.win.header.set_risk_status("WARNING", "PROFIT LOCK"))
+            # 냉각기 만료 → 헤더 SAFE 복원 (unlock 시그널)
+            rm.daily_profit_unlocked.connect(lambda: self.win.header.set_risk_status("SAFE"))
+            rm.daily_profit_unlocked.connect(lambda: self.win.append_log("✅ [리스크] 냉각기 종료 — 신규 매수 재개"))
             # 익절 락은 보통 매수 차단까지는 아니지만, 필요시 설정 가능
             # rm.daily_profit_locked.connect(lambda: setattr(self.state, "risk_locked", True))
             

@@ -28,6 +28,9 @@ class RiskManager(QObject):
     daily_profit_locked = pyqtSignal()
     """수익 목표 달성 → 신규 매수 차단"""
 
+    daily_profit_unlocked = pyqtSignal()
+    """냉각기 만료 → 신규 매수 재개 (헤더 UI 갱신용)"""
+
     daily_loss_cut = pyqtSignal()
     """손절 한도 도달 → 전량 청산"""
 
@@ -132,6 +135,7 @@ class RiskManager(QObject):
             if self._profit_locked_by_cooloff:
                 self._profit_locked_by_cooloff = False
                 if self._state: self._state.profit_locked = False
+                self.daily_profit_unlocked.emit()
             from logging_config import order_log
             order_log.info("[리스크] 냉각기 종료 — 신규 매수 차단 해제, 연속손절 카운트 초기화")
 

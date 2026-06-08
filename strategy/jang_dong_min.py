@@ -410,20 +410,21 @@ class JangDongMinStrategy(BaseStrategy):
         strong_lv = int(getattr(cfg, "strong_trend_hold_level", 3))
         is_strong = int(getattr(pos, "trend_level", 0)) >= strong_lv
 
+        t1_max = float(getattr(cfg, "trail_tier1_max", 3.0))
+        t2_max = float(getattr(cfg, "trail_tier2_max", 8.0))
+
         if is_strong:
             # 강세(trend_level >= 3): 초기 구간부터 tier2 이상 여유 부여 (큰 수익 추구)
-            # tier1 구간(0~trail_tier1_max)도 tier2 폭을 사용 — 의도적 설계
-            if peak_chg < cfg.trail_tier1_max:
-                _tp = tier2_pct  # 초기 구간도 tier2로 여유 있게 홀딩
-            elif peak_chg < cfg.trail_tier2_max:
+            if peak_chg < t1_max:
+                _tp = tier2_pct
+            elif peak_chg < t2_max:
                 _tp = tier2_pct
             else:
                 _tp = tier3_pct
         else:
-            if peak_chg < cfg.trail_tier1_max:
-                # 분할익절 완료 후 잔여 포지션은 Tier2 폭으로 여유 부여
+            if peak_chg < t1_max:
                 _tp = tier2_pct if getattr(pos, "partial_sold", False) else tier1_pct
-            elif peak_chg < cfg.trail_tier2_max:
+            elif peak_chg < t2_max:
                 _tp = tier2_pct
             else:
                 _tp = tier3_pct

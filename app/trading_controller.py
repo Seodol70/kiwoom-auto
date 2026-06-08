@@ -526,40 +526,39 @@ class TradingController(QObject):
                 continue
 
 
-            # 청산 판정 순서 (hard stop부터 시작)
-            # 상태 갱신 (peak_price 등) — ctx 전달로 시간대별 trail_activation 반영
-            self._strategy.update_state(pos, exit_ctx)
+            # 청산 판정 — 예외 발생 시 해당 종목만 건너뛰고 나머지 포지션 계속 처리
+            try:
+                self._strategy.update_state(pos, exit_ctx)
 
-            should_exit, reason = self._strategy.should_exit(pos, exit_ctx)
-            if should_exit:
-                self.log_message.emit(f"🚀 [청산] {pos.name}({pos.code}) {reason}")
-                # [FIX 2026-06-01] EMA20이탈·추세소멸도 손절 냉각 적용
-                # 대한전선 3회 반복 진입 원인: EMA20이탈/추세소멸로 청산 시
-                # mark_stop_loss 미호출 → 냉각 없이 즉시 재진입 가능
-                _chg = pos.price_change_pct_vs_avg
-                _is_loss_exit = (
-                    any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑", "Distribution"])
-                    or ("EMA20이탈"  in reason and _chg < 0)
-                    or ("추세소멸"   in reason and _chg < 0)
-                    or ("Time Cut"  in reason and _chg < 0)
-                    # Trail Stop이 평단 손실 구간에서 발동한 경우도 냉각 적용
-                    # (trail_activation=2% 기준 이론상 수익권이지만 gap_sl 등으로 손실 가능)
-                    or ("Trail Stop" in reason and _chg < 0)
+                should_exit, reason = self._strategy.should_exit(pos, exit_ctx)
+                if should_exit:
+                    self.log_message.emit(f"🚀 [청산] {pos.name}({pos.code}) {reason}")
+                    _chg = pos.price_change_pct_vs_avg
+                    _is_loss_exit = (
+                        any(x in reason for x in ["Stop Loss", "Hard Stop", "본절가스탑", "Distribution"])
+                        or ("EMA20이탈"  in reason and _chg < 0)
+                        or ("추세소멸"   in reason and _chg < 0)
+                        or ("Time Cut"  in reason and _chg < 0)
+                        or ("Trail Stop" in reason and _chg < 0)
+                    )
+                    if _is_loss_exit:
+                        self._order_mgr.mark_stop_loss(pos.code)
+                        self._strategy.mark_loss_exit(pos)
+                    self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
+                    count += 1
+                    continue
+
+                do_partial, ratio = self._strategy.should_partial_exit(pos, exit_ctx)
+                if do_partial:
+                    self.log_message.emit(f"🔀 [분할익절] {pos.name}({pos.code}) {ratio*100:.0f}% 매도")
+                    self._order_mgr.partial_exit(pos.code, pos.name, sell_ratio=ratio, reason="분할익절")
+                    count += 1
+                    continue
+            except Exception as _e:
+                import logging as _log
+                _log.getLogger(__name__).error(
+                    "[청산루프] %s(%s) 처리 중 예외 — 해당 종목 건너뜀: %s", pos.name, code, _e
                 )
-                if _is_loss_exit:
-                    self._order_mgr.mark_stop_loss(pos.code)
-                    # [NEW 2026-05-19] 손절 종목 재진입 방지 (60분 냉각)
-                    self._strategy.mark_loss_exit(pos)
-                self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
-                count += 1
-                continue
-
-            do_partial, ratio = self._strategy.should_partial_exit(pos, exit_ctx)
-            if do_partial:
-                self.log_message.emit(f"🔀 [분할익절] {pos.name}({pos.code}) {ratio*100:.0f}% 매도")
-                self._order_mgr.partial_exit(pos.code, pos.name, sell_ratio=ratio, reason="분할익절")
-                count += 1
-                continue
 
 
 
