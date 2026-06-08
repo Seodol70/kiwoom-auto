@@ -273,15 +273,22 @@ class IndicatorService:
         탐지: 최근 5틱 동안 매수1호가가 지속적으로 올라가는가.
         살 사람이 점점 더 높은 가격을 제시 = 가장 강한 수요 선행 신호.
         +0.05% 이상부터 점수 발생, +0.30% 이상이면 1.0.
+        단조 상승 비율(monotone_ratio)로 최종 보정 — 진동이 많으면 할인.
         """
         h = [p for p in list(bid1_history) if p > 0]
         if len(h) < 5:
             return 0.0
         h = h[-5:]
         slope_pct = (h[-1] - h[0]) / h[0] * 100
-        if slope_pct >= 0.05:
-            return min((slope_pct - 0.05) / 0.25, 1.0)
-        return 0.0
+        if slope_pct < 0.05:
+            return 0.0
+        # 4쌍 중 상승한 쌍의 비율 — 50% 미만이면 진동이 심한 것으로 간주
+        ascending = sum(1 for i in range(len(h) - 1) if h[i + 1] >= h[i])
+        monotone_ratio = ascending / (len(h) - 1)
+        if monotone_ratio < 0.50:
+            return 0.0
+        base = min((slope_pct - 0.05) / 0.25, 1.0)
+        return base * monotone_ratio
 
     @staticmethod
     def calc_tick_vol_accel_score(tick_vol_history: list) -> float:
@@ -353,22 +360,27 @@ class IndicatorService:
         조용하다가 갑자기 터지는 변화의 초입을 잡는다(선행).
 
         PRIMARY 조건 (하나 이상 필수):
-          매수1호가 우상향 ≥ 0.30 — 살 사람이 점점 더 높은 가격 제시 (가장 직접적 선행)
-          거래량 폭발 ≥ 0.50      — 직전 3분 조용 → 최근 2분 3배↑ 폭발
-          체결강도 반등 ≥ 0.25   — 체결강도 바닥→110%+ 반등 (매수세 점화)
-          기관/외인 전환 ≥ 0.50  — 기관 방향 전환
-          호가 압력 ≥ 0.70       — 매수잔량이 매도잔량을 크게 압도
+          매수1호가 우상향 ≥ 0.30   — 살 사람이 점점 더 높은 가격 제시 (가장 직접적 선행)
+          거래량 폭발(방향보정) ≥ 0.40 — 가격 상승 중 거래량 폭발 (패닉셀 할인 후)
+          체결강도 반등 ≥ 0.25     — 체결강도 바닥→110%+ 반등 (매수세 점화)
+          기관/외인 전환 ≥ 0.50   — 기관 방향 전환
+          호가 압력(보조 확인 필수) — hp ≥ 0.50 + (bs/cr/vb/tv 중 1개 이상)
+          매도벽 급감 ≥ 0.50       — 매도1호가 수량 50%↑ 급감 (돌파 직전)
+          틱속도 가속(방향보정) ≥ 0.50 — 가격 상승 중 틱속도 폭발
 
         PRIMARY 없으면 0.0 반환 → 진입 차단.
 
         가중합 (PRIMARY 통과 후):
-          매수1호가 기울기   30% — 수요자가 직접 가격 올려가며 사는 신호 (신규)
-          거래량 폭발       25% — 거래량 폭발 직전 포착
-          체결강도 반등     20% — 매수세 점화 확인
-          체결강도 가속도   10% — 반등 후 계속 강해지는가
-          호가 압력          8% — 실시간 매수 우위
-          호가 속도          5% — 매수잔량 증가 추세
-          거래량 축적        2% — 스마트머니 매집 (보조)
+          매수1호가 기울기(단조성 보정)  22% — 수요자가 직접 가격 올려가며 사는 신호
+          매도벽 급감                   22% — 상승 돌파 직전 저항 소멸
+          틱속도 가속(방향보정)         15% — 가격 상승 중 체결 폭발 확인
+          거래량 폭발(방향보정)         12% — 분봉 거래량 추세 확인
+          체결강도 반등                 12% — 매수세 점화 확인
+          체결강도 가속도                5% — 반등 후 계속 강해지는가
+          기관/외인 전환                 6% — 스마트머니 방향 전환 (복원)
+          호가 압력                      3% — 실시간 매수 우위
+          호가 속도                      2% — 매수잔량 증가 추세
+          거래량 축적                    1% — 스마트머니 매집 (보조)
 
         데이터 부족 시 None 반환 → 호출처에서 체크 생략.
         """
@@ -377,11 +389,11 @@ class IndicatorService:
         if len(hist) < 8 or len(vols) < 11:
             return None  # 데이터 부족 → 체크 생략
 
+        closes_1m = list(getattr(snap, 'closes_1min', None) or [])
         cr  = IndicatorService.calc_chejan_reversal_score(hist)
         ca  = IndicatorService.calc_chejan_acceleration(hist)
         vb  = IndicatorService.calc_vol_burst_score(vols)
-        ac  = IndicatorService.calc_accumulation_score(
-            vols, list(getattr(snap, 'closes_1min', None) or []))
+        ac  = IndicatorService.calc_accumulation_score(vols, closes_1m)
         hp  = IndicatorService.calc_hoga_pressure_score(
             int(getattr(snap, 'total_ask_qty', 0) or 0),
             int(getattr(snap, 'total_bid_qty', 0) or 0),
@@ -396,13 +408,36 @@ class IndicatorService:
         tv  = IndicatorService.calc_tick_vol_accel_score(
             list(getattr(snap, 'tick_vol_history', None) or []))
 
+        # [개선 1] vb/tv 방향성 보정: 가격 하락 중이면 70% 할인 (패닉셀 false positive 방지)
+        # 데이터 부족 시 보정 생략 (보수적 채택)
+        if len(closes_1m) >= 3:
+            price_up = closes_1m[-1] > closes_1m[-3]
+        else:
+            price_up = True
+        vb_dir = vb if price_up else vb * 0.3
+        tv_dir = tv if price_up else tv * 0.3
+
+        # [개선 2] hp PRIMARY 단독 통과 방지: 호가잔량 조작 방어
+        # hp 단독으로 PRIMARY를 통과하려면 체결/거래량 보조 신호 1개 이상 필요
+        hp_primary = (hp >= 0.50) and (bs >= 0.10 or cr >= 0.10 or vb_dir >= 0.15 or tv_dir >= 0.15)
+
         # PRIMARY 조건: "막 불붙기 시작"하는 신호 중 하나 이상 필수
-        primary_ok = (bs >= 0.30) or (vb >= 0.40) or (cr >= 0.25) or (iv >= 0.50) or (hp >= 0.50) or (aw >= 0.50) or (tv >= 0.50)
+        primary_ok = (
+            (bs >= 0.30) or (vb_dir >= 0.40) or (cr >= 0.25) or
+            (iv >= 0.50) or hp_primary or (aw >= 0.50) or (tv_dir >= 0.50)
+        )
         if not primary_ok:
             return 0.0
 
-        # 가중합: bs/aw/tv 최우선 — 틱 레벨 선행 3총사
-        return (bs * 0.22 + aw * 0.22 + tv * 0.18 + vb * 0.15 + cr * 0.12 + ca * 0.05 + hp * 0.03 + hv * 0.02 + ac * 0.01 + iv * 0.00)
+        # [개선 3] 가중합: iv 0%→6% 복원 (vb −3%, tv −3%)
+        # 합계: 0.22+0.22+0.15+0.12+0.12+0.05+0.06+0.03+0.02+0.01 = 1.00
+        return (
+            bs    * 0.22 + aw    * 0.22 +
+            tv_dir* 0.15 + vb_dir* 0.12 +
+            cr    * 0.12 + ca    * 0.05 +
+            iv    * 0.06 + hp    * 0.03 +
+            hv    * 0.02 + ac    * 0.01
+        )
 
     @staticmethod
     def calc_pivot_r2(prev_high: int, prev_low: int, prev_close: int) -> float:
