@@ -263,6 +263,12 @@ class TradingController(QObject):
             return False
 
         # ── 모든 필터 통과 → 주문 실행 ──────────────────────────────────────
+        # [NEW 2026-06-08] 당일 진입 기록 — 청산 사유 무관 90분 재진입 차단
+        if self._strategy is not None:
+            try:
+                self._strategy.mark_today_entry(sig.code, sig.name)
+            except Exception:
+                pass
         self._order_mgr.handle_signal(sig)
         self._record_signal(sig)
 

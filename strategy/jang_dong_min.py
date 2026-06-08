@@ -84,6 +84,8 @@ class JangDongMinStrategy(BaseStrategy):
         self._loss_exit_dict: dict[str, datetime] = {}
         # [NEW 2026-05-26] 시작 시 디스크에서 당일 손절 이력 복원
         self._load_loss_exit_dict()
+        # [NEW 2026-06-08] 당일 진입 이력 (청산 사유 무관 재진입 90분 차단): {code: last_entry_time}
+        self._today_entry_dict: dict[str, datetime] = {}
 
     def should_entry(self, sig: ScanSignal, auto_trading: bool) -> tuple[bool, str]:
         """진입 필터링 로직 (기존 app/strategy.py 로직 통합)"""
@@ -108,7 +110,20 @@ class JangDongMinStrategy(BaseStrategy):
         if sig.code in self._order_mgr.positions:
             return False, "이미 보유 중"
 
-        # 4. [NEW 2026-05-19 / 강화 2026-05-26] 손절 종목 복구 대기 (동일 종목 재진입 방지 — 60분 냉각)
+        # 4. [NEW 2026-06-08] 당일 진입 이력 체크 — 청산 사유 무관 90분 재진입 차단
+        # 6/8 분석: 타임컷/트레일스탑 정상 청산 후 재진입이 반복 손실 유발
+        # (미래에셋 2회, 비보존 3회, 양지사 2회 등)
+        entry_time = self._today_entry_dict.get(sig.code)
+        if entry_time:
+            elapsed_min = (datetime.now() - entry_time).total_seconds() / 60.0
+            entry_cooldown_min = float(getattr(self._scan_cfg, "today_entry_cooldown_minutes", 90.0))
+            if elapsed_min < entry_cooldown_min:
+                remaining = entry_cooldown_min - elapsed_min
+                return False, f"당일 재진입 대기 ({remaining:.0f}분)"
+            else:
+                del self._today_entry_dict[sig.code]
+
+        # 5. [NEW 2026-05-19 / 강화 2026-05-26] 손절 종목 복구 대기 (동일 종목 재진입 방지 — 60분 냉각)
         # 5/26 분석: 빛과전자/스피어 등 1차 손절 후 즉시 재진입 → 재손절 패턴 발견 → 20분 → 60분 연장
         loss_exit_time = self._loss_exit_dict.get(sig.code)
         if loss_exit_time:
@@ -121,12 +136,12 @@ class JangDongMinStrategy(BaseStrategy):
                 # 냉각 기간 종료 → 기록 삭제
                 del self._loss_exit_dict[sig.code]
 
-        # 5. 섹터 쏠림 확인
+        # 6. 섹터 쏠림 확인
         sector = getattr(sig, "sector", "")
         if sector and self._has_sector_overweight(sector):
             return False, f"섹터 쏠림 ({sector})"
 
-        # 6. 예수금 부족 체크 (기본 1주 기준 — 실제 주문은 OrderManager에서 결정)
+        # 7. 예수금 부족 체크 (기본 1주 기준 — 실제 주문은 OrderManager에서 결정)
         min_required_cash = sig.price * 1  # 최소 1주 매수 가능 여부 확인
         available_cash = self._order_mgr.available_cash
         if available_cash < min_required_cash:
@@ -140,6 +155,12 @@ class JangDongMinStrategy(BaseStrategy):
             if getattr(pos, "sector", "") == sector
         )
         return sector_count >= 3
+
+    def mark_today_entry(self, code: str, name: str) -> None:
+        """진입 시점 기록 — 청산 사유 무관 당일 재진입 90분 차단"""
+        self._today_entry_dict[code] = datetime.now()
+        from logging_config import order_log
+        order_log.info("[전략] %s(%s) 당일 진입 기록 — 90분 재진입 차단", code, name)
 
     def mark_loss_exit(self, pos: Any) -> None:
         """손절 종목을 기록하여 동일 종목 재진입 방지 (60분 냉각, 2026-05-26 강화)"""
