@@ -47,6 +47,8 @@ class RiskManager(QObject):
         self._consecutive_losses = 0
         self._cooling_off_until = None
         self._manual_unlock_active = False
+        # 냉각기가 profit_locked를 설정했는지 추적 — 수익목표와 구분해 해제 시 덮어쓰기 방지
+        self._profit_locked_by_cooloff = False
 
         # 로그인 후 손절·익절 보류 기간
         self._sl_tp_warmup_end: float = 0.0
@@ -125,9 +127,11 @@ class RiskManager(QObject):
         from datetime import datetime
         if self._cooling_off_until and datetime.now() >= self._cooling_off_until:
             self._cooling_off_until = None
-            if self._state: self._state.profit_locked = False
-            # 카운트 초기화 — 미초기화 시 다음 손절 1회만으로 즉시 냉각기 재발동
             self._consecutive_losses = 0
+            # 냉각기가 설정한 profit_locked만 해제 — 수익목표 달성 lock은 건드리지 않음
+            if self._profit_locked_by_cooloff:
+                self._profit_locked_by_cooloff = False
+                if self._state: self._state.profit_locked = False
             from logging_config import order_log
             order_log.info("[리스크] 냉각기 종료 — 신규 매수 차단 해제, 연속손절 카운트 초기화")
 
@@ -139,6 +143,7 @@ class RiskManager(QObject):
         self._manual_unlock_active = False
         self._consecutive_losses = 0
         self._cooling_off_until = None
+        self._profit_locked_by_cooloff = False
 
     def unlock_entry_manual(self) -> None:
         """수동으로 신규 매수 락 해제 (사용자 버튼)"""
@@ -183,6 +188,7 @@ class RiskManager(QObject):
                 minutes = cooloff_steps * 5  # 5, 10, 15, 20
 
                 self._cooling_off_until = datetime.now() + timedelta(minutes=minutes)
+                self._profit_locked_by_cooloff = True
                 if self._state: self._state.profit_locked = True
                 order_log.warning("[리스크] %d회 연속 손절 발생 -> %d분간 매수 차단 (냉각기)", self._consecutive_losses, minutes)
         else:

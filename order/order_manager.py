@@ -1067,6 +1067,8 @@ class OrderManager(QObject):
             self._today_fill_log.clear()
             self._fills_initialized = False  # 새 날짜 → 세션 초기화 재허용
             self._stop_loss_today.clear()    # 날짜 변경 시 손절 블랙리스트 초기화
+            self._queued_signal = None       # 전날 대기 신호 → 익일 오래된 신호로 매수 방지
+            self._partial_pending_codes.clear()  # 전날 분할매도 잔존 → 익일 is_partial 오기록 방지
             for p in self.positions.values():
                 p.qty_buy_today_app = 0
 
@@ -1685,6 +1687,8 @@ class OrderManager(QObject):
                 code=code, name=name,
                 qty=filled_qty, avg_price=filled_price,
                 current_price=filled_price,
+                # peak_price를 체결가로 초기화 — 0이면 틱 핸들러의 peak_price>0 가드를 통과 못해 trail 영구 비활성
+                peak_price=filled_price,
                 buy_date=date.today() if is_app_buy else None,
                 entry_time=datetime.now() if is_app_buy else None,
                 opened_by_app=is_app_buy,
