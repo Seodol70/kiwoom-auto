@@ -1171,6 +1171,13 @@ class OrderManager(QObject):
             self.order_failed.emit(msg)
             return False
 
+        # 0-2) 지수 급락 차단 — AppState.is_crash 설정 시 신규 매수 전면 차단
+        if self.state and getattr(self.state, "is_crash", False):
+            msg = f"매수 차단 — 지수 급락 감지 (시장 위기)"
+            logger.warning(msg)
+            self.order_failed.emit(msg)
+            return False
+
         # 1) 이름 키워드 차단
         if not is_pure_equity_name(name):
             msg = f"매수 차단 — ETF/ETN/파생 종목 ({name} {code})"

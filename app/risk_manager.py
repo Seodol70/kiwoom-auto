@@ -101,8 +101,9 @@ class RiskManager(QObject):
             self._state.profit_locked = True
             self.daily_profit_locked.emit()
 
-        # 손절 체크 (daily_loss_cut_won은 음수로 저장됨, 예: -50_000)
-        if (daily_pnl <= self._scan_cfg.daily_loss_cut_won
+        # 손절 체크 (daily_loss_cut_won은 양수로 저장됨, 예: 50_000)
+        # daily_pnl <= -50_000일 때 발동
+        if (daily_pnl <= -self._scan_cfg.daily_loss_cut_won
                 and not self._state.loss_cut_locked):
             self._state.loss_cut_locked = True
             self.daily_loss_cut.emit()
