@@ -77,14 +77,15 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         if _leading_for_surge is not None and _leading_for_surge >= _leading_surge_exempt:
             pass  # 선행점수 충분 → RECENT_SURGE 면제, 이후 JDM_LEADING이 최종 판정
         else:
+            _leading_str = f"{_leading_for_surge:.2f}" if _leading_for_surge is not None else "N/A"
             if recent_1min_chg >= recent_1min_max:
                 ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
-                    f"1분 급등 차단 — {recent_1min_chg:+.2f}% (상한 {recent_1min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%, 선행={_leading_for_surge:.2f})")
+                    f"1분 급등 차단 — {recent_1min_chg:+.2f}% (상한 {recent_1min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%, 선행={_leading_str})")
                 return None
 
             if recent_5min_chg >= recent_5min_max:
                 ScannerLogger.rejected(snap.code, snap.name, "JDM_RECENT_SURGE",
-                    f"5분 급등 차단 — {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%, 선행={_leading_for_surge:.2f})")
+                    f"5분 급등 차단 — {recent_5min_chg:+.2f}% (상한 {recent_5min_max:.1f}%, 체결강도 {_chejan_for_surge:.0f}%, 선행={_leading_str})")
                 return None
 
     # ── 체결강도 가속도 (모멘텀 방향) 필터

@@ -447,12 +447,19 @@ class IndicatorService:
         # hp 단독으로 PRIMARY를 통과하려면 체결/거래량 보조 신호 1개 이상 필요
         hp_primary = (hp >= 0.50) and (bs >= 0.10 or cr >= 0.10 or vb_dir >= 0.15 or tv_dir >= 0.15)
 
+        # [개선 3] aw PRIMARY 단독 통과 방지: 매도벽 급감은 저항 소멸 신호, 매수 압력 신호 아님
+        # 실증 2026-06-09: 이노인스트루먼트(-8,324원), KoAct바이오(-2,402원) aw단독 통과 후 즉시 손절
+        aw_primary = (aw >= 0.50) and (bs >= 0.10 or cr >= 0.15 or vb_dir >= 0.15 or tv_dir >= 0.15)
+
+        # [개선 4] rs PRIMARY 단독 통과 방지: RS는 시장 컨텍스트, 즉각 매수 압력 신호 아님
+        # 실증 2026-06-09: 코스모로보틱스(-5,971원), 이미지스(-3,049원) rs=1.0인데 bs/vb/aw 모두 0
+        rs_primary = (rs >= 0.65) and (bs >= 0.10 or cr >= 0.15 or vb_dir >= 0.15 or aw >= 0.20 or tv_dir >= 0.15)
+
         # PRIMARY 조건: "막 불붙기 시작"하는 신호 중 하나 이상 필수
-        # rs >= 0.65: rs_score >= 3.0% (지수 3%p 이상 역행 상승 = 의미있는 스마트머니 신호)
         primary_ok = (
             (bs >= 0.30) or (vb_dir >= 0.40) or (cr >= 0.25) or
-            (iv >= 0.50) or hp_primary or (aw >= 0.50) or (tv_dir >= 0.50) or
-            (rs >= 0.65)
+            (iv >= 0.50) or hp_primary or aw_primary or (tv_dir >= 0.50) or
+            rs_primary
         )
         if not primary_ok:
             return 0.0
