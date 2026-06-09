@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from datetime import time as dtime
+from typing import Any, ClassVar, Optional
 
 
 logger = logging.getLogger(__name__)
