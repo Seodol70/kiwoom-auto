@@ -1,0 +1,319 @@
+{
+  "last_updated": "2026-06-09",
+  "params": {
+    "entry_open_surge_max_opening": 6.3,
+    "trail_activation_pct": 1.5,
+    "trail_pct_tier1": 2.5,
+    "time_cut_minutes": 25,
+    "breakout_confirm_minutes": 2.4,
+    "min_chejan_strength": 110.0,
+    "jdm_rsi_entry_min": 45.0,
+    "jdm_rsi_entry_min_opening": 45.0,
+    "jdm_rsi_entry_min_morning": 45.0,
+    "jdm_rsi_entry_min_midday": 45.0,
+    "jdm_rsi_entry_min_afternoon": 45.0,
+    "ema_disp_max_pct": 4.5,
+    "price_ema_disp_max_pct": 4.0,
+    "jdm_ma_spread_max_pct": 3.5,
+    "jdm_ma_spread_max_pct_opening": 10.0,
+    "entry_open_surge_max": 10.0,
+    "max_change_pct_afternoon": 10.0,
+    "min_chejan_strength_afternoon": 110.0,
+    "volume_surge_mult_midday": 0.8,
+    "volume_surge_mult_afternoon": 0.8,
+    "jdm_chejan_max": 1500.0,
+    "jdm_chejan_max_opening": 1500.0,
+    "jdm_candle_skip_trend_level": 1,
+    "trade_amount_surge_mult": 1.2,
+    "pivot_r2_enabled": false,
+    "jdm_ma_spread_max_pct": 5.0,
+    "jdm_ma_spread_max_pct_opening": 12.0,
+    "price_ema_disp_max_pct": 5.0,
+    "price_ema_disp_max_pct_trend": 8.0,
+    "jdm_ma_spread_pct": 0.1,
+    "breakout_volume_mult": 0.5,
+    "slippage_block_pct": 5.0,
+    "jdm_exec_velocity_min_opening": 0.0,
+    "exec_velocity_mult_opening": 0.0,
+    "ai_threshold": 0.30,
+    "rs_threshold": -0.3,
+    "exploration_mode": true,
+    "max_change_pct": 22.0,
+    "universe_trade_amt_weight": 0.2,
+    "universe_vol_ratio_weight": 0.2,
+    "universe_chg_pct_weight": 0.6,
+    "overnight_mode_enabled": true
+  },
+  "history": [
+    {
+      "date": "2026-04-17",
+      "param": "slippage_block_pct",
+      "old_val": 3.0,
+      "new_val": 5.0,
+      "reason": "JDM_SLIP 132건 분석 — 3.3~3.9% 구간 39건이 장초반 정상 변동성으로 과차단. 5%로 완화",
+      "category": "ENTRY_FILTER",
+      "applied": true
+    },
+    {
+      "date": "2026-04-17",
+      "param": "trail_activation_pct",
+      "old_val": 1.0,
+      "new_val": 1.5,
+      "reason": "추세추종형 리팩토링 — +1.5% 이익 시 트레일 활성화 (더 길게 보유)",
+      "category": "TRAIL",
+      "applied": true
+    },
+    {
+      "date": "2026-04-17",
+      "param": "trail_pct_tier1",
+      "old_val": 1.5,
+      "new_val": 0.8,
+      "reason": "추세추종형 리팩토링 — 활성화 후 고점 대비 0.8% 하락 시 청산 (타이트한 트레일)",
+      "category": "TRAIL",
+      "applied": true
+    },
+    {
+      "date": "2026-04-17",
+      "param": "jdm_rsi_entry_min",
+      "old_val": 52.0,
+      "new_val": 45.0,
+      "reason": "추세추종형 RSI 범위 확대 — 추세 초입 포착 (45~70), MA20 기울기 필터로 품질 보완",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-17",
+      "param": "jdm_rsi_entry_min_opening",
+      "old_val": 50.0,
+      "new_val": 45.0,
+      "reason": "추세추종형 RSI 범위 확대 — 장초반 추세 초입 포착",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-17",
+      "param": "jdm_rsi_entry_min_morning",
+      "old_val": 52.0,
+      "new_val": 45.0,
+      "reason": "추세추종형 RSI 범위 확대 — 오전 추세 초입 포착",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-17",
+      "param": "jdm_rsi_entry_min_midday",
+      "old_val": 55.0,
+      "new_val": 48.0,
+      "reason": "추세추종형 RSI 범위 확대 — 점심 완화, MA20 slope 필터로 품질 유지",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-17",
+      "param": "jdm_rsi_entry_min_afternoon",
+      "old_val": 58.0,
+      "new_val": 52.0,
+      "reason": "추세추종형 RSI 범위 확대 — 오후 보수적 유지 (MA20 slope + 체결강도 이중 필터)",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-14",
+      "param": "min_chejan_strength_afternoon",
+      "old_val": 130.0,
+      "new_val": 150.0,
+      "reason": "04-14 오후 BREAKOUT 3건 전패(-40,202원) — 오후 체결강도 기준 강화 (130%→150%)",
+      "category": "SLOT_AFTERNOON",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "jdm_rsi_entry_min",
+      "old_val": 60.0,
+      "new_val": 52.0,
+      "reason": "A+B 혼합 — RSI 하한 완화: 상승 시작점 타점 확보",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "entry_open_surge_max",
+      "old_val": 5.0,
+      "new_val": 4.0,
+      "reason": "04-10 손절 패턴 분석 — 4%+ 등락 진입 종목 손절 집중, 5.0%→4.0% 재조정",
+      "category": "ENTRY_FILTER",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "trail_activation_pct",
+      "old_val": 0.57,
+      "new_val": 1.0,
+      "reason": "04-10 트레일 패턴 분석 — 0.57% 수익에서 활성화 시 조기 청산 빈발, 1.0%로 상향",
+      "category": "TRAIL",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "trail_pct_tier1",
+      "old_val": 1.1,
+      "new_val": 1.5,
+      "reason": "04-10 트레일 패턴 분석 — tier1 폭 1.1% 좁아 본전 근처 청산 반복, 1.5%로 확대",
+      "category": "TRAIL",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "time_cut_minutes",
+      "old_val": 40,
+      "new_val": 25,
+      "reason": "04-10 타임컷 전패 패턴 — 평균 26.7분 보유 후 손실 청산, 25분으로 단축",
+      "category": "TIME_CUT",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "jdm_rsi_entry_min_opening",
+      "old_val": 55.0,
+      "new_val": 50.0,
+      "reason": "A+B 혼합 — 장초반 빠른 포착",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "jdm_rsi_entry_min_morning",
+      "old_val": 60.0,
+      "new_val": 52.0,
+      "reason": "A+B 혼합 — 핵심 오전 타점 앞당김",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "jdm_rsi_entry_min_midday",
+      "old_val": 63.0,
+      "new_val": 55.0,
+      "reason": "A+B 혼합 — 점심 기준 동기화",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "jdm_rsi_entry_min_afternoon",
+      "old_val": 65.0,
+      "new_val": 58.0,
+      "reason": "A+B 혼합 — 오후 완화, 보수적 유지",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "ema_disp_max_pct",
+      "old_val": 3.0,
+      "new_val": 4.5,
+      "reason": "A+B 혼합 — RSI 52 구간 EMA 이격 허용",
+      "category": "ENTRY_FILTER",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "price_ema_disp_max_pct",
+      "old_val": 3.0,
+      "new_val": 4.0,
+      "reason": "A+B 혼합 — 단기 급등 기준 완화",
+      "category": "ENTRY_FILTER",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "jdm_ma_spread_max_pct",
+      "old_val": 2.5,
+      "new_val": 3.5,
+      "reason": "A+B 혼합 — 골든크로스 직후 MA 이격 허용 범위 확장",
+      "category": "ENTRY_FILTER",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "entry_open_surge_max",
+      "old_val": 3.5,
+      "new_val": 5.0,
+      "reason": "A+B 혼합 — 시가 대비 상한 완화, RSI 하한 완화와 균형",
+      "category": "ENTRY_FILTER",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "max_change_pct_afternoon",
+      "old_val": 8.0,
+      "new_val": 10.0,
+      "reason": "A+B 혼합 — 오후 종목 허용 범위 확장",
+      "category": "SLOT_AFTERNOON",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "min_chejan_strength_afternoon",
+      "old_val": 140.0,
+      "new_val": 130.0,
+      "reason": "A+B 혼합 — MIDDAY 수준으로 완화",
+      "category": "SLOT_AFTERNOON",
+      "applied": true
+    },
+    {
+      "date": "2026-04-13",
+      "param": "volume_surge_mult_afternoon",
+      "old_val": 2.5,
+      "new_val": 2.0,
+      "reason": "A+B 혼합 — MIDDAY 수준으로 완화",
+      "category": "SLOT_AFTERNOON",
+      "applied": true
+    },
+    {
+      "date": "2026-04-10",
+      "param": "entry_open_surge_max_opening",
+      "old_val": 7.0,
+      "new_val": 6.3,
+      "reason": "HIGH_ENTRY_CHG 10건, 평균진입등락률 12.6%",
+      "category": "HIGH_ENTRY_CHG",
+      "applied": true
+    },
+    {
+      "date": "2026-04-10",
+      "param": "trail_activation_pct",
+      "old_val": 0.5,
+      "new_val": 0.57,
+      "reason": "TRAIL_TOO_TIGHT 5건 — 활성화 기준 상향",
+      "category": "TRAIL_TOO_TIGHT",
+      "applied": true
+    },
+    {
+      "date": "2026-04-10",
+      "param": "trail_pct_tier1",
+      "old_val": 1.0,
+      "new_val": 1.1,
+      "reason": "TRAIL_TOO_TIGHT 5건 — tier1 trail 폭 확대",
+      "category": "TRAIL_TOO_TIGHT",
+      "applied": true
+    },
+    {
+      "date": "2026-04-10",
+      "param": "breakout_confirm_minutes",
+      "old_val": 2.0,
+      "new_val": 2.4,
+      "reason": "EARLY_REVERSAL 5건, 평균보유 3.9분 — 관찰시간 연장",
+      "category": "EARLY_REVERSAL",
+      "applied": true
+    },
+    {
+      "date": "2026-04-10",
+      "param": "min_chejan_strength",
+      "old_val": 120.0,
+      "new_val": 127.2,
+      "reason": "STOP_LOSS_HIT 5건 — 진입 체결강도 기준 강화",
+      "category": "STOP_LOSS_HIT",
+      "applied": true
+    }
+  ]
+}

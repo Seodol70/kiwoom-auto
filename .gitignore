@@ -1,8 +1,9 @@
 # --- [보안: 가장 중요] ---
 # 사용자 정보가 담긴 설정 파일 (실제 계좌번호, 비밀번호 등)
-config.py
+# 루트 config.py는 계좌 정보 없이 .env로만 로드 → 추적 가능
 auth/credentials.json
 *.env
+.env
 .env.local
 .env.*.local
 config.ini
@@ -58,6 +59,13 @@ data/
 temp/
 cache/
 *.sqlite
+
+# --- [params: 전략 파일은 추적, 임시/캐시는 제외] ---
+!params/adaptive_params.json
+!params/loss_exit_history.json
+!params/peak_pnl_history.json
+params/session_state.json
+params/opt10030_*.json
 
 # --- [OS] ---
 .DS_Store
