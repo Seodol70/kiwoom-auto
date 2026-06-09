@@ -247,14 +247,17 @@ class AppState(QObject):
             if data.get("date") == str(date.today()):
                 with self._lock:
                     self._daily_realized_pnl = data.get("daily_realized_pnl", 0.0)
-                    self._profit_locked = data.get("profit_locked", False)
-                    self._loss_cut_locked = data.get("loss_cut_locked", False)
+                    # profit_locked / loss_cut_locked 는 재시작 시 항상 False 로 초기화.
+                    # RiskManager.check()가 실행되면서 조건이 충족될 때 다시 잠긴다.
+                    # 과거 lock 상태를 그대로 복원하면 손익 0인 상태에서도 매수가 영구 차단됨.
+                    self._profit_locked = False
+                    self._loss_cut_locked = False
                     self._overnight_mode = data.get("overnight_mode", False)
                     self._auto_trading = data.get("auto_trading", False)
                     self._tp_pct = data.get("tp_pct", 3.0)
                     self._sl_pct = data.get("sl_pct", -2.5)
-                logger.info("[AppState] 세션 데이터 복원 완료 (PnL: %s, PL:%s, LC:%s)", 
-                            self._daily_realized_pnl, self._profit_locked, self._loss_cut_locked)
+                logger.info("[AppState] 세션 데이터 복원 완료 (PnL: %s, PL:False, LC:False — 재시작 시 락 초기화)",
+                            self._daily_realized_pnl)
             else:
                 logger.info("[AppState] 이전 날짜 세션 발견 — 신규 세션 시작")
         except Exception as e:
