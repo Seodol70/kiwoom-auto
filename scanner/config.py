@@ -415,7 +415,7 @@ class SmartScannerConfig:
 
     # ── 분할 익절 ─────────────────────────────────────────────────────────────
     partial_profit_enabled: bool  = True    # 분할 익절 활성화 여부
-    partial_profit_pct:     float = 1.5     # 2026-05-11: 2.0→1.5% (익절 기준 하향, 분할 거래 성공률 ↑)
+    partial_profit_pct:     float = 2.5     # 2026-06-10: 1.5→2.5% (분할익절 후 즉시 손절 패턴 방지)
     partial_sell_ratio:     float = 0.30    # 1차 분할 매도 비율 (30%)
 
 

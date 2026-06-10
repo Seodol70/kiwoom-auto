@@ -953,7 +953,18 @@ class OrderManager(QObject):
                             self.force_exit(code, pos.name, pos.qty, "트레일스탑")
                             return
 
-            # 3. 일반 손절 (-1.2% 등) — 3초 유예
+            # 3. 본절가 스탑 — 분할익절 후 평단 이하로 내려오면 즉시 청산 (수수료 손실 방지)
+            if getattr(pos, "partial_sold", False):
+                _be_enabled = getattr(getattr(self, "_scan_cfg", None), "breakeven_stop_enabled", True)
+                if _be_enabled:
+                    _be_buf = float(getattr(getattr(self, "_scan_cfg", None), "breakeven_stop_buffer_pct", 0.0))
+                    if pos.pnl_pct <= _be_buf:
+                        logger.info("🛡️ [본절가스탑] %s(%s) 분할익절 후 평단 이탈 (%.2f%%) — 즉시 매도",
+                                    pos.name, code, pos.pnl_pct)
+                        self.force_exit(code, pos.name, pos.qty, "본절가스탑")
+                        return
+
+            # 4. 일반 손절 (-1.2% 등) — 3초 유예
             if pos.pnl_pct <= _sl:
                 if pos.sl_triggered_at is None:
                     pos.sl_triggered_at = datetime.now()
