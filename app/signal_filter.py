@@ -96,18 +96,31 @@ class OverheatPullbackFilter(SignalFilter):
 
 
 class OpeningTimeFilter(SignalFilter):
-    """개장 1시간(09:00~10:00) 분당 1건 진입 제한"""
+    """09:00~09:30 완전 차단 + 09:30~10:00 분당 1건 제한
+
+    분석 결과(5/21·5/27·5/28) 09:00~09:30 진입은 거의 모든 날 손실 집중.
+    09:30 이후부터 승률이 정상화됨 → 개장 30분은 무조건 차단.
+    """
 
     def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
         now = ctx.now or datetime.now()
 
-        opening_start = datetime.strptime("09:00", "%H:%M").time()
-        opening_end = datetime.strptime("10:00", "%H:%M").time()
+        hard_block_end = datetime.strptime("09:30", "%H:%M").time()
+        opening_start  = datetime.strptime("09:00", "%H:%M").time()
+        opening_end    = datetime.strptime("10:00", "%H:%M").time()
 
+        # 09:00~09:30 — 완전 차단 (분당 제한이 아닌 하드 블록)
+        if opening_start <= now.time() < hard_block_end:
+            logger.info(
+                "[개장차단] %s(%s) 09:30 이전 진입 완전 차단 (%s)",
+                sig.name, sig.code, now.strftime("%H:%M:%S"),
+            )
+            return False, f"{sig.code}: 09:30 이전 진입 차단"
+
+        # 09:30~10:00 — 60초 내 1건 제한 (기존 로직 유지)
         if not (opening_start <= now.time() <= opening_end):
             return True, ""
 
-        # 60초 이내 진입 건수 카운트
         one_min_ago = now - timedelta(seconds=60)
         ctx.opening_entry_times = [t for t in ctx.opening_entry_times if t > one_min_ago]
 

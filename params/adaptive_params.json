@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-06-09",
+  "last_updated": "2026-06-10",
   "params": {
     "entry_open_surge_max_opening": 6.3,
     "trail_activation_pct": 1.5,
@@ -45,6 +45,42 @@
     "overnight_mode_enabled": true
   },
   "history": [
+    {
+      "date": "2026-06-10",
+      "param": "opening_hard_block_09:30",
+      "old_val": "분당1건제한(09:00~10:00)",
+      "new_val": "09:00~09:30 완전차단 + 09:30~10:00 분당1건",
+      "reason": "5/21·5/27·5/28 분석: 09:30 이전 진입 거의 모든 날 손실(5/21 11건 0% 승률). 09:30 이후 승률 60%+",
+      "category": "ENTRY_TIMING",
+      "applied": true
+    },
+    {
+      "date": "2026-06-10",
+      "param": "strong_trend_vel_min",
+      "old_val": "없음(trend_lv만 체크)",
+      "new_val": 1.5,
+      "reason": "빅 위너 포착: vel_ratio>=1.5 + trend_lv>=3 종목만 타임컷 면제(5/28 이브이첨단소재 +14% 패턴)",
+      "category": "TRAIL",
+      "applied": true
+    },
+    {
+      "date": "2026-06-10",
+      "param": "strategy_order",
+      "old_val": "JDM→PULLBACK→GAP_PULLBACK",
+      "new_val": "JDM→GAP_PULLBACK→PULLBACK",
+      "reason": "PULLBACK 반복 손실(6/1 33건 21%, 6/8 10건 40%) — 후순위 이동. JDM 빅 위너 생산 전략 우선",
+      "category": "STRATEGY",
+      "applied": true
+    },
+    {
+      "date": "2026-06-10",
+      "param": "pullback_vel_ratio_min",
+      "old_val": 0.0,
+      "new_val": 0.5,
+      "reason": "6/9 vel<1.0 PULLBACK 손실 5건 분석 — 에너지 없는 반등 차단",
+      "category": "PULLBACK_FILTER",
+      "applied": true
+    },
     {
       "date": "2026-04-17",
       "param": "slippage_block_pct",

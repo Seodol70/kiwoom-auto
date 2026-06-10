@@ -340,9 +340,13 @@ class JangDongMinStrategy(BaseStrategy):
         # 5. 타임컷
         if ctx.time_cut_min > 0 and not getattr(pos, "eod_trade", False):
             strong_lv = int(getattr(self._scan_cfg, "strong_trend_hold_level", 3))
+            _vel_min  = float(getattr(self._scan_cfg, "strong_trend_vel_min", 1.5))
+            _vel      = float(getattr(pos, "vel_ratio", 0.0))
+            # trend_lv 충족 + vel_ratio 충족 시에만 타임컷 면제 (빅 위너 종목만 장기 보유)
             exempt = (
                 getattr(self._scan_cfg, "strong_trend_timecut_exempt", True)
                 and int(getattr(pos, "trend_level", 0)) >= strong_lv
+                and _vel >= _vel_min
             )
             if not exempt:
                 # entry_time은 L264에서 이미 정의됨 (재할당 불필요)

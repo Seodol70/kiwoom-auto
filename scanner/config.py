@@ -113,6 +113,11 @@ class SmartScannerConfig:
     opening_surge_chg_min:    float = 1.0    # OPENING 최소 등락률 (%)
     opening_surge_chejan_min: float = 120.0  # OPENING 체결강도 하한 (%)
     opening_surge_vol_mult:   float = 1.2    # OPENING 거래량 배수 (직전 평균 대비)
+    # [2026-06-10] 개장 추세 품질 필터 — trend_momentum + opening_watch_score 기반
+    # OPENING 슬롯(09:00~09:30)에서 단발 Lv3 차단. 두 값 모두 미달 시 진입 거절.
+    opening_momentum_min:     float = 0.10   # trend_momentum 최소값 (0=이력없음, 1.0=완벽한 단계적 상승)
+    opening_watch_score_min:  float = 0.10   # opening_watch_score 최소값 (0=관찰 없음, 1.0=모든 지표 강세)
+
     # ── Phase 1 모닝 스캘핑 파라미터 (09:00~09:30 진입, 10:30 강제청산) ──────
     phase1_min_candles:       int   = 3      # 진입 전 최소 1분봉 수 (≈09:03 이후)
     phase1_chejan_min:        float = 120.0  # 체결강도 하한 — PRE_SURGE 흐름 지속 확인
@@ -332,6 +337,8 @@ class SmartScannerConfig:
     pullback_rsi_max:        float = 72.0  # RSI 상한 (유지)
     pullback_min_trend_lv:   int   = 3     # 2026-06-08: 신규 — trend_lv 최솟값 (기존 코드의 >=2 → >=3)
     pullback_bounce_energy:  float = 1.2   # 2026-06-08: 0.8→1.2 (반등봉 거래량이 눌림 평균의 1.2배 이상)
+    # [2026-06-10] 반등 에너지(체결 가속도) 최소 기준 — 6/9 vel<1.0 손실 5건 기반
+    pullback_vel_ratio_min:  float = 0.5   # 이 값 미만 vel_ratio면 PULLBACK 차단 (에너지 없는 반등 거절)
 
     # [Phase 3 2026-05-28] OverheatPullback 전략 파라미터
     # 백테스트 결론: 중소형주 특성상 기본값(50억/2.0배) 대비 대폭 완화 필요
@@ -358,9 +365,10 @@ class SmartScannerConfig:
     # 활성 전략 목록: "BREAKOUT", "JDM_ENTRY", "PULLBACK", "EOD"
     # [2026-06-02] BREAKOUT 제거 — "이미 오른 것 확인 후 진입" 구조적 후행성
     # BREAKOUT 승률 낮음 + 신호 11,128건/일(47%) 노이즈 → JDM_ENTRY/PULLBACK/GAP_PULLBACK으로 대체
-    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "PULLBACK", "GAP_PULLBACK", "EOD", "OVERHEAT_PULLBACK")
-    # 평가 우선순위: JDM_ENTRY(모멘텀) → PULLBACK(눌림목) → GAP_PULLBACK(갭눌림) → EOD → OVERHEAT
-    strategy_order: tuple[str, ...] = ("JDM_ENTRY", "PULLBACK", "GAP_PULLBACK", "EOD", "OVERHEAT_PULLBACK")
+    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
+    # [2026-06-10] PULLBACK 비중 축소: GAP_PULLBACK 우선, PULLBACK 후순위로 이동
+    # 근거: PULLBACK 반복 손실(6/1 33건 21%, 6/8 10건 40%) vs JDM 빅 위너 생산
+    strategy_order: tuple[str, ...] = ("JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
     # 분당 최대 신호 발행 수 — 동시 다발 진입 방지 (1분에 최대 N종목)
     max_entries_per_minute: int = 2  # 2026-05-07: 1→5→2 (UI 프리징 해결, 신호 제한)
     # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
@@ -435,6 +443,9 @@ class SmartScannerConfig:
     # - 트레일 tier1 스킵: 고점 대비 1.5% 폭 → tier2(2.5%) 폭으로 시작
     strong_trend_hold_level:  int  = 3     # 이 trend_level 이상이면 홀딩 모드 적용
     strong_trend_timecut_exempt: bool = True  # True → Strong Trend 포지션 타임컷 면제
+    # [2026-06-10] 빅 위너 포착: trend_lv 충족해도 vel_ratio가 이 값 미만이면 타임컷 면제 제외
+    # 5/28 이브이첨단소재(3h9m +14%) 같이 vel 높은 종목은 타임컷 없이 장기 보유
+    strong_trend_vel_min:     float = 1.5  # vel_ratio 이상이어야 타임컷 면제 적용
 
 
     # ── 본절가 스탑 (Breakeven Stop) ──────────────────────────────────────────

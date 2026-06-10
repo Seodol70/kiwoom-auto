@@ -33,6 +33,15 @@ def check_pullback_entry(
             f"선행지표 부족 — score={_leading:.2f} (요구: >={_lead_thr:.2f})")
         return None
 
+    # [2026-06-10] 체결 가속도(vel_ratio) 최소 기준 — 에너지 없는 반등 차단
+    # 6/9 분석: vel<1.0 손실 5건, vel>1.0 수익 종목 다수 → PULLBACK은 최소 0.5 요구
+    _vel = float(getattr(snap, "vel_ratio", 0.0))
+    _vel_min = float(getattr(cfg, "pullback_vel_ratio_min", 0.5))
+    if _vel_min > 0 and _vel < _vel_min:
+        ScannerLogger.rejected(snap.code, snap.name, "PULLBACK_VEL",
+            f"반등 체결가속도 부족 — vel_ratio={_vel:.2f} (요구: >={_vel_min:.2f})")
+        return None
+
     closes = snap.closes_1min
     if len(closes) < 20:
         return None

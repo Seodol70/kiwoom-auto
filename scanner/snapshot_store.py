@@ -430,6 +430,10 @@ class SnapshotStore:
             chejan_str    = st.chejan_str
             chejan_hist   = list(st.chejan_history)
             m_type        = getattr(st, "market_type", "10")
+            # [2026-06-10] 추세 모멘텀·관찰 점수 추출
+            from scanner.indicator_service import IndicatorService as _IS
+            _trend_momentum = _IS.calc_trend_momentum(list(st.trend_lv_history))
+            _opening_watch  = float(getattr(st, "opening_watch_score", 0.0))
 
         # [FIX] DataFrame의 "name" 컬럼이 코드로 덮어씌워질 수 있으므로 내부 상태에서 가져오기
         with self._lock:
@@ -533,6 +537,8 @@ class SnapshotStore:
             h1_highs         = list(getattr(st, "h1_highs",  [])),
             h1_lows          = list(getattr(st, "h1_lows",   [])),
             rs_score         = float(getattr(st, "rs_score", 0.0)),
+            trend_momentum   = _trend_momentum,
+            opening_watch_score = _opening_watch,
         )
 
     def set_h1_candles(self, code: str, ohlc: list[dict]) -> None:
@@ -549,11 +555,46 @@ class SnapshotStore:
             from datetime import datetime as _dt
             st.h1_updated_at = _dt.now()
 
-    def update_trend_level(self, code: str, trend_level: int) -> None:
-        """요셉 시그널 추세 레벨 갱신(0~3). 직전 단계도 함께 보관."""
+    def update_trend_level(
+        self,
+        code: str,
+        trend_level: int,
+        elapsed_minutes: float = 999.0,
+        leading_score: float = 0.0,
+        vel_ratio: float = 0.0,
+    ) -> None:
+        """요셉 시그널 추세 레벨 갱신(0~3).
+        직전 단계, 이력, 모멘텀, 개장 관찰 점수를 함께 갱신.
+
+        elapsed_minutes: 09:00 또는 프로그램 시작 후 경과 분 수.
+          30분 이내이면 opening_watch_score 갱신 대상.
+        """
+        from scanner.indicator_service import IndicatorService
         with self._lock:
             st = self._get_state(code)
             st.update_trend(int(max(0, min(3, trend_level))))
+
+            # 추세 모멘텀 갱신
+            st_momentum = IndicatorService.calc_trend_momentum(
+                list(st.trend_lv_history)
+            )
+
+            # 개장 관찰 점수 — 30분 이내에만 누적 (이후엔 고정 유지)
+            if elapsed_minutes <= 30.0:
+                st.opening_watch_score = IndicatorService.calc_opening_watch_score(
+                    trend_lv_history=list(st.trend_lv_history),
+                    leading_score=leading_score,
+                    chejan_history=list(st.chejan_history),
+                    vel_ratio=vel_ratio,
+                    elapsed_minutes=elapsed_minutes,
+                )
+            # momentum은 모델에 직접 저장하지 않고 get_snapshot 시점에 계산
+            # (InternalStockState에는 history만 유지, 파생값은 snapshot에서 계산)
+
+    def get_trend_lv_history(self, code: str) -> list[int]:
+        """종목의 trend_lv_history를 복사본으로 반환 (thread-safe)."""
+        with self._lock:
+            return list(self._get_state(code).trend_lv_history)
 
     def update_chejan_strength(self, code: str, strength: float) -> None:
         """[NEW] 체결강도(FID 20) 갱신."""

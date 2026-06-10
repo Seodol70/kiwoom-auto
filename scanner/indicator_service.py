@@ -151,6 +151,131 @@ class IndicatorService:
         if dist_atr >= 0.3: return 1
         return 0
 
+    # ── 추세 모멘텀 / 개장 관찰 점수 ────────────────────────────────────────────
+
+    @staticmethod
+    def calc_trend_momentum(trend_lv_history: list[int]) -> float:
+        """추세 이력 기반 모멘텀 점수 (0.0~1.0).
+
+        "Lv0→1→2→3으로 단계적으로 쌓였는가"를 측정.
+        우연히 한 번 Lv3인 종목과 꾸준히 올라온 종목을 구분.
+
+        점수 산출 방식:
+          1. 연속 상승 길이 (consecutive_up):
+             hist = [..., 1, 2, 2, 3] → 뒤에서부터 이전 값 이하로 꺾이기 전까지 길이
+          2. 최근 최고점 (peak_lv): 이력 내 최고 trend_lv
+          3. 하락 없이 유지된 비율 (stability): 내림차순 전환 횟수 기반 페널티
+
+        반환:
+          0.0 — 이력 없거나 단발 Lv3 (내림 후 Lv3)
+          0.3 — 최근 2틱 상승 + peak Lv2 이상
+          0.6 — 3틱 이상 연속 상승 + peak Lv3
+          1.0 — 5틱 이상 연속 상승 + peak Lv3 + 하락 전환 0회
+        """
+        hist = list(trend_lv_history)
+        if len(hist) < 2:
+            return 0.0
+
+        # 뒤에서부터 "엄격 상승(>)" 연속 길이 측정
+        # [0,0,0,3] → 마지막 1틱만 상승, consecutive_up=1
+        # [0,1,2,3] → 3틱 연속 상승, consecutive_up=3
+        consecutive_up = 0
+        for i in range(len(hist) - 1, 0, -1):
+            if hist[i] > hist[i - 1]:
+                consecutive_up += 1
+            else:
+                break
+
+        peak_lv = max(hist)
+
+        # 전체 이력에서 하락 전환 횟수 (내림 페널티)
+        drop_count = sum(1 for i in range(1, len(hist)) if hist[i] < hist[i - 1])
+        stability = max(0.0, 1.0 - drop_count * 0.2)
+
+        # 기본 점수: 연속 상승 길이 × peak 보정
+        # consecutive_up=0 → 직전 틱 대비 상승 없음 (유지 or 하락)
+        if consecutive_up >= 4 and peak_lv >= 3:
+            base = 1.0
+        elif consecutive_up >= 3 and peak_lv >= 3:
+            base = 0.75
+        elif consecutive_up >= 3 and peak_lv >= 2:
+            base = 0.55
+        elif consecutive_up >= 2 and peak_lv >= 2:
+            base = 0.40
+        elif consecutive_up >= 1 and peak_lv >= 3:
+            base = 0.25  # 단발 Lv3 — 최근 1틱만 상승
+        elif consecutive_up >= 1 and peak_lv >= 2:
+            base = 0.15
+        elif consecutive_up >= 1:
+            base = 0.08
+        elif peak_lv >= 3:
+            base = 0.30  # 현재 틱 유지지만 이력 내 Lv3 존재 (단계 상승 후 유지)
+        elif peak_lv >= 2:
+            base = 0.12  # Lv2까지는 올랐으나 현재 하락/유지
+        else:
+            base = 0.02  # Lv1 이하 유지/하락
+
+        return round(min(base * stability, 1.0), 3)
+
+    @staticmethod
+    def calc_opening_watch_score(
+        trend_lv_history: list[int],
+        leading_score: float,
+        chejan_history: list[float],
+        vel_ratio: float,
+        elapsed_minutes: float,
+    ) -> float:
+        """개장/시작 후 30분 관찰 점수 (0.0~1.0).
+
+        30분 동안 종목이 얼마나 일관되게 강세 신호를 쌓아왔는지 측정.
+        단순 현재 지표가 아닌 "시간에 걸쳐 누적된 품질"을 반영.
+
+        구성 요소:
+          A. 추세 모멘텀 (40%): 단계적 상승 연속성
+          B. 선행 점수 현재값 (25%): leading_score (매수압력, 매도벽 등)
+          C. 체결강도 평균 (20%): 관찰 기간 내 평균 체결강도 정규화
+          D. 체결 가속도 (15%): vel_ratio 정규화
+
+        elapsed_minutes: 프로그램 시작 또는 09:00 이후 경과 분 수.
+          0~5분: 점수 50% 할인 (데이터 부족 → 과신 방지)
+          5~15분: 선형 보간으로 할인 해제
+          15분+: 할인 없음
+
+        반환: 0.0(관찰 부족/약세) ~ 1.0(모든 구성요소 강세)
+        """
+        # A. 추세 모멘텀
+        momentum = IndicatorService.calc_trend_momentum(trend_lv_history)
+
+        # B. 선행 점수 (None이면 0.0 처리)
+        lead = float(leading_score) if leading_score is not None else 0.0
+
+        # C. 체결강도 평균 정규화 (100% 기준, 200%이면 1.0)
+        if chejan_history:
+            avg_chejan = sum(chejan_history) / len(chejan_history)
+        else:
+            avg_chejan = 100.0
+        chejan_score = min(max((avg_chejan - 100.0) / 100.0, 0.0), 1.0)
+
+        # D. 체결 가속도 정규화 (vel_ratio 2.0이면 1.0)
+        vel_score = min(vel_ratio / 2.0, 1.0)
+
+        raw = (
+            momentum   * 0.40 +
+            lead       * 0.25 +
+            chejan_score * 0.20 +
+            vel_score  * 0.15
+        )
+
+        # 경과 시간 할인: 5분 미만 50%, 5~15분 선형 회복
+        if elapsed_minutes < 5.0:
+            discount = 0.5
+        elif elapsed_minutes < 15.0:
+            discount = 0.5 + 0.5 * (elapsed_minutes - 5.0) / 10.0
+        else:
+            discount = 1.0
+
+        return round(min(raw * discount, 1.0), 3)
+
     # ── 선행 지표 (Leading Indicators) ─────────────────────────────────────────
 
     @staticmethod

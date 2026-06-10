@@ -70,6 +70,10 @@ class InternalStockState:
     # 추세/메타
     trend_level: int = 0
     trend_prev_level: int = 0
+    # [2026-06-10] 추세 이력 — 최근 10회 trend_lv 기록 (0~3 연속 상승 패턴 감지)
+    trend_lv_history: _Deque = field(default_factory=lambda: _Deque(maxlen=10))
+    # [2026-06-10] 개장/시작 후 30분 관찰 점수 — 추세 상승 패턴 누적 (0.0~1.0)
+    opening_watch_score: float = 0.0
     sector: str = ""
     chejan_history: _Deque = field(default_factory=lambda: _Deque(maxlen=20)) # 체결강도 이력
     updated_at: datetime = field(default_factory=datetime.now)
@@ -99,6 +103,7 @@ class InternalStockState:
     def update_trend(self, new_level: int):
         self.trend_prev_level = self.trend_level
         self.trend_level = new_level
+        self.trend_lv_history.append(new_level)
 
 
 @dataclass
@@ -213,8 +218,13 @@ class StockSnapshot:
     inv_flip_score: float = 0.0  # 외인+기관 동시 매수 전환 신선도 (0~1, 30분 감쇠)
 
     # 추세 상태 (Yosep 신호)
-    trend_level: int = 0  # 추세 단계 0~3
+    trend_level: int = 0       # 추세 단계 0~3
     trend_prev_level: int = 0  # 직전 추세 단계
+    # [2026-06-10] 추세 모멘텀 — 최근 이력 기반 상승 연속성 점수 (0.0~1.0)
+    # 1.0: Lv0→1→2→3 단계적 상승 / 0.0: 우연한 단발 Lv3
+    trend_momentum: float = 0.0
+    # [2026-06-10] 개장/시작 후 30분 관찰 점수 — 추세 누적 강도 (0.0~1.0)
+    opening_watch_score: float = 0.0
 
     # 기타 지표
     chejan_strength: float = 100.0  # 체결강도

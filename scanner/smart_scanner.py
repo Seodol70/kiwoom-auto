@@ -239,6 +239,9 @@ class SmartScanner(QObject):
         self._scan_thread: Optional[threading.Thread] = None
         self._lock        = threading.Lock()
 
+        # [2026-06-10] 프로그램 시작 시각 — opening_watch_score elapsed_minutes 계산용
+        self._program_start: datetime = datetime.now()
+
         # [FIX] UI 업데이트 큐 (스레드 분리)
         self._ui_queue: _Deque = _Deque(maxlen=2)  # 최신 데이터 + 1개 버퍼 (손실 방지)
         self._ui_update_timer = None
@@ -860,18 +863,52 @@ class SmartScanner(QObject):
             )
             snap.trend_prev_level = int(getattr(snap, "trend_level", 0))
             snap.trend_level = int(trend_level)
-            self.store.update_trend_level(snap.code, trend_level)
-            
-            # [NEW] 스캐너 로그 패널에 현재 상태 출력 (사용자 요청)
+
+            # [2026-06-10] elapsed_minutes: 09:00 기준 또는 프로그램 시작 기준 중 더 짧은 쪽
+            _now_dt = datetime.now()
+            _market_open = _now_dt.replace(hour=9, minute=0, second=0, microsecond=0)
+            _elapsed_from_open    = (_now_dt - _market_open).total_seconds() / 60.0
+            _elapsed_from_program = (_now_dt - self._program_start).total_seconds() / 60.0
+            _elapsed_min = min(max(_elapsed_from_open, 0.0), max(_elapsed_from_program, 0.0))
+
+            # leading_score, vel_ratio는 snap에서 직접 읽음 (이미 계산된 값)
+            _leading = IndicatorService.get_leading_score(snap)
+            _leading_val = float(_leading) if _leading is not None else 0.0
+            _vel_val = float(getattr(snap, "exec_velocity_ratio", 0.0))
+
+            self.store.update_trend_level(
+                snap.code, trend_level,
+                elapsed_minutes=_elapsed_min,
+                leading_score=_leading_val,
+                vel_ratio=_vel_val,
+            )
+
+            # 갱신 후 snap에 즉시 반영 — store에서 실제 이력을 가져와 재계산
+            _hist = self.store.get_trend_lv_history(snap.code)
+            snap.trend_momentum = IndicatorService.calc_trend_momentum(_hist)
+
+            # 스캐너 로그 패널에 현재 상태 출력
             _trend_text = "횡보"
             if trend_level >= 3: _trend_text = "강세"
             elif trend_level == 2: _trend_text = "상승"
             elif trend_level == 1: _trend_text = "약세"
             elif trend_level < 0: _trend_text = "하락"
-            
-            # 추세 단계 변경 시에만 로그 기록 (사용자 가독성 중심)
+
+            # 추세 단계 변경 시 + 개장 30분 이내에는 watch_score도 함께 로그
             if trend_level != snap.trend_prev_level:
-                ScannerLogger.passed(snap.code, snap.name, "TREND_CHECK", f"추세변화:{_trend_text}(Lv{snap.trend_prev_level}→{trend_level}) 등락:{snap.change_pct}%")
+                if _elapsed_min <= 30.0:
+                    _ws = float(getattr(snap, "opening_watch_score", 0.0))
+                    ScannerLogger.passed(
+                        snap.code, snap.name, "TREND_CHECK",
+                        f"추세변화:{_trend_text}(Lv{snap.trend_prev_level}→{trend_level}) "
+                        f"모멘텀={snap.trend_momentum:.2f} 관찰점수={_ws:.2f} "
+                        f"등락:{snap.change_pct}% [{_elapsed_min:.0f}분경과]"
+                    )
+                else:
+                    ScannerLogger.passed(snap.code, snap.name, "TREND_CHECK",
+                        f"추세변화:{_trend_text}(Lv{snap.trend_prev_level}→{trend_level}) "
+                        f"모멘텀={snap.trend_momentum:.2f} 등락:{snap.change_pct}%"
+                    )
 
         # [2026-06-02] 60분봉 추세 판정
         if getattr(self.cfg, "h1_trend_enabled", True) and snap.h1_closes:

@@ -500,10 +500,27 @@ def _jdm_check_daily_context(
     snap: "StockSnapshot", cfg: "SmartScannerConfig", ctx: "_JdmCtx"
 ) -> Optional[dict]:
     """피봇 R2 + 일봉 정배열 + 일봉 20MA 체크. daily_ctx dict 또는 None 반환."""
-    # OPENING 슬롯에서는 일봉 필터 모두 스킵 (2026-05-12: 극단 완화, 학습 데이터 수집)
+    # OPENING 슬롯: 일봉 필터 스킵 대신 trend_momentum + opening_watch_score로 품질 검증
     if ctx.slot == "OPENING":
         near_high_thr = float(getattr(cfg, "daily_near_high_threshold_pct", 3.0))
         daily_ctx = IndicatorService.get_daily_context(snap.daily_closes, snap.current_price, near_high_thr)
+
+        # [2026-06-10] 추세 모멘텀 필터 — 단발 Lv3 차단
+        # 개장 초반 30분은 데이터가 적으므로 임계값을 낮게, 이후엔 더 엄격하게
+        _momentum = float(getattr(snap, "trend_momentum", 0.0))
+        _watch    = float(getattr(snap, "opening_watch_score", 0.0))
+        _mom_min  = float(getattr(cfg, "opening_momentum_min", 0.10))
+        _watch_min = float(getattr(cfg, "opening_watch_score_min", 0.10))
+
+        if _momentum < _mom_min and _watch < _watch_min:
+            ScannerLogger.rejected(
+                snap.code, snap.name, "JDM_OPENING_QUALITY",
+                f"개장 추세 품질 미달 — 모멘텀={_momentum:.2f}(기준≥{_mom_min}) "
+                f"관찰점수={_watch:.2f}(기준≥{_watch_min}) "
+                f"(둘 다 미달 시 차단 — 단발 Lv3 방지)"
+            )
+            return None
+
         return daily_ctx
 
     if not ctx.lite_mode and cfg.pivot_r2_enabled:
