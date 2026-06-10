@@ -368,44 +368,47 @@ class TradingController(QObject):
             return result
 
         try:
-            # 1분봉 100개 로드
-            candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=100)
-            if candles:
-                # _parse_candle_rows()가 이미 rows.reverse()로 [과거→최신] 순서 반환
-                # 오늘 날짜 봉만 필터링 (전일 데이터 혼입 방지)
-                from datetime import datetime as _dt
-                today_str = _dt.now().strftime("%Y%m%d")
-                today_candles = [c for c in candles if str(c.get("time","")).startswith(today_str)]
-                if not today_candles:
-                    today_candles = candles  # 오늘 데이터 없으면 전체 사용
+            store = getattr(self._smart_scanner, 'store', None)
+            snap = store.get_snapshot(code) if store else None
 
-                result["closes"]  = [c.get("close", 0)  for c in today_candles]
-                result["volumes"] = [c.get("volume", 0) for c in today_candles]
-                # time 필드: "20260602153000" → "1530" (HHmm) 추출
-                result["times"]   = [c.get("time", "")[-6:-2] if len(c.get("time","")) >= 6 else "" for c in today_candles]
-                logger.info("[차트] %s 1분봉 %d개 로드 완료 (오늘 %d봉)", code, len(today_candles), len(today_candles))
+            # ── 1단계: 스냅샷 캔들 우선 사용 (TR 호출 없이 즉시 반환) ──────────
+            snap_closes  = list(getattr(snap, 'closes_1min',  None) or [])
+            snap_volumes = list(getattr(snap, 'volumes_1min', None) or [])
+            if len(snap_closes) >= 2:
+                result["closes"]  = snap_closes
+                result["volumes"] = snap_volumes
+                result["times"]   = []  # 스냅샷엔 시각 정보 없음
+                logger.info("[차트] %s 스냅샷 캔들 %d개 사용", code, len(snap_closes))
             else:
-                # 폴백: 실시간 감시 데이터에서 현재가 1개 사용
-                if hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
-                    snap = self._smart_scanner.store.get_snapshot(code)
-                    if snap and snap.current_price > 0:
-                        result["closes"]  = [snap.current_price]
-                        result["volumes"] = [snap.volume if hasattr(snap, 'volume') else 0]
-                        logger.info("[차트] %s 1분봉 로드 실패 — 실시간 데이터 폴백", code)
+                # ── 2단계: TR이 유휴 상태일 때만 호출 (바쁘면 폴백) ────────────
+                if not getattr(self._kiwoom, '_tr_busy', False):
+                    candles = self._kiwoom.get_min_candles(code, tick_unit=1, count=100)
+                    if candles:
+                        from datetime import datetime as _dt
+                        today_str = _dt.now().strftime("%Y%m%d")
+                        today_candles = [c for c in candles if str(c.get("time","")).startswith(today_str)]
+                        if not today_candles:
+                            today_candles = candles
+                        result["closes"]  = [c.get("close", 0)  for c in today_candles]
+                        result["volumes"] = [c.get("volume", 0) for c in today_candles]
+                        result["times"]   = [c.get("time", "")[-6:-2] if len(c.get("time","")) >= 6 else "" for c in today_candles]
+                        logger.info("[차트] %s TR 1분봉 %d개 로드", code, len(today_candles))
+                    else:
+                        logger.info("[차트] %s TR 응답 없음 — 폴백", code)
+                else:
+                    logger.info("[차트] %s TR 바쁨 — 폴백", code)
 
-            # 마지막 봉(현재 진행 중인 봉)을 실시간 현재가로 덮어쓰기
-            # closes[-1] = 가장 최신봉 (역순 정렬 후)
-            if result["closes"] and hasattr(self._smart_scanner, 'store') and self._smart_scanner.store:
-                snap = self._smart_scanner.store.get_snapshot(code)
-                if snap and snap.current_price > 0:
-                    result["closes"][-1] = snap.current_price
+                # 폴백: 현재가 1개
+                if not result["closes"] and snap and snap.current_price > 0:
+                    result["closes"]  = [snap.current_price]
+                    result["volumes"] = [getattr(snap, 'volume', 0)]
 
-            # 종목명 조회
-            if not result["closes"]:  # 데이터 없으면 종목명만
-                result["name"] = self._kiwoom.get_stock_name(code)
-            else:
-                snap = self._smart_scanner.store.get_snapshot(code) if (hasattr(self._smart_scanner, 'store') and self._smart_scanner.store) else None
-                result["name"] = snap.name if (snap and hasattr(snap, 'name')) else self._kiwoom.get_stock_name(code)
+            # 마지막 봉을 실시간 현재가로 덮어쓰기
+            if result["closes"] and snap and snap.current_price > 0:
+                result["closes"][-1] = snap.current_price
+
+            # 종목명
+            result["name"] = (snap.name if (snap and getattr(snap, 'name', None)) else self._kiwoom.get_stock_name(code))
 
             # 포지션 정보
             pos = self._order_mgr.positions.get(code)

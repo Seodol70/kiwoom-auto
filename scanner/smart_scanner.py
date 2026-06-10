@@ -2130,7 +2130,7 @@ class SmartScanner(QObject):
         # ② 캐시 없거나 부족 → opt10080 TR 호출 (direct, _tr_q 미사용 — cascade 방지)
         try:
             candles = self._kiwoom.get_min_candles(code, 1, 70)
-            ohlc = [c for c in reversed(candles) if c.get("close")]
+            ohlc = [c for c in candles if c.get("close")]
             if ohlc:
                 self.store.set_min_candles_ohlc(code, ohlc)
                 logger.debug("[STEP-H async] %s TR 1분봉 OHLC %d개 로딩 완료", code, len(ohlc))
@@ -2168,7 +2168,7 @@ class SmartScanner(QObject):
         code = codes[idx]
         try:
             h1_candles = self._kiwoom.get_min_candles(code, 60, 20)
-            h1_ohlc = [c for c in reversed(h1_candles) if c.get("close")]
+            h1_ohlc = [c for c in h1_candles if c.get("close")]
             if h1_ohlc:
                 self.store.set_h1_candles(code, h1_ohlc)
                 logger.debug("[H1 async] %s 60분봉 %d개 로딩 완료", code, len(h1_ohlc))

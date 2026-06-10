@@ -641,7 +641,7 @@ class KiwoomManager(KiwoomProtocol):
         self._comm_rq(TR_MIN_CANDLE, "min_candle", "0101")
 
         rows: list[dict] = self._tr_data.get("rows", [])
-        return rows[:count]
+        return rows[-count:]  # [과거→최신] 정렬 후 최신 count개만 반환
 
     # -----------------------------------------------------------------------
     # 일봉 데이터 조회 (TR: opt10081)
@@ -667,7 +667,7 @@ class KiwoomManager(KiwoomProtocol):
         self._comm_rq(TR_DAILY_CANDLE, "daily_candle", "0101", timeout_ms=1_000)
 
         rows: list[dict] = self._tr_data.get("rows", [])
-        return rows[:count]
+        return rows[-count:]  # [과거→최신] 정렬 후 최신 count개만 반환
 
     # -----------------------------------------------------------------------
     # 계좌 정보 조회
