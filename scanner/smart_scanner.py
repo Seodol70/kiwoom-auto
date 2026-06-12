@@ -376,6 +376,8 @@ class SmartScanner(QObject):
         all_codes = self._fetch_all_codes()
         logger.info("전 종목 %d개 수집", len(all_codes))
 
+        # 지수 구독은 장 시간과 무관하게 앱 시작 즉시 등록 — 08:00 이후 서버가 데이터를 보내기 시작하면 바로 반영
+        self._subscribe_market_indices()
 
         # ③ 터미널 뷰 시작 (UI 대시보드 집중을 위해 비활성화)
         # self.display.start()
