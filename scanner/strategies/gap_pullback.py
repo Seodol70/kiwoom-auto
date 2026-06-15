@@ -128,9 +128,11 @@ class GapPullbackStrategy(BaseStrategy):
                 return None
 
         # ── 6. 추세 레벨 하한 (lv0~1 손절 다발 방지)
+        # yosep 비활성 시 trend_level=0으로 고정되므로 추세 레벨 체크 스킵
         _min_lv = int(getattr(cfg, "gap_pullback_min_trend_level", 2))
         _snap_lv = int(getattr(snap, "trend_level", 0))
-        if _snap_lv < _min_lv:
+        _yosep_on = bool(getattr(cfg, "yosep_trend_enabled", True))
+        if _yosep_on and _snap_lv < _min_lv:
             ScannerLogger.rejected(snap.code, snap.name, "GAP_PULLBACK",
                 f"추세 레벨 미달 lv{_snap_lv} < 최소 lv{_min_lv}")
             return None

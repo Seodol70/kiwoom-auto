@@ -45,9 +45,11 @@ def check_eod_entry(
         return None
 
     # ②-b 분봉 추세 강도
+    # yosep 비활성 시 trend_level=0으로 고정되므로 추세 레벨 체크 스킵
     _eod_min_trend = int(getattr(cfg, "eod_min_trend_level", 2))
     _trend_lv = int(getattr(snap, "trend_level", 0))
-    if _trend_lv < _eod_min_trend:
+    _yosep_on = bool(getattr(cfg, "yosep_trend_enabled", True))
+    if _yosep_on and _trend_lv < _eod_min_trend:
         ScannerLogger.rejected(snap.code, snap.name, "EOD_TREND", f"분봉 추세 미달 — level {_trend_lv} < {_eod_min_trend}")
         return None
 
