@@ -162,9 +162,11 @@ class WeakSignalFilter(SignalFilter):
 
         # 09:30 이후: Lv < 2 차단
         # GAP_PULLBACK/OVERHEAT_PULLBACK은 자체 조건으로 강세 검증하므로 면제
+        # yosep 비활성 시 trend_level=0으로 고정되므로 추세 레벨 체크 스킵
         if now.time() >= opening_end:
+            _yosep_on = bool(getattr(ctx.trading_cfg, "yosep_trend_enabled", True))
             exempt_types = {"GAP_PULLBACK", "OVERHEAT_PULLBACK"}
-            if sig.signal_type not in exempt_types and trend_lv < 2:
+            if _yosep_on and sig.signal_type not in exempt_types and trend_lv < 2:
                 logger.info(
                     "[진입거절] %s(%s) 09:30+ 약한신호 차단 — trend_lv=%d (요구: ≥2)",
                     sig.name, sig.code, trend_lv,
@@ -273,8 +275,8 @@ class AIFilter(SignalFilter):
         # 승인 시 로그 (모델 준비 시에만)
         if getattr(ai_filter, "is_ready", False):
             logger.info(
-                "[AI승인] %s(%s) 예상승률 {win_rate*100:.1f}% (기준 {ai_thr*100:.0f}%, 뉴스:{ctx.news_sentiment})",
-                sig.name, sig.code
+                "[AI승인] %s(%s) 예상승률 %.1f%% (기준 %.0f%%, 뉴스:%s)",
+                sig.name, sig.code, win_rate * 100, ai_thr * 100, ctx.news_sentiment
             )
 
         return True, ""
