@@ -409,6 +409,7 @@ class SmartScanner(QObject):
                 cached_rows = getattr(self, '_last_volume_rows', [])
                 if cached_rows:
                     self.top_mgr.clear()
+                    self.store.bulk_update(cached_rows)  # [BUG-S FIX] store._df도 반영해야 _realtime_loop UI 행 생성 가능
                     for _row in cached_rows:
                         _code = _row.get("code", "")
                         _amt  = int(_row.get("trade_amount") or 0)

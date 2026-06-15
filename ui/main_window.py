@@ -164,6 +164,15 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowSlots):
             self._smart_scanner.start()
             self.append_log("🔍 [스캐너] 스마트 스캐너 루프 시작")
 
+        # 3. MarketScheduler 시작 (1분 타이머 — 장개시/마감/피드백/자정리셋)
+        if hasattr(self, "market_scheduler"):
+            self.market_scheduler.start()
+            self.append_log("🕐 [스케줄러] 장 시간 스케줄러 시작")
+
+        # 4. 텔레그램 봇 폴링 시작 (커맨드 수신)
+        if getattr(self, "_tg", None):
+            self._tg.start()
+
         # 초기 스캔 즉시 실행
         QTimer.singleShot(1000, self.trading_controller.run_periodic_scan)
 
