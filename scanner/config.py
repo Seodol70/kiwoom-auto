@@ -239,6 +239,7 @@ class SmartScannerConfig:
     gap_pullback_floor_pct:  float = 1.0     # 시가 대비 하락 허용 범위 (%) — 초과 시 갭 붕괴로 판단
     gap_pullback_vol_surge:  float = 1.5     # 음봉 이후 회복봉 거래량 급증 기준 배수
     gap_pullback_min_trend_level: int = 2    # 2026-06-15: lv0~1 GAP_PULLBACK 손절 다발 → lv2 이상만 허용
+    gap_pullback_vel_ratio_min:  float = 1.0  # 2026-06-15: vel<1.0 GAP_PULLBACK 승률 저하 → 1.0 이상만 허용
 
     # ── A전략: PULLBACK MTF 연동 ─────────────────────────────────────────────
     pullback_mtf_check: bool = True  # PULLBACK 전략에서 5분봉 방향 일치 확인

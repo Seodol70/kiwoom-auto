@@ -135,6 +135,14 @@ class GapPullbackStrategy(BaseStrategy):
                 f"추세 레벨 미달 lv{_snap_lv} < 최소 lv{_min_lv}")
             return None
 
+        # ── 7. 체결 가속도 하한 (6/15 분석: vel<1.0 GAP_PULLBACK 승률 저하)
+        _vel_min = float(getattr(cfg, "gap_pullback_vel_ratio_min", 1.0))
+        _vel = float(getattr(snap, "vel_ratio", 0.0))
+        if _vel < _vel_min:
+            ScannerLogger.rejected(snap.code, snap.name, "GAP_PULLBACK",
+                f"체결가속도 미달 vel_ratio={_vel:.2f} < {_vel_min}")
+            return None
+
         # ── 8. MTF 추세 일치 (방향1 연동)
         if getattr(cfg, "mtf_enabled", True) and not getattr(snap, "mtf_aligned", True):
             mtf_bars = int(getattr(snap, "mtf_tf5_bars", 0))

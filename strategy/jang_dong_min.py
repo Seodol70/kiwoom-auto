@@ -123,17 +123,15 @@ class JangDongMinStrategy(BaseStrategy):
             else:
                 del self._today_entry_dict[sig.code]
 
-        # 5. [NEW 2026-05-19 / 강화 2026-05-26] 손절 종목 복구 대기 (동일 종목 재진입 방지 — 60분 냉각)
-        # 5/26 분석: 빛과전자/스피어 등 1차 손절 후 즉시 재진입 → 재손절 패턴 발견 → 20분 → 60분 연장
+        # 5. [강화 2026-06-15] 손절 종목 당일 재진입 완전 차단
+        # 6/15 분석: SK네트웍스(-1.27%→-1.07%), 아이로보틱스(-1.42%→-0.82%) 오전 손절 후 오후 재진입 손실 반복
+        # 60분 냉각으로는 오후 재진입을 막지 못함 → 당일(날짜 기준) 재진입 불가로 강화
         loss_exit_time = self._loss_exit_dict.get(sig.code)
         if loss_exit_time:
-            elapsed_min = (datetime.now() - loss_exit_time).total_seconds() / 60.0
-            loss_cooldown_min = float(getattr(self._scan_cfg, "loss_exit_cooldown_minutes", 60.0))
-            if elapsed_min < loss_cooldown_min:
-                remaining = loss_cooldown_min - elapsed_min
-                return False, f"손절 복구 대기 ({remaining:.0f}분)"
+            if loss_exit_time.date() == datetime.now().date():
+                return False, f"당일 손절 종목 재진입 차단 ({loss_exit_time.strftime('%H:%M')} 손절)"
             else:
-                # 냉각 기간 종료 → 기록 삭제 후 파일에도 반영
+                # 날짜가 바뀐 경우 이력 삭제
                 del self._loss_exit_dict[sig.code]
                 self._save_loss_exit_dict()
 
