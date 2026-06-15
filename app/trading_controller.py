@@ -547,6 +547,8 @@ class TradingController(QObject):
                     if _is_loss_exit:
                         self._order_mgr.mark_stop_loss(pos.code)
                         self._strategy.mark_loss_exit(pos)
+                    # 모든 candle-level 청산 후 당일 재진입 차단 (손익 무관)
+                    self._order_mgr.mark_no_reentry(pos.code, pos.name, reason)
                     self._order_mgr.sell(pos.code, pos.name, sell_qty, price=0)
                     count += 1
                     continue

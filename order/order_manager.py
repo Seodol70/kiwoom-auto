@@ -1072,6 +1072,15 @@ class OrderManager(QObject):
             
         return False
 
+    def mark_no_reentry(self, code: str, name: str, reason: str = "") -> None:
+        """
+        해당 종목을 당일 재진입 차단 목록에 등록한다.
+        타임컷·EMA이탈·추세소멸 등 candle-level 청산 후 재진입 방지.
+        """
+        if code not in self._no_reentry_today:
+            self._no_reentry_today.add(code)
+            logger.info("[재진입차단] %s(%s) 등록 — 사유: %s", name, code, reason)
+
     def mark_stop_loss(self, code: str) -> None:
         """
         해당 종목을 당일 손절 블랙리스트에 등록한다.
