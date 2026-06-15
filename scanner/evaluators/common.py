@@ -4,6 +4,7 @@ common.py — 공용 신호 평가 유틸리티 및 필터
 from typing import Optional, TYPE_CHECKING
 from datetime import datetime, time as dtime
 from scanner.scanner_logger import ScannerLogger
+from scanner.indicator_service import IndicatorService
 
 if TYPE_CHECKING:
     from scanner.models import StockSnapshot
