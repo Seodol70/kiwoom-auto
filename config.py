@@ -69,8 +69,8 @@ STRATEGY: dict = {
 RISK: dict = {
     # 익절·손절: 매수 평단 대비 순수 등락률(%) — (현재가−평단)/평단×100, 수수료·세금 제외
     "take_profit_pct":  3.5,   # 이 값 이상이면 익절 (2026-06-04: 3.0→3.5% 손익비 개선)
-    "stop_loss_pct":   -1.2,   # 일반 손절 기준 (2026-04-07 복원: -2.0→-1.2%, scanner/strategy와 통일)
-    "hard_stop_pct":   -2.0,   # Hard Stop — 이 값 이하면 즉시 강제 매도 (기존 -3.0% → -2.0% 강화)
+    "stop_loss_pct":   -2.0,   # 2026-06-15: -1.2→-2.0 (scanner/config.py jdm_stop_loss_pct와 동기화 — 틱/캔들 손절 기준 통일)
+    "hard_stop_pct":   -3.0,   # 2026-06-15: -2.0→-3.0 (scanner/config.py hard_stop_pct와 동기화 — 소프트스탑과 분리)
     "max_change_pct":  22.0,   # 스캐너 등락률 상한 (%) — 2026-04-03 확장: 15→22% (수익 구간 확보)
     "min_change_pct":  -1.5,  # 스캐너 등락률 하한 (%) — 마이너스 반등 종목 포함 (2026-06-04 추가)
     # 동일 종목 signal_detected 재발화 최소 간격(초). 에지(조건 꺼짐→켜짐)와 함께 사용
