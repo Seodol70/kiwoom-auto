@@ -23,7 +23,7 @@
     "volume_surge_mult_afternoon": 0.8,
     "jdm_chejan_max": 1500.0,
     "jdm_chejan_max_opening": 1500.0,
-    "jdm_candle_skip_trend_level": 1,
+    "jdm_candle_skip_trend_level": 99,
     "trade_amount_surge_mult": 1.2,
     "pivot_r2_enabled": false,
     "jdm_ma_spread_max_pct": 5.0,
