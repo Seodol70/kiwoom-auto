@@ -248,6 +248,9 @@ class OrderManager(QObject):
         # [NEW] 당일 손절 블랙리스트 — 손절 체결 종목은 당일 재매수 차단 (2026-04-08)
         # 익절·Time-cut·수동 매도는 포함하지 않음 → 재진입 허용
         self._stop_loss_today: set[str] = set()
+        # [2026-06-15] 당일 강제 청산 블랙리스트 — 트레일스탑·타임컷·본절가스탑 이후 재진입 차단
+        # 손절 외 사유로 청산된 종목도 당일 재진입 시 반복 손실 위험이 높으므로 차단
+        self._no_reentry_today: set[str] = set()
 
         # 강제 매도(Hard Stop / Time-cut / 청산) 발령 중인 종목 추적
         # → 체결 전까지 중복 force_exit 발령 차단 (무한루프 방지)
@@ -611,11 +614,12 @@ class OrderManager(QObject):
         if losses:
             return min(losses, key=lambda p: p.pnl_pct)
 
-        # Time-cut 대상 (20분 경과 + 수익 < 0.3%)
+        # Time-cut 대상 (config time_cut_minutes 경과 + 수익 < 0.3%)
+        _tc_min = float(getattr(getattr(self, "_scan_cfg", None), "time_cut_minutes", 20))
         for p in candidates:
             if p.entry_time:
                 elapsed = (now - p.entry_time).total_seconds() / 60
-                if elapsed >= 20 and p.pnl_pct < 0.3:
+                if elapsed >= _tc_min and p.pnl_pct < 0.3:
                     return p
 
         return None  # 교체 불가 (모두 수익 양호)
@@ -651,6 +655,15 @@ class OrderManager(QObject):
 
         # ── 종목 강제 필터(매수 직전) ─────────────────────────────────────
         if not self._is_buy_allowed(code, name):
+            return
+
+        # ── 서킷브레이커: 당일 손절 N회 이상 시 신규 진입 전면 차단 ─────────
+        _max_sl = int(getattr(getattr(self, "_scan_cfg", None), "daily_max_stoplosses", 0))
+        if _max_sl > 0 and len(self._stop_loss_today) >= _max_sl:
+            logger.warning(
+                "[서킷브레이커] 당일 손절 %d회 달성 (한도: %d회) → 신규 진입 차단 %s(%s)",
+                len(self._stop_loss_today), _max_sl, name, code,
+            )
             return
 
         # [NEW] 데이터 신선도 체크 (Data Freshness)
@@ -1082,6 +1095,7 @@ class OrderManager(QObject):
             self._today_fill_log.clear()
             self._fills_initialized = False  # 새 날짜 → 세션 초기화 재허용
             self._stop_loss_today.clear()    # 날짜 변경 시 손절 블랙리스트 초기화
+            self._no_reentry_today.clear()   # 날짜 변경 시 강제청산 블랙리스트 초기화
             self._queued_signal = None       # 전날 대기 신호 → 익일 오래된 신호로 매수 방지
             self._partial_pending_codes.clear()  # 전날 분할매도 잔존 → 익일 is_partial 오기록 방지
             for p in self.positions.values():
@@ -1229,6 +1243,13 @@ class OrderManager(QObject):
             self.order_failed.emit(msg)
             return False
 
+        # 3-1) 당일 강제청산 블랙리스트 차단 (트레일스탑·타임컷·본절가스탑 이후 재진입 차단)
+        if code in self._no_reentry_today:
+            msg = f"매수 차단 — {name}({code}) 당일 강제청산 종목 (재진입 차단)"
+            logger.info(msg)
+            self.order_failed.emit(msg)
+            return False
+
         return True
 
     # -----------------------------------------------------------------------
@@ -1290,6 +1311,13 @@ class OrderManager(QObject):
             logger.info("[force_exit] %s 포지션 없음 — 스킵 (이미 청산됨)", code)
             self._force_sell_issued.discard(code)
             return "0"
+
+        # 수동·종가청산 외 모든 강제청산은 당일 재진입 차단 목록에 등록
+        _manual_reasons = ("수동", "DayClose", "Day Close")
+        if not any(r in reason for r in _manual_reasons):
+            if code not in self._no_reentry_today:
+                self._no_reentry_today.add(code)
+                logger.info("[재진입차단] %s(%s) 등록 — 사유: %s", name, code, reason)
 
         try:
             # 2회 이상 타임아웃 → 지정가(현재가-1틱)로 에스컬레이션 (시장가 미체결 반복 방지)

@@ -19,7 +19,9 @@ def check_pullback_entry(
     """
     tlv = int(getattr(snap, "trend_level", 0))
     _min_tlv = int(getattr(cfg, "pullback_min_trend_lv", 3))
-    if tlv < _min_tlv:
+    # yosep 비활성 시 trend_level=0으로 고정되므로 추세 레벨 체크 스킵
+    _yosep_on = bool(getattr(cfg, "yosep_trend_enabled", True))
+    if _yosep_on and tlv < _min_tlv:
         ScannerLogger.rejected(snap.code, snap.name, "PULLBACK_TREND",
             f"추세 레벨 부족 — trend_lv={tlv} (요구: >={_min_tlv})")
         return None

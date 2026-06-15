@@ -201,7 +201,7 @@ class SmartScannerConfig:
     #   2% 미만 빠른 반전 → trail 미활성, stop_loss(-2%)가 담당
     #   2%+ 상승 후 반전 → trail 활성, 수익 일부 보호
     #   5%+ 달리는 종목 → tier2(3.0%)로 여유롭게 추적
-    trail_activation_pct: float = 1.5   # 2026-06-09: 1.0→1.5 (조기 trail 활성화 방지 — 작은 수익 흔들림 보호)
+    trail_activation_pct: float = 3.0   # 2026-06-15: 1.5→3.0 (trail_pct_tier1=2.5%이므로 activation>=3.0이어야 trail_price>매입가 보장)
     trail_pct_tier1:      float = 2.5   # 2026-06-09: 1.2→2.5 (Tier1 폭 대폭 확대 — 고점 2.5% 이내 조정 허용)
     trail_tier1_max:      float = 5.0   # 2026-06-09: 3.0→5.0 (tier2 진입 늦춤 — 5% 수익 전까지 tier1 유지)
     trail_pct_tier2:      float = 3.0   # 2026-06-09: 2.0→3.0 (Tier2 폭 확대 — 5~8% 구간 여유 추적)
@@ -276,6 +276,8 @@ class SmartScannerConfig:
     ema20_exit_enabled:            bool  = True   # 2026-05-18: False→True (EMA20 이탈 시 즉시 청산, 추세 변화 감지)
     # [NEW] 보유 시간 상한 (타임컷) — 2026-06-15: 25→35 (15~30분 보유 구간이 흑자 전환점)
     time_cut_minutes:     int   = 35   # 25→35 (데이터: 15분+ 보유 시 승률 55%, 평균 +0.39%)
+    # [NEW] 당일 서킷브레이커 — 손절 N회 이후 신규 진입 전면 차단 (0=비활성)
+    daily_max_stoplosses: int   = 0    # 예: 5 → 당일 5회 손절 시 매매 중단 (연속 26패 방지)
     # [NEW] 시간대별 청산 파라미터 — 점심시간(MIDDAY 11:00~13:00) 저변동성 구간 대응
     trail_activation_pct_midday: float = 2.5   # 트레일 활성화 기준 완화 (기본 1.5%)
     trail_pct_tier1_midday:      float = 1.2   # 트레일 Tier1 폭 확대 (기본 0.8%)
