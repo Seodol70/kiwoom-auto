@@ -238,6 +238,7 @@ class SmartScannerConfig:
     gap_pullback_end:        str   = "10:30" # 진입 허용 종료 시각
     gap_pullback_floor_pct:  float = 1.0     # 시가 대비 하락 허용 범위 (%) — 초과 시 갭 붕괴로 판단
     gap_pullback_vol_surge:  float = 1.5     # 음봉 이후 회복봉 거래량 급증 기준 배수
+    gap_pullback_min_trend_level: int = 2    # 2026-06-15: lv0~1 GAP_PULLBACK 손절 다발 → lv2 이상만 허용
 
     # ── A전략: PULLBACK MTF 연동 ─────────────────────────────────────────────
     pullback_mtf_check: bool = True  # PULLBACK 전략에서 5분봉 방향 일치 확인
@@ -365,10 +366,11 @@ class SmartScannerConfig:
     # 활성 전략 목록: "BREAKOUT", "JDM_ENTRY", "PULLBACK", "EOD"
     # [2026-06-02] BREAKOUT 제거 — "이미 오른 것 확인 후 진입" 구조적 후행성
     # BREAKOUT 승률 낮음 + 신호 11,128건/일(47%) 노이즈 → JDM_ENTRY/PULLBACK/GAP_PULLBACK으로 대체
-    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
+    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK", "MORNING_GOLDENTIME")
     # [2026-06-10] PULLBACK 비중 축소: GAP_PULLBACK 우선, PULLBACK 후순위로 이동
     # 근거: PULLBACK 반복 손실(6/1 33건 21%, 6/8 10건 40%) vs JDM 빅 위너 생산
-    strategy_order: tuple[str, ...] = ("JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
+    # [2026-06-15] MORNING_GOLDENTIME 추가: 09:00~09:30 전용 (내부에서 enabled 플래그로 ON/OFF)
+    strategy_order: tuple[str, ...] = ("MORNING_GOLDENTIME", "JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
     # 분당 최대 신호 발행 수 — 동시 다발 진입 방지 (1분에 최대 N종목)
     max_entries_per_minute: int = 2  # 2026-05-07: 1→5→2 (UI 프리징 해결, 신호 제한)
     # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
@@ -447,6 +449,24 @@ class SmartScannerConfig:
     # 5/28 이브이첨단소재(3h9m +14%) 같이 vel 높은 종목은 타임컷 없이 장기 보유
     strong_trend_vel_min:     float = 1.5  # vel_ratio 이상이어야 타임컷 면제 적용
 
+
+    # ── E전략: 오전 골든타임 집중 매매 (09:00~09:30) ─────────────────────────
+    # 대시보드 토글로 활성화/비활성화. 기본 비활성 (False).
+    morning_goldentime_enabled:        bool  = False   # 오전 골든타임 전략 ON/OFF
+    morning_goldentime_cooldown_sec:   float = 180.0   # 종목별 신호 쿨다운 (초)
+    morning_goldentime_min_trade_amount: float = 3_000_000_000  # 최소 거래대금 (30억)
+    # Phase 2 (09:00~09:10) 시가 돌파 파라미터
+    morning_goldentime_p2_open_rise_max: float = 5.0   # 시가 대비 상승 상한 (%) — 과열 차단
+    morning_goldentime_p2_hoga_mult:     float = 1.5   # 매수잔량 / 매도잔량 최소 배수
+    morning_goldentime_p2_gap_min:       float = 2.0   # 갭 상승 최소 % (우대, 차단 아님)
+    morning_goldentime_p2_gap_max:       float = 8.0   # 갭 상승 최대 % (우대 상한)
+    morning_goldentime_p2_chejan_min:    float = 110.0  # 체결강도 하한 (%)
+    # Phase 3 (09:10~09:30) 눌림목 파라미터
+    morning_goldentime_p3_min_trend_lv:  int   = 2     # 최소 추세 레벨 (lv0~1 손절 다발 방지)
+    morning_goldentime_p3_pullback_min:  float = -5.0  # 눌림 허용 하한 (%) — 너무 깊으면 추세 붕괴
+    morning_goldentime_p3_pullback_max:  float = -0.5  # 눌림 허용 상한 (%) — 눌림 없으면 패스
+    morning_goldentime_p3_vol_decay_check: bool = True # 거래량 급감 확인 (눌림 진정성)
+    morning_goldentime_p3_vol_decay_max:   float = 0.8 # 최근 2봉/5봉 평균 비율 상한 (이하면 급감 확인)
 
     # ── 본절가 스탑 (Breakeven Stop) ──────────────────────────────────────────
     # 분할 익절 완료 후 주가가 평단가 이하로 내려오면 잔여 수량 전량 즉시 청산.

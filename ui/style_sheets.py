@@ -83,6 +83,22 @@ QPushButton#btn_auto_on {
     border: 2px solid #f38ba8;
 }
 
+/* ─── 오전 골든타임 버튼 ──────────────────────────────── */
+QPushButton#btn_goldentime_off {
+    background: transparent;
+    color: #f9e2af;
+    border: 1px solid #f9e2af;
+}
+QPushButton#btn_goldentime_off:hover {
+    background: rgba(249, 226, 175, 0.1);
+}
+QPushButton#btn_goldentime_on {
+    background: #f9e2af;
+    color: #11111b;
+    border: 2px solid #f9e2af;
+    font-weight: bold;
+}
+
 /* ─── 실전/모의 전환 버튼 ────────────────────────────── */
 QPushButton#btn_switch_real {
     color: #fab387;

@@ -72,6 +72,7 @@ class SignalManager:
         self.win.header.auto_trade_toggled.connect(self.win._on_auto_trade_toggle)
         self.win.header.auto_trade_toggled.connect(self.tc.set_auto_trading)
         self.win.header.overnight_mode_toggled.connect(self.win._on_overnight_mode_toggle)
+        self.win.header.morning_goldentime_toggled.connect(self.win._on_morning_goldentime_toggle)
         self.win.header.switch_real_requested.connect(self.win._on_switch_real_requested)
         self.win.header.reload_requested.connect(self.win._on_reload_config)
         self.win.header.unlock_requested.connect(self.win._on_manual_unlock_requested)

@@ -139,11 +139,20 @@ class MainWindowSlots:
         """야간보유 모드 토글"""
         self.state.overnight_mode = enabled
         self._scan_cfg.overnight_mode_enabled = enabled
-        
+
         state = "ON" if enabled else "OFF"
         icon  = "🌙" if enabled else "☀️"
         self.append_log(f"{icon} 야간보유 모드 {state}")
         logger.info("[overnight_mode] %s", state)
+
+    @pyqtSlot(bool)
+    def _on_morning_goldentime_toggle(self, enabled: bool) -> None:
+        """오전 골든타임 전략 토글"""
+        self._scan_cfg.morning_goldentime_enabled = enabled
+        state = "ON" if enabled else "OFF"
+        icon  = "⭐" if enabled else "⚪"
+        self.append_log(f"{icon} 오전 골든타임 전략 {state} (09:00~09:30)")
+        logger.info("[morning_goldentime] %s", state)
 
     @pyqtSlot()
     def _on_switch_real_requested(self) -> None:

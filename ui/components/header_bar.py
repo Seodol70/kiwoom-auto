@@ -33,8 +33,9 @@ class HeaderBar(QWidget):
     exit_requested = pyqtSignal()              # 프로그램 종료 요청
     reload_requested = pyqtSignal()            # 설정 실시간 리로드 요청
     unlock_requested = pyqtSignal()            # 일일 손익 락 수동 해제 요청
-    overnight_mode_toggled = pyqtSignal(bool)  # True = 야간보유 ON, False = OFF
-    switch_real_requested = pyqtSignal()       # 실전투자 전환 버튼
+    overnight_mode_toggled = pyqtSignal(bool)      # True = 야간보유 ON, False = OFF
+    morning_goldentime_toggled = pyqtSignal(bool)  # True = 오전 골든타임 ON, False = OFF
+    switch_real_requested = pyqtSignal()           # 실전투자 전환 버튼
 
 
     def __init__(self, parent=None) -> None:
@@ -144,6 +145,20 @@ class HeaderBar(QWidget):
         self._btn_overnight.clicked.connect(self._on_overnight_clicked)
 
 
+        # ── 오전 골든타임 모드 토글 버튼 ──────────────────────────────────────
+        self._btn_goldentime = QPushButton("⭐ 골든 OFF")
+        self._btn_goldentime.setObjectName("btn_goldentime_off")
+        self._btn_goldentime.setCheckable(True)
+        self._btn_goldentime.setChecked(False)
+        self._btn_goldentime.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
+        self._btn_goldentime.setFixedSize(100, 30)
+        self._btn_goldentime.setToolTip(
+            "오전 골든타임 모드: ON 시 09:00~09:30에 특화 신호 발생\n"
+            "Phase2(시가돌파+호가압력) + Phase3(눌림목+VWAP지지)\n"
+            "대량 거래 + 호가 매수벽 + 추세Lv2 이상 필수"
+        )
+        self._btn_goldentime.clicked.connect(self._on_goldentime_clicked)
+
         # ── 실전투자 전환 버튼 ────────────────────────────────────────────────
         self._btn_switch_real = QPushButton("💎 실전/모의")
         self._btn_switch_real.setObjectName("btn_switch_real")
@@ -171,6 +186,7 @@ class HeaderBar(QWidget):
         lay.addWidget(self._divider())
         
         lay.addWidget(self._btn_switch_real)
+        lay.addWidget(self._btn_goldentime)
         lay.addWidget(self._btn_overnight)
         lay.addWidget(self._btn_auto)
         lay.addWidget(self._btn_unlock)
@@ -220,6 +236,21 @@ class HeaderBar(QWidget):
         self._btn_overnight.style().polish(self._btn_overnight)
         self.overnight_mode_toggled.emit(checked)
 
+
+    def _on_goldentime_clicked(self, checked: bool) -> None:
+        if checked:
+            self._btn_goldentime.setText("⭐ 골든 ON")
+            self._btn_goldentime.setObjectName("btn_goldentime_on")
+        else:
+            self._btn_goldentime.setText("⭐ 골든 OFF")
+            self._btn_goldentime.setObjectName("btn_goldentime_off")
+        self._btn_goldentime.style().unpolish(self._btn_goldentime)
+        self._btn_goldentime.style().polish(self._btn_goldentime)
+        self.morning_goldentime_toggled.emit(checked)
+
+    def set_goldentime_checked(self, checked: bool) -> None:
+        self._btn_goldentime.setChecked(checked)
+        self._on_goldentime_clicked(checked)
 
     def _on_restart_clicked(self) -> None:
         """프로그램 재시작 버튼 클릭 — run_qt.py 를 다시 실행"""

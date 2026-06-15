@@ -127,7 +127,15 @@ class GapPullbackStrategy(BaseStrategy):
                     f"거래량 미달 — 현재봉 {vols[-1]:,} < 평균 {avg_v:,.0f} × {surge_mult}")
                 return None
 
-        # ── 6. MTF 추세 일치 (방향1 연동)
+        # ── 6. 추세 레벨 하한 (lv0~1 손절 다발 방지)
+        _min_lv = int(getattr(cfg, "gap_pullback_min_trend_level", 2))
+        _snap_lv = int(getattr(snap, "trend_level", 0))
+        if _snap_lv < _min_lv:
+            ScannerLogger.rejected(snap.code, snap.name, "GAP_PULLBACK",
+                f"추세 레벨 미달 lv{_snap_lv} < 최소 lv{_min_lv}")
+            return None
+
+        # ── 8. MTF 추세 일치 (방향1 연동)
         if getattr(cfg, "mtf_enabled", True) and not getattr(snap, "mtf_aligned", True):
             mtf_bars = int(getattr(snap, "mtf_tf5_bars", 0))
             if mtf_bars >= int(getattr(cfg, "mtf_min_5min_bars", 3)):
