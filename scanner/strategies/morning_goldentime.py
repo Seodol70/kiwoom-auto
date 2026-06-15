@@ -189,10 +189,11 @@ class MorningGoldentimeStrategy(BaseStrategy):
                 "캔들 데이터 부족 (5봉 미만)")
             return None
 
-        # 1. 추세 레벨 최소 lv2
+        # 1. 추세 레벨 최소 lv2 (yosep 비활성 시 trend_level=0으로 고정되므로 스킵)
+        _yosep_on = bool(getattr(cfg, "yosep_trend_enabled", True))
         trend_lv = int(getattr(snap, "trend_level", 0) or 0)
         _min_lv  = int(getattr(cfg, "morning_goldentime_p3_min_trend_lv", 2))
-        if trend_lv < _min_lv:
+        if _yosep_on and trend_lv < _min_lv:
             ScannerLogger.rejected(snap.code, snap.name, "MORNING_GOLDENTIME_P3",
                 f"추세 레벨 미달 lv{trend_lv} < lv{_min_lv}")
             return None
