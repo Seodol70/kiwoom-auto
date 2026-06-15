@@ -110,13 +110,12 @@ class SmartScannerConfig:
     jdm_chejan_max_opening: float = 2000.0  # OPENING 슬롯 체결강도 상한 — 2026-05-12: 800→2000 (신호 기회 극대)
     breakout_rsi_max:     float = 80.0   # BREAKOUT RSI 상한 — 과매수 진입 차단 (2026-04-15 분석, OPENING은 breakout.py에서 스킵)
     # OPENING_SURGE 파라미터 (09:00~09:16 정규장 초반, 캔들 부족 구간)
-    opening_surge_chg_min:    float = 1.0    # OPENING 최소 등락률 (%)
-    opening_surge_chejan_min: float = 120.0  # OPENING 체결강도 하한 (%)
-    opening_surge_vol_mult:   float = 1.2    # OPENING 거래량 배수 (직전 평균 대비)
-    # [2026-06-10] 개장 추세 품질 필터 — trend_momentum + opening_watch_score 기반
-    # OPENING 슬롯(09:00~09:30)에서 단발 Lv3 차단. 두 값 모두 미달 시 진입 거절.
-    opening_momentum_min:     float = 0.10   # trend_momentum 최소값 (0=이력없음, 1.0=완벽한 단계적 상승)
-    opening_watch_score_min:  float = 0.10   # opening_watch_score 최소값 (0=관찰 없음, 1.0=모든 지표 강세)
+    opening_surge_chg_min:    float = 2.0    # 1.0→2.0 (OPENING 최소 등락률 강화, 미약한 신호 차단)
+    opening_surge_chejan_min: float = 140.0  # 120→140 (OPENING 체결강도 상향)
+    opening_surge_vol_mult:   float = 1.5    # 1.2→1.5 (OPENING 거래량 배수 강화)
+    # [2026-06-15] 개장 추세 품질 필터 강화 — OPENING 승률 26% 기반
+    opening_momentum_min:     float = 0.25   # 0.10→0.25 (단발 상승 차단, 추세 누적 필요)
+    opening_watch_score_min:  float = 0.25   # 0.10→0.25 (관찰 이력 없는 종목 진입 차단)
 
     # ── Phase 1 모닝 스캘핑 파라미터 (09:00~09:30 진입, 10:30 강제청산) ──────
     phase1_min_candles:       int   = 3      # 진입 전 최소 1분봉 수 (≈09:03 이후)
@@ -177,21 +176,21 @@ class SmartScannerConfig:
     max_change_pct_morning:   float = 20.0   # 10:00~11:00 핵심 오전 (2026-05-12: 15→20 상향)
     max_change_pct_midday:    float = 15.0   # 11:00~13:00 점심 (2026-05-12: 12→15 상향)
     max_change_pct_afternoon: float = 8.0   # 2026-05-13: 12→8 (오후 약세 신호 차단, 손실 감소)
-    # 구간별 체결강도 하한 (%) — 2026-05-12: 신호 통과 기회 확대
-    min_chejan_strength_opening:   float = 100.0      # 105→100 (OPENING 완화)
-    min_chejan_strength_morning:   float = 90.0       # 110→90 (MORNING 공격화)
-    min_chejan_strength_midday:    float = 90.0       # 110→90 (MIDDAY 공격화)
-    min_chejan_strength_afternoon: float = 130.0      # 2026-05-18: 90→130 (오후 신호 필터 2배 강화)
+    # 구간별 체결강도 하한 (%) — 2026-06-15: 실적 데이터 기반 재조정 (10:00~11:00 집중)
+    min_chejan_strength_opening:   float = 140.0      # 100→140 (OPENING 승률 26% → 강한 매수세만 허용)
+    min_chejan_strength_morning:   float = 90.0       # 유지 (10:00~11:00 유일한 흑자 구간)
+    min_chejan_strength_midday:    float = 120.0      # 90→120 (MIDDAY 수익 거의 없음 → 기준 강화)
+    min_chejan_strength_afternoon: float = 130.0      # 유지
     # 구간별 거래량 급증 배수 (직전 N분 평균 대비)
-    volume_surge_mult_opening:   float = 1.2
-    volume_surge_mult_morning:   float = 1.5
-    volume_surge_mult_midday:    float = 1.2   # 2026-04-16: 2.0→1.2 (오후 거래량 자연 감소 반영)
-    volume_surge_mult_afternoon: float = 1.2   # 2026-04-16: 2.0→1.2 (오후 거래량 자연 감소 반영)
-    # 구간별 RSI 진입 하한
-    jdm_rsi_entry_min_opening:   float = 30.0     # 2026-05-12: 35→30 (OPENING 신호 극도 완화, RSI 30 이상이면 진입)
-    jdm_rsi_entry_min_morning:   float = 38.0     # 2026-05-11: 42→38 (공격적 완화)
-    jdm_rsi_entry_min_midday:    float = 40.0     # 2026-05-11: 45→40 (공격적 완화)
-    jdm_rsi_entry_min_afternoon: float = 55.0     # 2026-05-18: 42→55 (오후 신호 필터 2배 강화 - 강한 모멘텀만 진입)
+    volume_surge_mult_opening:   float = 1.5          # 1.2→1.5 (OPENING 거래량 기준 강화)
+    volume_surge_mult_morning:   float = 1.5          # 유지
+    volume_surge_mult_midday:    float = 1.2          # 유지
+    volume_surge_mult_afternoon: float = 1.2          # 유지
+    # 구간별 RSI 진입 하한 — 2026-06-15: OPENING·MIDDAY 기준 상향 (데이터 근거)
+    jdm_rsi_entry_min_opening:   float = 50.0     # 30→50 (OPENING RSI 무방비 진입 차단)
+    jdm_rsi_entry_min_morning:   float = 38.0     # 유지 (흑자 구간 기준 유지)
+    jdm_rsi_entry_min_midday:    float = 50.0     # 40→50 (MIDDAY 진입 기준 강화)
+    jdm_rsi_entry_min_afternoon: float = 62.0     # 55→62 (오후 강한 모멘텀만 진입)
     # [P2] 구간별 익절 목표 (%) — (레거시, 트레일 스탑으로 대체)
     tp_pct_opening:   float = 2.0
     tp_pct_morning:   float = 2.5
@@ -275,13 +274,13 @@ class SmartScannerConfig:
     ema_disp_max_pct_trend:        float = 7.0   # trend_level≥2 EMA10/EMA20 이격 상한 완화
     price_ema_disp_max_pct_trend:  float = 6.0   # trend_level≥2 현재가/EMA10 이격 상한 완화
     ema20_exit_enabled:            bool  = True   # 2026-05-18: False→True (EMA20 이탈 시 즉시 청산, 추세 변화 감지)
-    # [NEW] 보유 시간 상한 (타임컷)
-    time_cut_minutes:     int   = 25   # 2026-04-13: 40→25 (타임컷 단축 — 추세 꺾인 종목 조기 청산)
+    # [NEW] 보유 시간 상한 (타임컷) — 2026-06-15: 25→35 (15~30분 보유 구간이 흑자 전환점)
+    time_cut_minutes:     int   = 35   # 25→35 (데이터: 15분+ 보유 시 승률 55%, 평균 +0.39%)
     # [NEW] 시간대별 청산 파라미터 — 점심시간(MIDDAY 11:00~13:00) 저변동성 구간 대응
     trail_activation_pct_midday: float = 2.5   # 트레일 활성화 기준 완화 (기본 1.5%)
     trail_pct_tier1_midday:      float = 1.2   # 트레일 Tier1 폭 확대 (기본 0.8%)
     trail_pct_tier2_midday:      float = 1.8   # 트레일 Tier2 폭 확대 (기본 1.2%)
-    time_cut_minutes_midday:     int   = 30    # 타임컷 완화 (기본 25분)
+    time_cut_minutes_midday:     int   = 40    # 30→40 (MIDDAY 저변동성, 더 기다려야 수익 실현)
     stop_loss_pct_midday:        float = -1.5  # 손절 완화 (기본 -1.2%)
     # [NEW] 시간대별 청산 파라미터 — 장초반(OPENING 09:00~09:30) 과열 구간 대응
     stop_loss_pct_opening:       float = -1.5  # 손절 완화 (기본 -1.2%)
@@ -298,7 +297,7 @@ class SmartScannerConfig:
     gap_tp_tier2_pct:            float = 6.0    # 2026-06-08: 4.5→6.0% (갭 클수록 목표 높게)
     gap_tp_tier3_pct:            float = 7.0    # 2026-06-08: 5.5→7.0% (갭 10%+ 종목)
     # [NEW] 오후(13:00~14:30) 청산 파라미터 — 변동성 높고 손실 가능성 큼
-    time_cut_minutes_afternoon:  int   = 15    # 2026-05-18: 신규 (오후는 15분 만에 청산, 기본 25분)
+    time_cut_minutes_afternoon:  int   = 20    # 15→20 (오후도 타임컷 연장, 15분은 너무 짧음)
     stop_loss_pct_afternoon:     float = -1.0  # 2026-05-18: 신규 (오후 손절 강화)
     # [NEW 2026-05-19] 동일 종목 재진입 차단 (손절 후 복구 기간)
     loss_exit_cooldown_minutes:   float = 60.0  # 2026-05-26: 20.0→60.0 (재손절 패턴 차단)

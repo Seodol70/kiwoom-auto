@@ -52,6 +52,7 @@ class PendingOrderMeta:
     entry_phase: int = 0                    # 진입 페이즈 (1=모닝스캘핑, 2=메인)
     entry_gap_pct: float = 0.0             # [2026-05-26] 진입 시 갭 상승 % (동적 손절선 산출용)
     signal_price: int = 0                   # [2026-06-01] 신호 발생 시점의 가격 (슬리피지 체크용)
+    strategy: str = ""                      # 진입 전략명 (JDM_ENTRY, PULLBACK, GAP_PULLBACK 등)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ class Position:
     entry_phase:     int  = 0             # 0=미분류, 1=모닝스캘핑(09~10:30), 2=메인전략(10~14:40)
     # 섹터 쏠림 방지
     sector:          str  = ""            # 업종명 (opt10001 응답, 섹터 노출 집계용)
+    strategy:        str  = ""            # 진입 전략명 (JDM_ENTRY, PULLBACK, GAP_PULLBACK 등)
     entry_count:     int  = 1             # 진입 횟수 (피라미딩 추적용)
     sl_triggered_at: Optional[datetime] = None # 손절(SL) 발동 시각
 
@@ -863,7 +865,8 @@ class OrderManager(QObject):
             eod_trade=bool(_vals.get("eod_trade", False)),
             entry_phase=int(getattr(signal, "entry_phase", 0) or 0),
             entry_gap_pct=_gap_pct,
-            signal_price=int(getattr(signal, "price", 0) or 0),  # [방향 C] 슬리피지 체크용
+            signal_price=int(getattr(signal, "price", 0) or 0),
+            strategy=str(getattr(signal, "signal_type", "") or ""),
         )
 
         # ✅ 피라미딩인 경우 수량 조절 (기본 50%)
@@ -1713,12 +1716,13 @@ class OrderManager(QObject):
                 eod_trade=meta.eod_trade,
                 entry_phase=meta.entry_phase,
                 sector=meta.sector,
+                strategy=meta.strategy,
                 entry_gap_pct=meta.entry_gap_pct,
             )
             position_log.info(
-                "[포지션생성] %s(%s) 체결가=%d 수량=%d 섹터=[%s] trend_lv=%d phase=%d",
+                "[포지션생성] %s(%s) 체결가=%d 수량=%d 전략=%s 섹터=[%s] trend_lv=%d phase=%d",
                 name, code, filled_price, filled_qty,
-                meta.sector or "-", int(meta.trend_level), int(meta.entry_phase),
+                meta.strategy or "-", meta.sector or "-", int(meta.trend_level), int(meta.entry_phase),
             )
 
         # 공통 마무리 로직
@@ -1773,7 +1777,8 @@ class OrderManager(QObject):
 
         if pos.qty <= 0:
             _pnl_pct = (filled_price - avg_buy_for_log) / avg_buy_for_log * 100 if avg_buy_for_log else 0
-            position_log.info("[포지션청산] %s(%s) 매도가=%d 손익=%+.2f%%", name, code, filled_price, _pnl_pct)
+            _strat = getattr(pos, "strategy", "") or "-"
+            position_log.info("[포지션청산] %s(%s) 매도가=%d 손익=%+.2f%% 전략=%s", name, code, filled_price, _pnl_pct, _strat)
             if self.on_position_closed: self.on_position_closed(code)
             del self.positions[code]
             self._force_sell_issued.discard(code)
