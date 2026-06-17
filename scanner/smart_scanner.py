@@ -2133,6 +2133,10 @@ class SmartScanner(QObject):
 
 
         # ② 캐시 없거나 부족 → opt10080 TR 호출 (direct, _tr_q 미사용 — cascade 방지)
+        # opt10080 서킷브레이커 재확인: 체인 도중 차단 발동 시 나머지 종목도 중단
+        if getattr(self._kiwoom, "is_tr_banned", lambda _: False)("opt10080"):
+            logger.info("[STEP-H async] opt10080 차단 중 — 체인 중단 (나머지 %d종목 스킵)", len(codes) - idx)
+            return
         try:
             candles = self._kiwoom.get_min_candles(code, 1, 70)
             ohlc = [c for c in candles if c.get("close")]
@@ -2171,6 +2175,9 @@ class SmartScanner(QObject):
             return
 
         code = codes[idx]
+        if getattr(self._kiwoom, "is_tr_banned", lambda _: False)("opt10080"):
+            logger.info("[H1 async] opt10080 차단 중 — 체인 중단 (나머지 %d종목 스킵)", len(codes) - idx)
+            return
         try:
             h1_candles = self._kiwoom.get_min_candles(code, 60, 20)
             h1_ohlc = [c for c in h1_candles if c.get("close")]

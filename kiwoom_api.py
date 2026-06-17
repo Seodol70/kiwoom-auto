@@ -1092,7 +1092,9 @@ class KiwoomManager(KiwoomProtocol):
         ban_until = self._tr_bans.get(tr_code, 0)
         if now < ban_until:
             wait_rem = int(ban_until - now)
-            logger.warning("[CircuitBreaker] TR %s is currently blocked for %d more sec. Skipping.", tr_code, wait_rem)
+            # DEBUG로 격하: 차단 중 재시도 호출이 초당 수회 발생해 WARNING이 폭증하는 것을 방지
+            # 최초 차단 발동은 CRITICAL(_request_tr 하단)으로 이미 기록됨
+            logger.debug("[CircuitBreaker] TR %s blocked %d sec remaining. Skipping.", tr_code, wait_rem)
             return False
 
         # ★ acquire() 전에 busy 플래그 설정

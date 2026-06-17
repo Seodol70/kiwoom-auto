@@ -216,6 +216,7 @@ class SmartScannerConfig:
     exec_velocity_mult_midday:    float = 0.3   # MIDDAY: 기본 적용
     exec_velocity_mult_afternoon: float = 0.5   # AFTERNOON: 에너지 더 필요
     exec_velocity_disabled_opening: bool = False  # OPENING 슬롯도 필터 적용
+    exec_velocity_block_zero: bool = True  # vel_ratio=0(데이터 없음)도 미달로 차단
     # [2026-06-02] 신호가 대비 체결가 슬리피지 상한 (초과 시 즉시 매도)
     max_entry_slippage_pct: float = 1.5  # 1.5% 초과 시 진입 취소 (기존 3.0% → 강화)
 

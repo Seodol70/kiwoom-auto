@@ -395,9 +395,12 @@ def _jdm_check_execution_quality(
     if getattr(cfg, "exec_velocity_enabled", True) and not skip_exec_vel:
         vel_mult = float(getattr(cfg, f"exec_velocity_mult_{ctx.slot.lower()}",
                                  getattr(cfg, "exec_velocity_mult", 1.8)))
-        if snap.exec_velocity_ratio > 0 and snap.exec_velocity_ratio < vel_mult:
+        vel = snap.exec_velocity_ratio
+        block_zero = getattr(cfg, "exec_velocity_block_zero", True)
+        # vel=0: 체결 데이터 미집계 상태 — block_zero=True면 모멘텀 없음으로 차단
+        if (vel == 0 and block_zero) or (vel > 0 and vel < vel_mult):
             ScannerLogger.rejected(snap.code, snap.name, "JDM_EXEC_VEL",
-                f"[{ctx.slot}] 체결 가속도 미달 — {snap.exec_velocity_ratio:.2f}배 < {vel_mult:.1f}배")
+                f"[{ctx.slot}] 체결 가속도 미달 — {vel:.2f}배 < {vel_mult:.1f}배")
             return None
 
     # ── 체결강도 체크 (하한 + 상한 동시 적용)
