@@ -165,22 +165,49 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         eff_rsi_min   = min(eff_rsi_min, 40.0)
         eff_ma_spread = min(eff_ma_spread, 0.10)
 
-    # ── [2026-06-17] ① 거래량 선행 진입 — 거래량 폭발 시 RSI 하한 완화
+    # ── [2026-06-17] ① 거래량 선행 진입 — 거래량 폭발 + 추세 상승 확인 시 RSI 하한 완화
+    # 패닉셀(하락 중 거래량 폭발)과 구분하기 위해 추세 방향 확인 조건 병행
     _vol_early = False
     if getattr(cfg, "vol_early_entry_enabled", True):
         _ve_mult   = float(getattr(cfg, "vol_early_entry_mult", 3.0))
         _ve_lookbk = int(getattr(cfg, "volume_surge_lookback", 10))
         _vols      = list(snap.volumes_1min or [])
+        _ve_cls    = list(snap.closes_1min or [])
         if len(_vols) >= _ve_lookbk + 1:
             _ve_avg = sum(_vols[-(_ve_lookbk + 1):-1]) / _ve_lookbk
             _ve_cur = _vols[-1]
             if _ve_avg > 0 and _ve_cur >= _ve_avg * _ve_mult:
                 _ve_chejan_min = float(getattr(cfg, "vol_early_entry_chejan_min", 110.0))
                 if snap.chejan_strength >= _ve_chejan_min:
-                    _ve_rsi_floor = float(getattr(cfg, "vol_early_entry_rsi_floor", 38.0))
-                    if eff_rsi_min > _ve_rsi_floor:
-                        eff_rsi_min = _ve_rsi_floor
-                        _vol_early = True
+                    # ── 추세 상승 확인 (패닉셀 구분) — N개 중 confirm_count 이상 충족해야 발동
+                    _ve_confirm_need = int(getattr(cfg, "vol_early_entry_confirm_count", 2))
+                    _ve_confirm = 0
+
+                    # 조건A: 최근 3분봉 저점 높아지는 중 (closes[-1] > closes[-2] > closes[-3])
+                    if len(_ve_cls) >= 3 and _ve_cls[-1] > _ve_cls[-2] > _ve_cls[-3]:
+                        _ve_confirm += 1
+
+                    # 조건B: 현재가 > EMA20 (중기 하락추세 아님)
+                    if len(_ve_cls) >= 20:
+                        _ve_ema20 = IndicatorService.calc_ema(_ve_cls, 20)
+                        if _ve_ema20 and snap.current_price > _ve_ema20:
+                            _ve_confirm += 1
+
+                    # 조건C: 체결강도 상승 중 (chejan_history 최근값 > 3틱 전보다 높음)
+                    _ve_chej_hist = list(getattr(snap, "chejan_history", None) or [])
+                    if len(_ve_chej_hist) >= 4 and _ve_chej_hist[-1] > _ve_chej_hist[-4]:
+                        _ve_confirm += 1
+
+                    # 조건D: 현재 1분봉 양봉 (종가 > 시가 — 매수세 우위)
+                    _ve_opens = list(getattr(snap, "opens_1min", None) or [])
+                    if _ve_opens and _ve_cls and _ve_cls[-1] > _ve_opens[-1]:
+                        _ve_confirm += 1
+
+                    if _ve_confirm >= _ve_confirm_need:
+                        _ve_rsi_floor = float(getattr(cfg, "vol_early_entry_rsi_floor", 38.0))
+                        if eff_rsi_min > _ve_rsi_floor:
+                            eff_rsi_min = _ve_rsi_floor
+                            _vol_early = True
 
     # ── [2026-06-17] ② 매수1호가 잔량 급증 — bid1 급증 시 호가압력·RSI 완화
     _bid1_surge = False

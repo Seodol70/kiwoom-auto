@@ -221,10 +221,13 @@ class SmartScannerConfig:
 
     # ── [2026-06-17] 선행 진입 신호 (거래량 선행 / 매수1호가 잔량 급증) ─────────
     # ① 거래량 선행 진입: 거래량이 폭발하면 RSI가 낮아도 선행 진입 허용
-    vol_early_entry_enabled:    bool  = True   # 거래량 선행 진입 ON/OFF
-    vol_early_entry_mult:       float = 3.0    # 직전 N분 평균 대비 이 배수 이상이면 발동
-    vol_early_entry_rsi_floor:  float = 38.0   # 선행 진입 시 RSI 하한 (기본값보다 낮게)
-    vol_early_entry_chejan_min: float = 110.0  # 선행 진입 시 체결강도 최소 (허위양성 방지)
+    #    단, 패닉셀 구분을 위해 추세 상승 확인 조건(A~D) 중 confirm_count개 이상 충족 필요
+    #    A: 최근 3분봉 저점 상승  B: 현재가>EMA20  C: 체결강도 상승 중  D: 현재봉 양봉
+    vol_early_entry_enabled:       bool  = True   # 거래량 선행 진입 ON/OFF
+    vol_early_entry_mult:          float = 1.5    # 직전 N분 평균 대비 이 배수 이상이면 발동 — [2026-06-17] 3.0→1.5 (익절 데이터 기반)
+    vol_early_entry_rsi_floor:     float = 38.0   # 선행 진입 시 RSI 하한 (기본값보다 낮게)
+    vol_early_entry_chejan_min:    float = 110.0  # 선행 진입 시 체결강도 최소 (허위양성 방지)
+    vol_early_entry_confirm_count: int   = 2      # A~D 조건 중 몇 개 이상 충족해야 발동 (최대 4)
 
     # ② 매수1호가 잔량 급증: bid1 잔량이 급증하면 호가압력 기준 완화 + RSI 소폭 완화
     bid1_surge_boost_enabled:   bool  = True   # 매수1호가 잔량 급증 부스트 ON/OFF
