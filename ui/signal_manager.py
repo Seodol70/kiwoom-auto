@@ -73,6 +73,8 @@ class SignalManager:
         self.win.header.auto_trade_toggled.connect(self.tc.set_auto_trading)
         self.win.header.overnight_mode_toggled.connect(self.win._on_overnight_mode_toggle)
         self.win.header.morning_goldentime_toggled.connect(self.win._on_morning_goldentime_toggle)
+        # 버튼 초기 상태(ON)를 config에 반영 — 시작 시 한 번 emit
+        self.win._on_morning_goldentime_toggle(self.win.header._btn_goldentime.isChecked())
         self.win.header.switch_real_requested.connect(self.win._on_switch_real_requested)
         self.win.header.reload_requested.connect(self.win._on_reload_config)
         self.win.header.unlock_requested.connect(self.win._on_manual_unlock_requested)

@@ -146,10 +146,10 @@ class HeaderBar(QWidget):
 
 
         # ── 오전 골든타임 모드 토글 버튼 ──────────────────────────────────────
-        self._btn_goldentime = QPushButton("⭐ 골든 OFF")
-        self._btn_goldentime.setObjectName("btn_goldentime_off")
+        self._btn_goldentime = QPushButton("⭐ 골든 ON")
+        self._btn_goldentime.setObjectName("btn_goldentime_on")
         self._btn_goldentime.setCheckable(True)
-        self._btn_goldentime.setChecked(False)
+        self._btn_goldentime.setChecked(True)
         self._btn_goldentime.setFont(QFont("Malgun Gothic", 9, QFont.Bold))
         self._btn_goldentime.setFixedSize(100, 30)
         self._btn_goldentime.setToolTip(

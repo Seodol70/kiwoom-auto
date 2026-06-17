@@ -455,7 +455,7 @@ class SmartScannerConfig:
 
     # ── E전략: 오전 골든타임 집중 매매 (09:00~09:30) ─────────────────────────
     # 대시보드 토글로 활성화/비활성화. 기본 비활성 (False).
-    morning_goldentime_enabled:        bool  = False   # 오전 골든타임 전략 ON/OFF
+    morning_goldentime_enabled:        bool  = True    # 오전 골든타임 전략 ON/OFF (버튼으로 해제)
     morning_goldentime_cooldown_sec:   float = 180.0   # 종목별 신호 쿨다운 (초)
     morning_goldentime_min_trade_amount: float = 3_000_000_000  # 최소 거래대금 (30억)
     # Phase 2 (09:00~09:10) 시가 돌파 파라미터
