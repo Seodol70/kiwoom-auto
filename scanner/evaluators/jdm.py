@@ -165,6 +165,36 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         eff_rsi_min   = min(eff_rsi_min, 40.0)
         eff_ma_spread = min(eff_ma_spread, 0.10)
 
+    # ── [2026-06-17] ① 거래량 선행 진입 — 거래량 폭발 시 RSI 하한 완화
+    _vol_early = False
+    if getattr(cfg, "vol_early_entry_enabled", True):
+        _ve_mult   = float(getattr(cfg, "vol_early_entry_mult", 3.0))
+        _ve_lookbk = int(getattr(cfg, "volume_surge_lookback", 10))
+        _vols      = list(snap.volumes_1min or [])
+        if len(_vols) >= _ve_lookbk + 1:
+            _ve_avg = sum(_vols[-(_ve_lookbk + 1):-1]) / _ve_lookbk
+            _ve_cur = _vols[-1]
+            if _ve_avg > 0 and _ve_cur >= _ve_avg * _ve_mult:
+                _ve_chejan_min = float(getattr(cfg, "vol_early_entry_chejan_min", 110.0))
+                if snap.chejan_strength >= _ve_chejan_min:
+                    _ve_rsi_floor = float(getattr(cfg, "vol_early_entry_rsi_floor", 38.0))
+                    if eff_rsi_min > _ve_rsi_floor:
+                        eff_rsi_min = _ve_rsi_floor
+                        _vol_early = True
+
+    # ── [2026-06-17] ② 매수1호가 잔량 급증 — bid1 급증 시 호가압력·RSI 완화
+    _bid1_surge = False
+    if getattr(cfg, "bid1_surge_boost_enabled", True):
+        _b1_hist = list(getattr(snap, "bid1_history", []) or [])
+        _b1_mult = float(getattr(cfg, "bid1_surge_mult", 2.0))
+        if len(_b1_hist) >= 3:
+            _b1_avg = sum(_b1_hist[:-1]) / (len(_b1_hist) - 1)
+            _b1_cur = _b1_hist[-1]
+            if _b1_avg > 0 and _b1_cur >= _b1_avg * _b1_mult:
+                _bid1_surge = True
+                _b1_rsi_relax = float(getattr(cfg, "bid1_surge_rsi_relax", 3.0))
+                eff_rsi_min = max(eff_rsi_min - _b1_rsi_relax, 35.0)
+
     # ── 등락률 상한 체크
     snap_chg        = float(getattr(snap, "change_pct", 0) or 0)
     chg_cap         = float(eff_ch_max)
@@ -594,6 +624,9 @@ def check_jdm_entry(
         pressure = float(getattr(snap, "hoga_pressure", 1.0))
         _hoga_min_key = "hoga_pressure_min_opening" if ctx.slot == "OPENING" else "hoga_pressure_min"
         min_pressure = float(getattr(cfg, _hoga_min_key, getattr(cfg, "hoga_pressure_min", 1.3)))
+        # [2026-06-17] ② bid1 급증 발동 시 호가압력 기준 완화 (큰 손이 매수1호가에 쌓고 있는 신호)
+        if _bid1_surge:
+            min_pressure *= float(getattr(cfg, "bid1_surge_hoga_relax", 0.8))
         if pressure < min_pressure:
             _bid_vol = sum(list(getattr(snap, "bid_qtys", [0]*5))[1:3])
             _ask_vol = sum(list(getattr(snap, "ask_qtys", [0]*5))[1:3])
@@ -611,9 +644,10 @@ def check_jdm_entry(
 
     mode_tag  = "JDM_LITE" if ctx.lite_mode else "JDM"
     warm_tag  = " | [WARMUP]" if ctx.is_warmup else ""
+    early_tag = (" | 🚀거래량선행" if _vol_early else "") + (" | 💰bid1급증" if _bid1_surge else "")
     reason = (
         f"[{ctx.slot}][{mode_tag}] {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} "
-        f"| {candle_reason}{warm_tag}{pressure_tag} | 📈신고가근처(TP↑)"
+        f"| {candle_reason}{warm_tag}{pressure_tag}{early_tag} | 📈신고가근처(TP↑)"
     )
     ScannerLogger.passed(snap.code, snap.name, "JDM_ENTRY", reason)
     return reason

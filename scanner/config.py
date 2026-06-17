@@ -218,6 +218,19 @@ class SmartScannerConfig:
     exec_velocity_disabled_opening: bool = False  # OPENING 슬롯도 필터 적용
     exec_velocity_block_zero: bool = True  # vel_ratio=0(데이터 없음)도 미달로 차단
     jdm_vwap_filter_enabled: bool = True  # [2026-06-17] VWAP 하단 진입 차단
+
+    # ── [2026-06-17] 선행 진입 신호 (거래량 선행 / 매수1호가 잔량 급증) ─────────
+    # ① 거래량 선행 진입: 거래량이 폭발하면 RSI가 낮아도 선행 진입 허용
+    vol_early_entry_enabled:    bool  = True   # 거래량 선행 진입 ON/OFF
+    vol_early_entry_mult:       float = 3.0    # 직전 N분 평균 대비 이 배수 이상이면 발동
+    vol_early_entry_rsi_floor:  float = 38.0   # 선행 진입 시 RSI 하한 (기본값보다 낮게)
+    vol_early_entry_chejan_min: float = 110.0  # 선행 진입 시 체결강도 최소 (허위양성 방지)
+
+    # ② 매수1호가 잔량 급증: bid1 잔량이 급증하면 호가압력 기준 완화 + RSI 소폭 완화
+    bid1_surge_boost_enabled:   bool  = True   # 매수1호가 잔량 급증 부스트 ON/OFF
+    bid1_surge_mult:            float = 2.0    # bid1_history 최근값 / 직전 평균 이 배수 이상이면 발동
+    bid1_surge_hoga_relax:      float = 0.8    # 발동 시 hoga_pressure_min에 곱할 완화 계수 (0.8 = 20% 완화)
+    bid1_surge_rsi_relax:       float = 3.0    # 발동 시 eff_rsi_min에서 차감할 값 (3점 완화)
     # [2026-06-02] 신호가 대비 체결가 슬리피지 상한 (초과 시 즉시 매도)
     max_entry_slippage_pct: float = 1.5  # 1.5% 초과 시 진입 취소 (기존 3.0% → 강화)
 
