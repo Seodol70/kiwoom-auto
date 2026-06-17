@@ -90,6 +90,11 @@ class KiwoomProtocol(ABC):
         pass
 
     @abstractmethod
+    def fetch_opt10029_vol_surge(self, max_rows: int = 100) -> list[dict]:
+        """거래량 급증 상위 종목 (opt10029). opt10030과 병행 수집 후 합산 스코어링에 사용."""
+        pass
+
+    @abstractmethod
     def fetch_opt10030_top_volume(self, top_n: int = 200) -> list[dict]:
         """
         거래대금 상위 종목 (opt10030 연속조회).

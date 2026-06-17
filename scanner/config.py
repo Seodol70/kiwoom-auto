@@ -35,9 +35,9 @@ class SmartScannerConfig:
     collect_raw_top_n:    int   = 100         # 2026-06-05: 300→100 (3페이지→1페이지, 서버 연결 끊김 방지)
     watch_pool_max:       int   = 50          # [2026-05-21] 증분 업데이트 적용 후 50으로 복원
     pre_filter_top_n:     int   = 100         # 하위 호환: collect_raw_top_n 과 동일 사용 권장
-    universe_trade_amt_weight: float = 0.2   # 거래대금 순위 가중치 (hybrid universe score)
-    universe_vol_ratio_weight: float = 0.2   # 전일 대비 거래량 비율 가중치
-    universe_chg_pct_weight:   float = 0.6   # 등락률 가중치
+    universe_trade_amt_weight: float = 0.3   # 거래대금 순위 가중치 (hybrid universe score)
+    universe_vol_ratio_weight: float = 0.5   # 전일 대비 거래량 비율 가중치 — [2026-06-17] 0.2→0.5 (막 불붙는 종목 포착)
+    universe_chg_pct_weight:   float = 0.2   # 등락률 가중치 — [2026-06-17] 0.6→0.2 (이미 오른 종목 추격 방지)
     pre_filter_time:      dtime = dtime(9, 0, 0)
     enabled_strategies:   tuple = ("JDM_ENTRY", "PULLBACK", "GAP_PULLBACK", "EOD")  # [2026-06-02] BREAKOUT 제거
     strategy_order:       tuple = ("JDM_ENTRY", "PULLBACK", "GAP_PULLBACK", "EOD")

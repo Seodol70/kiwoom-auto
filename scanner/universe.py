@@ -114,8 +114,8 @@ class UniverseManager:
         )
         return not any(kw in n for kw in exclude_kw)
 
-    def apply_scoring_cap(self, rows: list[dict], limit: int) -> list[dict]:
-        """거래대금, 페이스, 등락률을 조합한 스코어링으로 상위 종목 선정 (시간대별 가중치 자동 전환)."""
+    def apply_scoring_cap(self, rows: list[dict], limit: int, vol_surge_codes: Optional[set[str]] = None) -> list[dict]:
+        """거래대금, 페이스, 등락률, 거래량급증(opt10029)을 조합한 스코어링으로 상위 종목 선정."""
         if not rows: return []
         
         n = len(rows)
@@ -200,8 +200,11 @@ class UniverseManager:
             # 등락률 스코어: 절대값 대신 상대적 순위 사용 (등락률 높은 순서대로 높은 점수)
             s_chg = chg_rank.get(code, 0.0)
 
+            # [2026-06-17] opt10029 거래량 급증 보너스 — 급증 종목에 +0.15 가산
+            surge_bonus = 0.15 if (vol_surge_codes and code in vol_surge_codes) else 0.0
+
             # 최종 스코어 합산
-            score = s_amt * w_amt + s_vol * w_vol + s_chg * w_chg
+            score = s_amt * w_amt + s_vol * w_vol + s_chg * w_chg + surge_bonus
             scored.append((score, r))
             
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -275,13 +278,12 @@ def apply_watch_pool_cap(rows: list[dict], limit: int) -> list[dict]:
     sorted_rows = sorted(rows, key=lambda r: int(r.get("trade_amount", 0) or 0), reverse=True)
     return sorted_rows[:limit]
 
-def apply_universe_score_cap(rows: list[dict], limit: int, cfg: Optional[SmartScannerConfig] = None, prev_volumes: Optional[dict] = None) -> list[dict]:
+def apply_universe_score_cap(rows: list[dict], limit: int, cfg: Optional[SmartScannerConfig] = None, prev_volumes: Optional[dict] = None, vol_surge_codes: Optional[set] = None) -> list[dict]:
     """[레거시 호환] 복합 스코어링으로 상위 N개 선정."""
-    # 여기서는 스코어링을 위해 인스턴스가 필요하므로 skip_log=True 옵션 사용
     mgr = UniverseManager(cfg, skip_log=True)
     if prev_volumes:
         mgr._prev_volumes = prev_volumes
-    return mgr.apply_scoring_cap(rows, limit)
+    return mgr.apply_scoring_cap(rows, limit, vol_surge_codes=vol_surge_codes)
 
 
 _JO_WON = 1_000_000_000_000

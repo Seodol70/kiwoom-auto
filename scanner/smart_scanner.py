@@ -295,6 +295,7 @@ class SmartScanner(QObject):
         self._last_volume_rows: list[dict] = []
         self._last_volume_updated: float = 0.0  # 마지막 캐시 갱신 시각 (time.monotonic)
         self._opt10030_fetching: bool = False   # opt10030 중복 호출 방지 플래그
+        self._last_vol_surge_rows: list[dict] = []  # opt10029 거래량 급증 캐시 [2026-06-17]
         # [FIX 2026-06-05] 재시작 시 당일 opt10030 캐시 즉시 복원
         self._load_opt10030_cache()
         # 전일 거래량 캐시 (UniverseManager에서 관리)
@@ -610,7 +611,11 @@ class SmartScanner(QObject):
                 "  등락률 범위 %.1f%% ~ %.1f%% 유지 — %d → %d종목",
                 mn, mc, _n0, len(rows),
             )
-        rows = self.universe_mgr.apply_scoring_cap(rows, self.cfg.watch_pool_max)
+        _surge_codes = {r.get("code", "") for r in getattr(self, "_last_vol_surge_rows", [])}
+        rows = self.universe_mgr.apply_scoring_cap(rows, self.cfg.watch_pool_max, vol_surge_codes=_surge_codes)
+        if rows and _surge_codes:
+            _surge_in = sum(1 for r in rows if r.get("code") in _surge_codes)
+            logger.info("  opt10029 급증 종목 감시 풀 편입: %d/%d", _surge_in, len(rows))
         if not rows:
             logger.warning("  ⚠ Pre-Filter — 필터 후 종목 없음, Pre-Filter 생략")
             return
@@ -1385,6 +1390,17 @@ class SmartScanner(QObject):
             df_was_empty = self.store._df.empty  # 스토어 미초기화 여부
             rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, retry=1)
             logger.info("[opt10030 BG] 갱신 완료 — %d종목 캐시", len(rows))
+
+            # [2026-06-17] opt10029 거래량 급증 병행 수집
+            try:
+                vol_surge_rows = self._tr_q.call(self._kiwoom.fetch_opt10029_vol_surge, 100)
+                if vol_surge_rows:
+                    self._last_vol_surge_rows = vol_surge_rows
+                    logger.info("[opt10029 BG] 거래량 급증 상위 %d종목 수신", len(vol_surge_rows))
+                else:
+                    logger.debug("[opt10029 BG] 0개 반환 — 이전 캐시 유지 (%d종목)", len(self._last_vol_surge_rows))
+            except Exception as e:
+                logger.warning("[opt10029 BG] 수집 실패 — 이전 캐시 유지: %s", e)
             # _df가 비어있으면(재시작 직후 or 당일 첫 실행) run_periodic_scan으로 즉시 초기화
             # was_empty 조건 제거: 캐시가 이미 있어도 _df가 비어있으면 스캔 필요
             if df_was_empty and rows:
@@ -1788,7 +1804,8 @@ class SmartScanner(QObject):
             logger.warning("[주기 스캔] 필터 후 남은 종목이 없습니다 (전체 %d개 중 전원 탈락)", _n_total)
             return []
 
-        rows = apply_universe_score_cap(rows, self.cfg.watch_pool_max, self.cfg, self._prev_volumes)
+        _surge_codes = {r.get("code", "") for r in getattr(self, "_last_vol_surge_rows", [])}
+        rows = apply_universe_score_cap(rows, self.cfg.watch_pool_max, self.cfg, self._prev_volumes, vol_surge_codes=_surge_codes)
         return rows
 
     def _update_state_containers(self, rows: list[dict]) -> None:

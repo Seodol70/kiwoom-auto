@@ -453,6 +453,33 @@ class KiwoomManager(KiwoomProtocol):
 
         return all_rows[:max_rows]
 
+    def fetch_opt10029_vol_surge(self, max_rows: int = 100) -> list[dict]:
+        """
+        opt10029 거래량 급증 상위 종목 조회 (1회 호출, 연속조회 불필요).
+        거래대금이 아닌 전일 대비 거래량 증가율 기준으로 정렬된 종목 목록.
+        opt10030(거래대금)과 병행 수집 후 합산 스코어링에 사용.
+        """
+        if self.is_tr_banned("opt10029"):
+            logger.debug("[opt10029] 차단 상태 — 조회 건너뜀")
+            return []
+
+        import random
+        screen_no = str(9020 + random.randint(0, 5))
+
+        self._set_input("시장구분", "000")      # 전체 시장
+        self._set_input("정렬구분", "1")        # 1=거래량 증가율
+        self._set_input("관리종목포함", "1")    # 포함 (모의투자 데이터 확보)
+        self._set_input("신용구분", "0")        # 전체
+
+        ok = self._comm_rq("opt10029", "거래량급증상위", screen_no, prev_next=0)
+        if not ok:
+            logger.warning("[opt10029] TR 요청 실패")
+            return []
+
+        rows = self._tr_data.get("rows", [])
+        logger.debug("[opt10029] 거래량 급증 상위 %d종목 수신", len(rows))
+        return rows[:max_rows]
+
     def fetch_opt10032_top_volume(self, max_rows: int = 200) -> list[dict]:
         """
         opt10032 전일거래량상위. (opt10030 공백 시 fallback 용)
@@ -1314,6 +1341,11 @@ class KiwoomManager(KiwoomProtocol):
             elif rq_name == "holdings":
                 self._tr_data = {"rows": self._parse_holdings_rows(tr_code, rq_name)}
 
+            elif rq_name == "거래량급증상위":
+                rows = self._parse_top_volume_rows(tr_code, rq_name)
+                logger.debug("[opt10029] 파싱 결과: %d행", len(rows))
+                self._tr_data = {"rows": rows}
+
             elif rq_name in ("거래대금상위", "전일거래량상위"):
                 # [CLEANUP 2026-05-26] 진단 로그 격하 — 응답 0개 문제 해결 후 INFO 불필요
                 rows = self._parse_top_volume_rows(tr_code, rq_name)
@@ -1734,6 +1766,10 @@ class MockKiwoomManager:
         return {"name": "Mock종목", "current_price": 0, "change_pct": 0.0}
 
     def fetch_opt10030_top_volume(self, max_rows: int = 200) -> list:
+        """OCX missing - empty list (for UI test)"""
+        return []
+
+    def fetch_opt10029_vol_surge(self, max_rows: int = 100) -> list:
         """OCX missing - empty list (for UI test)"""
         return []
 
