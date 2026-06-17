@@ -413,6 +413,15 @@ def check_overheat_pullback_entry(
     if len(closes) < 35:
         return None
 
+    # [2026-06-17] trend_lv < 2 차단 — 추세 약한 종목 과열눌림 진입 시 손실 반복
+    # 오늘 분석: 후성(093370) trend=0.333(Lv1), rs=0.098으로 진입 → -4,618원
+    _min_trend = int(getattr(cfg, "overheat_min_trend_lv", 2))
+    _snap_trend = int(getattr(snap, "trend_level", 0))
+    if _snap_trend < _min_trend:
+        ScannerLogger.rejected(snap.code, snap.name, "OVERHEAT_TREND",
+            f"추세 미달 차단 — trend_lv={_snap_trend} < {_min_trend} (약세/횡보 과열눌림 불허)")
+        return None
+
     highs   = list(getattr(snap, 'highs_1min',   None) or [])
     lows    = list(getattr(snap, 'lows_1min',    None) or [])
     volumes = list(getattr(snap, 'volumes_1min', None) or [])

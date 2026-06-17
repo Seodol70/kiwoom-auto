@@ -10,7 +10,7 @@ from scanner.indicator_service import IndicatorService
 from .common import (
     _resolve_time_slot, _get_slot_value, check_volume_surge,
     check_chejan_strength, check_indicator_warmup,
-    check_bullish_engulfing, check_bullish_pin_bar
+    check_bullish_engulfing, check_bullish_pin_bar, check_vwap_filter,
 )
 
 if TYPE_CHECKING:
@@ -382,13 +382,11 @@ def _jdm_check_execution_quality(
     # OPENING + 거래량 부족 = 최악의 조합 (장 초반 변동성 + 낮은 유동성)
     r_vol = check_volume_surge(snap, ctx.eff_vol_mult, getattr(cfg, "volume_surge_lookback", 10))
     if r_vol is None:
-        if ctx.slot == "OPENING":
-            ScannerLogger.rejected(snap.code, snap.name, "JDM_VOL",
-                f"OPENING 거래량 미달 차단 — {snap.volumes_1min[-1] if snap.volumes_1min else 0}주 (유동성 부족)")
-            return None
-        # OPENING 외 슬롯: 진입 허용 (다른 필터가 충분히 제한)
-        r_vol = f"거래량부족_허용({snap.volumes_1min[-1] if snap.volumes_1min else 0}주)"
-        ScannerLogger.near_miss(snap.code, snap.name, "JDM_VOL", r_vol)
+        # [2026-06-17] 전 슬롯 거래량 미달 차단 — vol≈0 종목 손실 반복 (코스모로보틱스 등)
+        # 오늘 분석: 손절 종목 f_vol_surge 평균 0.097 vs 익절 0.192
+        ScannerLogger.rejected(snap.code, snap.name, "JDM_VOL",
+            f"[{ctx.slot}] 거래량 미달 차단 — {snap.volumes_1min[-1] if snap.volumes_1min else 0}주")
+        return None
 
     # ── 체결 가속도 필터
     skip_exec_vel = ctx.slot == "OPENING" and getattr(cfg, "exec_velocity_disabled_opening", False)
@@ -582,6 +580,12 @@ def check_jdm_entry(
     daily_ctx = _jdm_check_daily_context(snap, cfg, ctx)
     if daily_ctx is None:
         return None
+
+    # [2026-06-17] VWAP 하단 진입 차단 — VWAP 아래는 매도압력 구간
+    # 오늘 분석: 대원전선 vwap_dist=-0.85~-0.70 에서 신호 발생 → 손절
+    if getattr(cfg, "jdm_vwap_filter_enabled", True):
+        if check_vwap_filter(snap) is None:
+            return None
 
     # [2026-06-02] D전략: 호가 압력 필터 — 진입 마지막 관문
     # 매수2~3호가 물량 > 매도2~3호가 물량 × min_ratio 이어야 지지선 신뢰

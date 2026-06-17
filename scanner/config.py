@@ -217,6 +217,7 @@ class SmartScannerConfig:
     exec_velocity_mult_afternoon: float = 0.5   # AFTERNOON: 에너지 더 필요
     exec_velocity_disabled_opening: bool = False  # OPENING 슬롯도 필터 적용
     exec_velocity_block_zero: bool = True  # vel_ratio=0(데이터 없음)도 미달로 차단
+    jdm_vwap_filter_enabled: bool = True  # [2026-06-17] VWAP 하단 진입 차단
     # [2026-06-02] 신호가 대비 체결가 슬리피지 상한 (초과 시 즉시 매도)
     max_entry_slippage_pct: float = 1.5  # 1.5% 초과 시 진입 취소 (기존 3.0% → 강화)
 
@@ -351,6 +352,7 @@ class SmartScannerConfig:
     overheat_lookback_minutes:          int   = 15    # 10→15 (과열 이력 추적 확대)
     overheat_min_trading_value_5m_avg:  float = 500_000_000   # 50억→5억 (중소형주 대응)
     overheat_volume_surge_mult:         float = 1.2   # 2.0→1.2 (중소형주 거래대금 특성 반영)
+    overheat_min_trend_lv:              int   = 2     # [2026-06-17] trend_lv < 2(횡보/약세) 과열눌림 차단
     overheat_level_3_threshold:         float = 1.3   # 1.5→1.3 (과열 기준 완화)
     overheat_level_1_min:               float = 0.3
     overheat_level_1_max:               float = 1.0
