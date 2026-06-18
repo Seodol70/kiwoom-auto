@@ -36,6 +36,8 @@ class _JdmCtx:
     is_warmup:     bool = False
     _rsi:          Optional[float] = None
     leading_score: float = 0.0  # 선행 지표 복합 점수 — RSI/추세 조건 완화 판단에 사용
+    vol_early:     bool = False  # [2026-06-17] ① 거래량 선행 진입 발동 여부
+    bid1_surge:    bool = False  # [2026-06-17] ② 매수1호가 잔량 급증 발동 여부
 
 def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional["_JdmCtx"]:
     """슬롯·유효 파라미터 계산. 조기 차단 조건 해당 시 None 반환."""
@@ -258,6 +260,7 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
         candle_skip_lv=candle_skip_lv, lite_mode=lite_mode,
         closes=closes, highs=highs, lows=lows,
         leading_score=_ctx_leading,
+        vol_early=_vol_early, bid1_surge=_bid1_surge,
     )
 
 def _jdm_check_trend_and_ma(
@@ -652,7 +655,7 @@ def check_jdm_entry(
         _hoga_min_key = "hoga_pressure_min_opening" if ctx.slot == "OPENING" else "hoga_pressure_min"
         min_pressure = float(getattr(cfg, _hoga_min_key, getattr(cfg, "hoga_pressure_min", 1.3)))
         # [2026-06-17] ② bid1 급증 발동 시 호가압력 기준 완화 (큰 손이 매수1호가에 쌓고 있는 신호)
-        if _bid1_surge:
+        if ctx.bid1_surge:
             min_pressure *= float(getattr(cfg, "bid1_surge_hoga_relax", 0.8))
         if pressure < min_pressure:
             _bid_vol = sum(list(getattr(snap, "bid_qtys", [0]*5))[1:3])
@@ -671,7 +674,7 @@ def check_jdm_entry(
 
     mode_tag  = "JDM_LITE" if ctx.lite_mode else "JDM"
     warm_tag  = " | [WARMUP]" if ctx.is_warmup else ""
-    early_tag = (" | 🚀거래량선행" if _vol_early else "") + (" | 💰bid1급증" if _bid1_surge else "")
+    early_tag = (" | 🚀거래량선행" if ctx.vol_early else "") + (" | 💰bid1급증" if ctx.bid1_surge else "")
     reason = (
         f"[{ctx.slot}][{mode_tag}] {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} "
         f"| {candle_reason}{warm_tag}{pressure_tag}{early_tag} | 📈신고가근처(TP↑)"
