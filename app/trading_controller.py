@@ -131,23 +131,10 @@ class TradingController(QObject):
         if self._order_mgr and self._strategy:
             self._order_mgr.on_tick_loss_exit = self._strategy.mark_loss_exit
 
-        # [NEW] SmartScanner 신호를 주문 모듈과 연결 (2026-05-07 수정)
-        if self._smart_scanner:
-            self._smart_scanner.signal_detected.connect(self._on_signal_from_scanner)
-            # [FIX 2026-05-12] 크로스 스레드 signal emit 문제 해결: callback 직접 등록
-            self._smart_scanner._on_signal_callback = self._on_signal_from_scanner
-
-    def _on_signal_from_scanner(self, sig) -> None:
-        """SmartScanner에서 발생한 신호를 처리하여 주문 실행"""
-        if not sig or not self._order_mgr:
-            return
-
-        try:
-            # [2026-05-22] 신호처리 시작 WARNING 로그 제거 (신호당 1건, 메인 스레드 부하)
-            # TradingController.handle_signal()을 호출하여 전체 필터 검증을 먼저 거치도록 수정
-            self.handle_signal(sig)
-        except Exception as e:
-            logger.error("[신호처리 오류] %s", e)
+        # [FIX 2026-06-18] SmartScanner 신호 연결은 ui/signal_manager.py의
+        # ss.signal_detected.connect(self.tc.handle_signal)이 정식 경로.
+        # 여기서 signal_detected.connect()와 직접 콜백을 추가로 등록하면
+        # 신호 1건당 handle_signal()이 중복 호출되는 버그가 생기므로 제거.
 
     def force_update_stock(self, code: str) -> None:
         """특정 종목의 정보를 즉시 강제 갱신한다 (사용자 클릭 시)."""
@@ -226,7 +213,16 @@ class TradingController(QObject):
     @pyqtSlot(object)
     def handle_signal(self, sig: ScanSignal) -> bool:
         """신호 필터링 — SignalFilterChain을 통해 9개 필터를 순차 실행"""
+        if not sig or not self._order_mgr:
+            return False
 
+        try:
+            return self._handle_signal_impl(sig)
+        except Exception as e:
+            logger.error("[신호처리 오류] %s", e)
+            return False
+
+    def _handle_signal_impl(self, sig: ScanSignal) -> bool:
         # ── 컨트롤러 고유 선결 조건 (체인 이전) ──────────────────────────────
 
         # 첫 신호 자동매매 시작 트리거
