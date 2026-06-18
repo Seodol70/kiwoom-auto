@@ -443,11 +443,20 @@ class SmartScanner(QObject):
         self._opt10030_refresh_timer.timeout.connect(self._bg_fetch_opt10030)
         self._opt10030_refresh_timer.start(5 * 60 * 1000)  # 5분마다 갱신
 
+        # [2026-06-18] opt10029(거래량 급증) 전용 타이머 — opt10030과 동시 호출 시
+        # TR 큐가 연달아 점유되어 balance/holdings/min_candle이 줄줄이 TIMEOUT되는
+        # 문제(6/18 482건 TIMEOUT, 매수신호 0건) 발생 → 독립 타이머 + 시간차로 분리
+        # start() 시점을 30초 늦춰서 5분 반복 주기 내내 opt10030과 겹치지 않게 함
+        self._opt10029_refresh_timer = QTimer()
+        self._opt10029_refresh_timer.timeout.connect(self._bg_fetch_opt10029)
+        QTimer.singleShot(30_000, lambda: self._opt10029_refresh_timer.start(5 * 60 * 1000))
+
         # 장 중 시작 시 즉시 패치 — 첫 발동이 5분 후이므로 대시보드가 공백인 문제 해결
         # 장 전(09:00 이전)에는 opt10030이 0건 반환하므로 TR 슬롯 낭비 방지를 위해 장 중만 실행
         _now_t = datetime.now().time()
         if dtime(9, 0) <= _now_t <= dtime(15, 30):
             QTimer.singleShot(3000, self._bg_fetch_opt10030)
+            QTimer.singleShot(33000, self._bg_fetch_opt10029)  # opt10030과 30초 시간차
 
 
     def stop(self) -> None:
@@ -1391,16 +1400,6 @@ class SmartScanner(QObject):
             rows = self._fetch_top_volume_rows(target=self.cfg.collect_raw_top_n, retry=1)
             logger.info("[opt10030 BG] 갱신 완료 — %d종목 캐시", len(rows))
 
-            # [2026-06-17] opt10029 거래량 급증 병행 수집
-            try:
-                vol_surge_rows = self._tr_q.call(self._kiwoom.fetch_opt10029_vol_surge, 100)
-                if vol_surge_rows:
-                    self._last_vol_surge_rows = vol_surge_rows
-                    logger.info("[opt10029 BG] 거래량 급증 상위 %d종목 수신", len(vol_surge_rows))
-                else:
-                    logger.debug("[opt10029 BG] 0개 반환 — 이전 캐시 유지 (%d종목)", len(self._last_vol_surge_rows))
-            except Exception as e:
-                logger.warning("[opt10029 BG] 수집 실패 — 이전 캐시 유지: %s", e)
             # _df가 비어있으면(재시작 직후 or 당일 첫 실행) run_periodic_scan으로 즉시 초기화
             # was_empty 조건 제거: 캐시가 이미 있어도 _df가 비어있으면 스캔 필요
             if df_was_empty and rows:
@@ -1408,6 +1407,32 @@ class SmartScanner(QObject):
                 QTimer.singleShot(200, self.run_periodic_scan)
         except Exception as e:
             logger.warning("[opt10030 BG] 갱신 실패: %s", e)
+
+    def _bg_fetch_opt10029(self) -> None:
+        """
+        [2026-06-18] opt10029(거래량 급증)를 opt10030과 분리된 독립 타이머로 갱신.
+
+        근본 원인: opt10030 직후 opt10029를 연달아 호출하면 TR 큐(_tr_busy)가
+        그만큼 더 오래 점유되어, balance/holdings/min_candle 등 1분 주기
+        run_periodic_scan이 계속 밀려 TIMEOUT이 누적되고 실시간 체결 처리가
+        지연되어 vel_ratio가 비정상적으로 낮게 측정 → 매수 신호가 전부 차단됨
+        (6/18 08:51~09:45 TIMEOUT 482건, 매수신호 0건).
+
+        해결: opt10030과 30초 시간차를 둔 별도 타이머 + _tr_busy 체크로
+        다른 TR이 진행 중이면 이번 주기는 건너뛰고 다음 주기로 미룬다.
+        """
+        if getattr(self._kiwoom, "_tr_busy", False):
+            logger.debug("[opt10029 BG] TR 처리 중 — 이번 주기 스킵 (다음 주기에 재시도)")
+            return
+        try:
+            vol_surge_rows = self._tr_q.call(self._kiwoom.fetch_opt10029_vol_surge, 100)
+            if vol_surge_rows:
+                self._last_vol_surge_rows = vol_surge_rows
+                logger.info("[opt10029 BG] 거래량 급증 상위 %d종목 수신", len(vol_surge_rows))
+            else:
+                logger.debug("[opt10029 BG] 0개 반환 — 이전 캐시 유지 (%d종목)", len(self._last_vol_surge_rows))
+        except Exception as e:
+            logger.warning("[opt10029 BG] 수집 실패 — 이전 캐시 유지: %s", e)
 
 
     def _opt10030_cache_path(self) -> str:
