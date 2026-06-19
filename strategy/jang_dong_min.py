@@ -306,11 +306,12 @@ class JangDongMinStrategy(BaseStrategy):
             return True, f"Hard Stop ({_hard_stop:.1f}%)"
 
         # 2. 트레일 스탑 — 우선 순위 높음 (활성화되면 익절 무시)
-        trail_price = 0
-        if not _is_eod_pre_gap:
-            trail_price = self.get_trail_price(pos, ctx)
-            if trail_price > 0 and pos.current_price <= trail_price:
-                return True, f"Trail Stop (Peak {pos.peak_price:,} -> {trail_price:,})"
+        # [FIX 2026-06-19] EOD 포지션도 트레일스탑 적용 — 기존엔 _is_eod_pre_gap이면
+        # 트레일 자체가 비활성화되어 큰 수익을 봐도 지킬 방법이 EMA20이탈(버퍼 0%, 민감)뿐이었음
+        # (미래에셋생명 6/19: +8.13%까지 갔다가 트레일 없이 EMA20이탈로 -0.15% 반납)
+        trail_price = self.get_trail_price(pos, ctx)
+        if trail_price > 0 and pos.current_price <= trail_price:
+            return True, f"Trail Stop (Peak {pos.peak_price:,} -> {trail_price:,})"
 
         # 3. 익절 (Take Profit) — 트레일 스탑 미활성화 시에만
         if trail_price <= 0:  # 트레일 스탑이 활성화되지 않은 경우만

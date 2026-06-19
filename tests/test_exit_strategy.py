@@ -147,8 +147,10 @@ class TestTrailStop:
         assert ok is True
         assert "Trail Stop" in reason
 
-    def test_eod_pre_gap_skip(self):
-        """EOD 갭 체크 전 포지션은 Trail Stop 제외"""
+    def test_eod_pre_gap_trail_applies(self):
+        """[FIX 2026-06-19] EOD 갭 체크 전 포지션도 Trail Stop 적용
+        (이전엔 EOD면 트레일 자체가 꺼져 큰 수익을 봐도 EMA20이탈처럼 민감한
+        보호장치에만 의존해야 했음 — 미래에셋생명 6/19 +8.13%→-0.15% 반납 사례)"""
         cfg = _cfg(
             hard_stop_pct=-5.0,
             trail_activation_pct=1.0,
@@ -162,8 +164,9 @@ class TestTrailStop:
             avg_price=100_000, current_price=98_880, peak_price=103_000,
             eod_trade=True, overnight_held=False,  # EOD 갭 체크 전
         )
-        ok, _ = es.should_exit(pos, _ctx())
-        assert ok is False
+        ok, reason = es.should_exit(pos, _ctx())
+        assert ok is True
+        assert "Trail Stop" in reason
 
 
 # ── Time Cut 경계값 ───────────────────────────────────────────────────────

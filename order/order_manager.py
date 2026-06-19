@@ -1715,6 +1715,24 @@ class OrderManager(QObject):
                         code=code, name=name,
                         qty=filled_qty, avg_price=filled_price,
                         current_price=filled_price,
+                        peak_price=filled_price,
+                        candle_stop_price=meta.candle_stop,
+                        trend_level=int(meta.trend_level),
+                        trend_prev_level=int(meta.trend_prev_level),
+                        near_daily_high=meta.near_daily_high,
+                        custom_tp_pct=meta.custom_tp_pct,
+                        eod_trade=meta.eod_trade,
+                        entry_phase=meta.entry_phase,
+                        sector=meta.sector,
+                        strategy=meta.strategy,
+                        entry_gap_pct=meta.entry_gap_pct,
+                    )
+                    # [FIX 2026-06-19] 슬리피지초과 즉시매도 경로에서 [포지션생성] 로그가
+                    # 누락되어 position.log만으로 집계 시 진입 건수가 실제보다 적게 보이던 버그
+                    position_log.info(
+                        "[포지션생성] %s(%s) 체결가=%d 수량=%d 전략=%s 섹터=[%s] trend_lv=%d phase=%d",
+                        name, code, filled_price, filled_qty,
+                        meta.strategy or "-", meta.sector or "-", int(meta.trend_level), int(meta.entry_phase),
                     )
                 self.sell(code, name, filled_qty)
                 return
