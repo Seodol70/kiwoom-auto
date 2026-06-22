@@ -63,6 +63,15 @@ class PendingOrderMeta:
 CHEJAN_ORDER = "0"    # 주문 접수/확인 (체결 포함, gubun "0")
 CHEJAN_FILL  = "0"    # 체결 — Kiwoom gubun "0" 이 주문+체결, "1" 은 잔고변동
 
+# 체결 후 이 시간(초) 이내 잔고 동기화 시, 서버 qty가 stale할 수 있어 로컬 qty를 신뢰
+_FILL_STALE_GUARD_SEC = 90
+
+# 매도 미체결 watchdog: 1단계(취소 시도)까지의 대기 시간(초)
+_SELL_TIMEOUT_SEC = 30
+# 취소 발령 후, 강제로 pending을 해제하고 재주문을 허용하기까지의 추가 유예(초)
+# 키움 취소 처리/체결 응답이 비동기로 늦게 오는 경우를 흡수해 중복 주문 누적을 방지
+_SELL_CANCEL_GRACE_SEC = 30
+
 
 # ---------------------------------------------------------------------------
 # 데이터 클래스
@@ -119,6 +128,7 @@ class Position:
     strategy:        str  = ""            # 진입 전략명 (JDM_ENTRY, PULLBACK, GAP_PULLBACK 등)
     entry_count:     int  = 1             # 진입 횟수 (피라미딩 추적용)
     sl_triggered_at: Optional[datetime] = None # 손절(SL) 발동 시각
+    last_fill_at:    Optional[datetime] = None # 마지막 체결(매수/매도) 반영 시각 — 분할체결 중 stale 서버 동기화 방지용
 
     @property
     def pnl(self) -> int:
@@ -229,6 +239,12 @@ class OrderManager(QObject):
 
         # 매도 주문 30초 타임아웃 재시도 횟수 — 2회 이상 시 지정가로 에스컬레이션
         self._pending_sell_retries: dict[str, int] = {}  # code → timeout 횟수
+
+        # [FIX 2026-06-22] 매도 주문 취소 발령 시각 추적 — 취소 후 추가 유예 없이
+        # 바로 재주문하면 동일 rq_name으로 미체결 주문이 키움 큐에 누적되어
+        # 포지션 청산 후에도 800033 거부가 수분간 반복되는 문제(서진시스템 4/30 사례) 방지.
+        # 30초 경과 시 취소만 보내고, 취소 후 추가 _SELL_CANCEL_GRACE_SEC 이내엔 재주문 보류.
+        self._pending_sell_cancel_at: dict[str, datetime] = {}
 
         # [P2] 매수 주문 접수 시각 추적 — 10초 미체결 시 취소+재주문
         self._pending_buy_time: dict[str, datetime] = {}   # code → 접수 시각
@@ -367,10 +383,15 @@ class OrderManager(QObject):
         self._pending.discard(code)
         self._pending_sell_time.pop(code, None)
         self._pending_sell_retries.pop(code, None)
+        self._pending_sell_cancel_at.pop(code, None)
         self._failed_sells.pop(code, None)
 
         # 로컬 포지션 제거 — 서버에 없는 포지션이므로
         pos = self.positions.pop(code, None)
+        if pos is None:
+            # [FIX 2026-06-22] 이미 다른 경로(체결/타임컷 청산 등)로 포지션이 사라진 뒤
+            # 도착한 고아 800033 응답 — 중복 발송된 이전 매도 주문의 지연 거부일 가능성이 높음
+            logger.info("[800033][고아응답] %s 포지션 이미 없음 — 이전 중복 매도주문의 지연 거부로 추정, 무시", code)
         if pos is not None:
             logger.warning(
                 "[800033] %s 포지션 메모리 삭제 — qty=%d (FID911 오버카운트 등 원인)",
@@ -409,6 +430,19 @@ class OrderManager(QObject):
             if avg == 0 and code in self.positions:
                 avg = self.positions[code].avg_price
             old = self.positions.get(code)
+
+            # [FIX 2026-06-22] 분할체결 직후 서버(opw00018) 잔고 반영 지연으로
+            # stale qty가 방금 체결된 로컬 수량을 덮어쓰는 문제 방지.
+            # 최근 _FILL_STALE_GUARD_SEC 이내 체결이 있었고 서버 qty가 로컬과 다르면 로컬 qty를 신뢰.
+            if (old is not None and old.last_fill_at is not None and qty != old.qty
+                    and (datetime.now() - old.last_fill_at).total_seconds() < _FILL_STALE_GUARD_SEC):
+                logger.warning(
+                    "잔고동기화 stale 방지: %s(%s) 서버qty=%d vs 로컬qty=%d(%.0f초 전 체결) — 로컬값 유지",
+                    h.get("name", "?"), code, qty, old.qty,
+                    (datetime.now() - old.last_fill_at).total_seconds(),
+                )
+                qty = old.qty
+
             qty_today = min(old.qty_buy_today_app, qty) if old else 0
 
             # 22개 필드 복사 (기존 값 보존)
@@ -437,6 +471,7 @@ class OrderManager(QObject):
                 eod_trade         = old.eod_trade         if old else False,
                 overnight_held    = old.overnight_held    if old else False,
                 entry_gap_pct     = old.entry_gap_pct     if old else 0.0,
+                last_fill_at      = old.last_fill_at      if old else None,
             )
 
         return new_positions
@@ -1029,21 +1064,53 @@ class OrderManager(QObject):
     def is_pending(self, code: str) -> bool:
         if code not in self._pending:
             return False
-        # 매도 주문이 30초 이상 미체결이면 pending 해제 — 손절 재시도 허용
         sell_time = self._pending_sell_time.get(code)
-        if sell_time and (datetime.now() - sell_time).total_seconds() > 30:
+        if not sell_time:
+            return True
+
+        elapsed = (datetime.now() - sell_time).total_seconds()
+        cancel_at = self._pending_sell_cancel_at.get(code)
+
+        # 1단계: 30초 미체결 — 아직 취소를 보낸 적 없으면 취소 주문 발령 (재주문 X)
+        # [FIX 2026-06-22] 기존엔 30초 즉시 pending 해제 후 재주문해서, 동일 rq_name으로
+        # 미체결 주문이 키움 큐에 누적되고, 포지션 청산 후에도 800033 거부가 수분간
+        # 반복되는 문제(서진시스템 4/30 11:18~11:38 사례)가 있었음.
+        if elapsed > _SELL_TIMEOUT_SEC and cancel_at is None:
+            self._cancel_pending_sell(code)
+            self._pending_sell_cancel_at[code] = datetime.now()
+            return True
+
+        # 2단계: 취소 발령 후에도 _SELL_CANCEL_GRACE_SEC 이상 추가 경과 — 강제 해제
+        if cancel_at and (datetime.now() - cancel_at).total_seconds() > _SELL_CANCEL_GRACE_SEC:
             retries = self._pending_sell_retries.get(code, 0) + 1
             self._pending_sell_retries[code] = retries
             logger.warning(
-                "[미체결 해제] %s 매도 주문 30초 초과 (재시도 %d회) — pending+force_sell 해제",
-                code, retries,
+                "[미체결 해제] %s 매도 주문 취소발령 후 %d초 추가경과 (재시도 %d회) — pending+force_sell 해제",
+                code, _SELL_CANCEL_GRACE_SEC, retries,
             )
             self._pending.discard(code)
             self._pending_sell_time.pop(code, None)
+            self._pending_sell_cancel_at.pop(code, None)
             # force_exit 데드락 방지: _force_sell_issued도 함께 해제해야 재발령 가능
             self._force_sell_issued.discard(code)
             return False
+
         return True
+
+    def _cancel_pending_sell(self, code: str) -> None:
+        """미체결 매도 주문 취소 시도 (SendOrder type=3). 응답 확인 없이 발령만 한다."""
+        rq_name = f"매도_{code}"
+        try:
+            cancel_ret = self._kiwoom._ocx.dynamicCall(
+                "SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)",
+                [f"취소_{code}", "1001", self._account, 3, code, 0, 0, "00", rq_name],
+            )
+            logger.warning(
+                "[매도미체결] %s 30초 초과 — 취소 발령 (rq=%s) → ret=%s",
+                code, rq_name, cancel_ret,
+            )
+        except Exception as e:
+            logger.warning("[매도취소 오류] %s: %s", code, e)
 
     def _can_pyramid(self, code: str) -> bool:
         """
@@ -1746,6 +1813,7 @@ class OrderManager(QObject):
             total_qty = pos.qty + filled_qty
             pos.avg_price = (pos.avg_price * pos.qty + filled_price * filled_qty) // total_qty
             pos.qty = total_qty
+            pos.last_fill_at = datetime.now()
             pos.trend_level = int(meta.trend_level)
             pos.trend_prev_level = int(meta.trend_prev_level)
             if is_app_buy:
@@ -1761,6 +1829,7 @@ class OrderManager(QObject):
                 peak_price=filled_price,
                 buy_date=date.today() if is_app_buy else None,
                 entry_time=datetime.now() if is_app_buy else None,
+                last_fill_at=datetime.now(),
                 opened_by_app=is_app_buy,
                 qty_buy_today_app=filled_qty if is_app_buy else 0,
                 candle_stop_price=meta.candle_stop,
@@ -1796,6 +1865,12 @@ class OrderManager(QObject):
     def _handle_sell_fill(self, code: str, name: str, filled_qty: int, filled_price: int, order_no: str) -> None:
         """매도 체결 전담"""
         if code not in self.positions:
+            # [FIX 2026-06-22] 포지션이 이미 다른 체결/청산으로 사라진 뒤 도착한 체잔 —
+            # 중복 발송된 이전 매도 주문이 지연 체결된 경우로 추정
+            logger.info(
+                "[매도체결][고아응답] %s(%s) %d주 — 포지션 이미 없음, 이전 중복 주문의 지연 체결로 추정",
+                name, code, filled_qty,
+            )
             return
             
         pos = self.positions[code]
@@ -1825,6 +1900,7 @@ class OrderManager(QObject):
         sell_from_today = min(filled_qty, pos.qty_buy_today_app)
         pos.qty_buy_today_app -= sell_from_today
         pos.qty -= filled_qty
+        pos.last_fill_at = datetime.now()
         remaining_qty = pos.qty
 
         # cash는 분할/완전 체결 모두에서 갱신해야 하며, 대기 신호 처리 전에 반영해야 함
@@ -1838,6 +1914,7 @@ class OrderManager(QObject):
             del self.positions[code]
             self._force_sell_issued.discard(code)
             self._pending_sell_retries.pop(code, None)
+            self._pending_sell_cancel_at.pop(code, None)
             if self._queued_signal:
                 queued = self._queued_signal
                 self._queued_signal = None
@@ -1848,6 +1925,7 @@ class OrderManager(QObject):
         """체결 공통 마무리 (상태 정리, 신호 발행)"""
         self._pending.discard(code)
         self._pending_sell_time.pop(code, None)
+        self._pending_sell_cancel_at.pop(code, None)
 
         payload = {
             "time": datetime.now().strftime("%H:%M:%S"),

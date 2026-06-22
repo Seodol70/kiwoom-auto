@@ -417,9 +417,14 @@ def _jdm_check_trend_and_ma(
     return (spread_tag, rsi_tag)
 
 def _jdm_check_execution_quality(
-    snap: "StockSnapshot", cfg: "SmartScannerConfig", ctx: "_JdmCtx"
+    snap: "StockSnapshot", cfg: "SmartScannerConfig", ctx: "_JdmCtx",
+    vol_override: Optional[str] = None,
 ) -> Optional[tuple[str, str, str]]:
-    """거래량·체결강도·EMA 이격·RSI·캔들 패턴 체크. (r_vol, r_chej, candle_reason) 또는 None."""
+    """거래량·체결강도·EMA 이격·RSI·캔들 패턴 체크. (r_vol, r_chej, candle_reason) 또는 None.
+
+    vol_override: [2026-06-19] JDM_ENTRY_EARLY 경로용 — 거래량급증(후행지표) 게이트를
+    대체할 사유 문자열. None이면 기존과 동일하게 거래량 미달 시 차단.
+    """
     closes, highs, lows = ctx.closes, ctx.highs, ctx.lows
 
     # 워밍업 체크
@@ -442,11 +447,15 @@ def _jdm_check_execution_quality(
     # OPENING + 거래량 부족 = 최악의 조합 (장 초반 변동성 + 낮은 유동성)
     r_vol = check_volume_surge(snap, ctx.eff_vol_mult, getattr(cfg, "volume_surge_lookback", 10))
     if r_vol is None:
-        # [2026-06-17] 전 슬롯 거래량 미달 차단 — vol≈0 종목 손실 반복 (코스모로보틱스 등)
-        # 오늘 분석: 손절 종목 f_vol_surge 평균 0.097 vs 익절 0.192
-        ScannerLogger.rejected(snap.code, snap.name, "JDM_VOL",
-            f"[{ctx.slot}] 거래량 미달 차단 — {snap.volumes_1min[-1] if snap.volumes_1min else 0}주")
-        return None
+        if vol_override is not None:
+            # [2026-06-19] EARLY 경로 — 거래량급증 미확정이어도 선행지표가 대신 게이트 역할
+            r_vol = vol_override
+        else:
+            # [2026-06-17] 전 슬롯 거래량 미달 차단 — vol≈0 종목 손실 반복 (코스모로보틱스 등)
+            # 오늘 분석: 손절 종목 f_vol_surge 평균 0.097 vs 익절 0.192
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_VOL",
+                f"[{ctx.slot}] 거래량 미달 차단 — {snap.volumes_1min[-1] if snap.volumes_1min else 0}주")
+            return None
 
     # ── 체결 가속도 필터
     skip_exec_vel = ctx.slot == "OPENING" and getattr(cfg, "exec_velocity_disabled_opening", False)
@@ -680,6 +689,102 @@ def check_jdm_entry(
         f"| {candle_reason}{warm_tag}{pressure_tag}{early_tag} | 📈신고가근처(TP↑)"
     )
     ScannerLogger.passed(snap.code, snap.name, "JDM_ENTRY", reason)
+    return reason
+
+def _jdm_check_early_trigger(
+    snap: "StockSnapshot", cfg: "SmartScannerConfig", ctx: "_JdmCtx",
+) -> Optional[str]:
+    """[2026-06-19] JDM_ENTRY_EARLY 트리거 판정.
+
+    거래량급증(1분봉 마감 후 확정되는 후행지표)을 기다리지 않고, 더 빠르게
+    확정 가능한 선행지표 단독으로 진입 자격을 부여한다.
+    A: get_leading_score (호가·체결·거래량 등 복합 선행 점수) 단독 강세
+    B: calc_tick_vol_accel_score (틱 단위 체결속도 가속도) 단독 강세
+    둘 중 하나라도 임계값 이상이면 트리거 문구를 반환, 아니면 None.
+    """
+    _a_min = float(getattr(cfg, "early_entry_leading_min", 0.50))
+    if ctx.leading_score >= _a_min:
+        return f"EARLY-A(선행점수{ctx.leading_score:.2f}≥{_a_min:.2f})"
+
+    _tv = IndicatorService.calc_tick_vol_accel_score(
+        list(getattr(snap, "tick_vol_history", None) or []))
+    _b_min = float(getattr(cfg, "early_entry_tick_accel_min", 0.50))
+    if _tv >= _b_min:
+        return f"EARLY-B(틱속도가속{_tv:.2f}≥{_b_min:.2f})"
+
+    return None
+
+def check_jdm_entry_early(
+    snap: "StockSnapshot",
+    cfg:  "SmartScannerConfig",
+) -> Optional[str]:
+    """
+    [2026-06-19] JDM_ENTRY_EARLY 통합 게이트.
+
+    JDM_ENTRY와 동일한 컨텍스트·체결강도·EMA이격·RSI·캔들·VWAP·호가압력 체크를
+    거치되, 거래량급증(후행지표) 게이트만 선행지표 단독 트리거(A/B)로 대체한다.
+    smart_scanner의 전략 루프가 JDM_ENTRY를 먼저 평가하므로, 이 함수는 거래량
+    게이트가 이미 통과되는 상황(=JDM_ENTRY가 신호를 냄)에는 호출되지 않는다.
+    """
+    if not getattr(cfg, "early_entry_enabled", True):
+        return None
+
+    ctx = _jdm_build_ctx(snap, cfg)
+    if ctx is None:
+        return None
+
+    ma_result = _jdm_check_trend_and_ma(snap, cfg, ctx)
+    if ma_result is None:
+        return None
+    spread_tag, rsi_tag = ma_result
+
+    early_trigger = _jdm_check_early_trigger(snap, cfg, ctx)
+    if early_trigger is None:
+        ScannerLogger.rejected(snap.code, snap.name, "JDM_EARLY",
+            f"[{ctx.slot}] 조기진입 트리거 미달 — 선행점수={ctx.leading_score:.2f}")
+        return None
+
+    exec_result = _jdm_check_execution_quality(snap, cfg, ctx, vol_override=early_trigger)
+    if exec_result is None:
+        return None
+    r_vol, r_chej, candle_reason = exec_result
+
+    daily_ctx = _jdm_check_daily_context(snap, cfg, ctx)
+    if daily_ctx is None:
+        return None
+
+    if getattr(cfg, "jdm_vwap_filter_enabled", True):
+        if check_vwap_filter(snap) is None:
+            return None
+
+    _hoga_ready = getattr(snap, "hoga_ready", False)
+    if getattr(cfg, "hoga_pressure_enabled", True) and _hoga_ready:
+        pressure = float(getattr(snap, "hoga_pressure", 1.0))
+        _hoga_min_key = "hoga_pressure_min_opening" if ctx.slot == "OPENING" else "hoga_pressure_min"
+        min_pressure = float(getattr(cfg, _hoga_min_key, getattr(cfg, "hoga_pressure_min", 1.3)))
+        if ctx.bid1_surge:
+            min_pressure *= float(getattr(cfg, "bid1_surge_hoga_relax", 0.8))
+        if pressure < min_pressure:
+            _bid_vol = sum(list(getattr(snap, "bid_qtys", [0]*5))[1:3])
+            _ask_vol = sum(list(getattr(snap, "ask_qtys", [0]*5))[1:3])
+            ScannerLogger.rejected(snap.code, snap.name, "JDM_HOGA",
+                f"[{ctx.slot}] 호가 압력 부족 — 압력비={pressure:.2f} < {min_pressure:.1f} "
+                f"(매수2~3호가 {_bid_vol:,}주 vs 매도 {_ask_vol:,}주)")
+            return None
+
+    pressure_tag = ""
+    if _hoga_ready:
+        _slope_val = float(getattr(snap, "bid1_slope", 0.0))
+        pressure_tag = (f" | 호가압력={float(getattr(snap, 'hoga_pressure', 1.0)):.2f}"
+                        f" | 호가기울기={_slope_val:+.3f}%")
+
+    mode_tag = "JDM_LITE" if ctx.lite_mode else "JDM"
+    warm_tag = " | [WARMUP]" if ctx.is_warmup else ""
+    reason = (
+        f"[{ctx.slot}][{mode_tag}] {early_trigger} | {r_vol} | {r_chej} | {spread_tag} | {rsi_tag} "
+        f"| {candle_reason}{warm_tag}{pressure_tag} | ⚡조기진입"
+    )
+    ScannerLogger.passed(snap.code, snap.name, "JDM_ENTRY_EARLY", reason)
     return reason
 
 def check_jdm_open_breakout(

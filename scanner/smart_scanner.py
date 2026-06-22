@@ -220,6 +220,7 @@ class SmartScanner(QObject):
         # [NEW] 전략 모듈 로드 (v3.0)
         from scanner.strategies.breakout import BreakoutStrategy
         from scanner.strategies.jdm_entry import JdmStrategy
+        from scanner.strategies.jdm_entry_early import JdmEntryEarlyStrategy  # [2026-06-19]
         from scanner.strategies.pullback import PullbackStrategy
         from scanner.strategies.eod import EODStrategy
         from scanner.strategies.overheat_pullback import OverheatPullbackStrategy
@@ -228,6 +229,7 @@ class SmartScanner(QObject):
         self.strategy_map = {
             "BREAKOUT": BreakoutStrategy(),
             "JDM_ENTRY": JdmStrategy(),
+            "JDM_ENTRY_EARLY": JdmEntryEarlyStrategy(),       # [2026-06-19] 거래량급증 전 선행지표 단독 진입
             "PULLBACK": PullbackStrategy(),
             "GAP_PULLBACK": GapPullbackStrategy(),           # [2026-06-02] C전략: 갭 눌림목
             "MORNING_GOLDENTIME": MorningGoldentimeStrategy(),  # [2026-06-15] E전략: 오전 골든타임

@@ -166,8 +166,89 @@ def test_check_vwap_filter(base_snap):
     base_snap.vwap = 10000
     base_snap.current_price = 10100
     assert check_vwap_filter(base_snap) is not None
-    
+
     base_snap.current_price = 9800
     assert check_vwap_filter(base_snap) is None
 
 from unittest.mock import patch
+
+# ---------- JDM_ENTRY_EARLY Tests (2026-06-19) ----------
+
+from scanner.signal_evaluator import check_jdm_entry_early
+
+def _make_early_snap(base_snap):
+    """JDM_ENTRY_EARLY 전용 — 거래량급증 없이도 다른 체크를 통과하는 스냅샷."""
+    # 거래량은 평탄하게 유지 (거래량급증 미충족 — EARLY가 대체해야 하는 상황)
+    base_snap.volumes_1min = [10000] * 100
+    base_snap.hoga_ready = False  # 호가 압력 필터 스킵
+    # MA7/MA15 정배열(이격 0.10%+ 확보, RSI는 leading_score 부스트로 커버) — trend_level=3으로 GC_OVERRIDE 적용
+    closes = []
+    v = 10000
+    for i in range(100):
+        v += -10 if i % 2 else 25
+        closes.append(v)
+    base_snap.closes_1min = closes
+    base_snap.opens_1min = closes
+    base_snap.current_price = closes[-1]
+    base_snap.trend_level = 3
+    # 피봇 R2를 현재가 미만으로 — 전일 변동폭을 좁게 잡아 R2 돌파 조건 자연 충족
+    base_snap.daily_high_prev = 10300
+    base_snap.daily_low_prev = 10100
+    base_snap.prev_close = 10200
+    return base_snap
+
+def test_check_jdm_entry_early_disabled_returns_none(base_snap, base_config):
+    base_config.early_entry_enabled = False
+    with patch("scanner.evaluators.jdm.datetime") as mock_dt:
+        mock_dt.now.return_value.time.return_value = dtime(11, 0)
+        assert check_jdm_entry_early(_make_early_snap(base_snap), base_config) is None
+
+def test_check_jdm_entry_early_no_trigger_blocks(base_snap, base_config):
+    """선행점수도, 틱속도 가속도 약하면 EARLY는 차단되어야 함."""
+    base_config.early_entry_enabled = True
+    with patch("scanner.evaluators.jdm.datetime") as mock_dt, \
+         patch("scanner.evaluators.jdm.IndicatorService.get_leading_score", return_value=0.10), \
+         patch("scanner.evaluators.jdm.IndicatorService.calc_tick_vol_accel_score", return_value=0.0):
+        mock_dt.now.return_value.time.return_value = dtime(11, 0)
+        reason = check_jdm_entry_early(_make_early_snap(base_snap), base_config)
+        assert reason is None
+
+def test_check_jdm_entry_early_trigger_a_leading_score(base_snap, base_config):
+    """A: 선행점수 단독 강세면 거래량급증 없이도 통과해야 함."""
+    base_config.early_entry_enabled = True
+    base_config.early_entry_leading_min = 0.50
+    with patch("scanner.evaluators.jdm.datetime") as mock_dt, \
+         patch("scanner.evaluators.jdm.IndicatorService.get_leading_score", return_value=0.65), \
+         patch("scanner.evaluators.jdm.IndicatorService.calc_tick_vol_accel_score", return_value=0.0):
+        mock_dt.now.return_value.time.return_value = dtime(11, 0)
+        reason = check_jdm_entry_early(_make_early_snap(base_snap), base_config)
+        assert reason is not None
+        assert "EARLY-A" in reason
+
+def test_check_jdm_entry_early_trigger_b_tick_accel(base_snap, base_config):
+    """B: 틱속도 가속도 단독 강세면 거래량급증 없이도 통과해야 함.
+    leading_score는 0.15(leading_score_min) 이상~0.50(A 트리거) 미만 구간으로 설정해
+    A가 아니라 B만으로 통과하는지를 검증한다 — 0.15 미만이면 _jdm_build_ctx 자체가
+    JDM_LEADING 단계에서 차단되어 버린다."""
+    base_config.early_entry_enabled = True
+    base_config.early_entry_tick_accel_min = 0.50
+    with patch("scanner.evaluators.jdm.datetime") as mock_dt, \
+         patch("scanner.evaluators.jdm.IndicatorService.get_leading_score", return_value=0.20), \
+         patch("scanner.evaluators.jdm.IndicatorService.calc_tick_vol_accel_score", return_value=0.80):
+        mock_dt.now.return_value.time.return_value = dtime(11, 0)
+        reason = check_jdm_entry_early(_make_early_snap(base_snap), base_config)
+        assert reason is not None
+        assert "EARLY-B" in reason
+
+def test_check_jdm_entry_early_does_not_skip_other_filters(base_snap, base_config):
+    """EARLY도 EMA 이격·RSI 등 나머지 필터는 그대로 적용되어야 함 (거래량만 우회)."""
+    base_config.early_entry_enabled = True
+    snap = _make_early_snap(base_snap)
+    snap.trend_level = 0
+    # 역배열 상태로 MA 필터에서 차단되어야 함 (JDM_ENTRY와 동일한 필터 적용 검증) — _make_early_snap 이후 덮어씀
+    snap.closes_1min = [11000] * 20 + [10000] * 30
+    with patch("scanner.evaluators.jdm.datetime") as mock_dt, \
+         patch("scanner.evaluators.jdm.IndicatorService.get_leading_score", return_value=0.90):
+        mock_dt.now.return_value.time.return_value = dtime(12, 0)
+        reason = check_jdm_entry_early(snap, base_config)
+        assert reason is None

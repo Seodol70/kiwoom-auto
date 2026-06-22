@@ -20,7 +20,7 @@ from .evaluators.common import (
     check_disparity_from_ma,
     check_ema20_filter
 )
-from .evaluators.jdm import check_jdm_entry, check_jdm_open_breakout, _JdmCtx
+from .evaluators.jdm import check_jdm_entry, check_jdm_entry_early, check_jdm_open_breakout, _JdmCtx
 from .evaluators.breakout import check_breakout, check_breakout_gate
 from .evaluators.surge import check_pre_surge, check_opening_surge, check_opening_scalp
 from .evaluators.eod import check_eod_entry
@@ -38,6 +38,7 @@ __all__ = [
     'check_breakout',
     'check_breakout_gate',
     'check_jdm_entry',
+    'check_jdm_entry_early',
     'check_jdm_open_breakout',
     'check_pre_surge',
     'check_opening_surge',

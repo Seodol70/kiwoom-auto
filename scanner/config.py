@@ -39,8 +39,8 @@ class SmartScannerConfig:
     universe_vol_ratio_weight: float = 0.5   # 전일 대비 거래량 비율 가중치 — [2026-06-17] 0.2→0.5 (막 불붙는 종목 포착)
     universe_chg_pct_weight:   float = 0.2   # 등락률 가중치 — [2026-06-17] 0.6→0.2 (이미 오른 종목 추격 방지)
     pre_filter_time:      dtime = dtime(9, 0, 0)
-    enabled_strategies:   tuple = ("JDM_ENTRY", "PULLBACK", "GAP_PULLBACK", "EOD")  # [2026-06-02] BREAKOUT 제거
-    strategy_order:       tuple = ("JDM_ENTRY", "PULLBACK", "GAP_PULLBACK", "EOD")
+    enabled_strategies:   tuple = ("JDM_ENTRY", "JDM_ENTRY_EARLY", "PULLBACK", "GAP_PULLBACK", "EOD")  # [2026-06-02] BREAKOUT 제거, [2026-06-19] JDM_ENTRY_EARLY 추가
+    strategy_order:       tuple = ("JDM_ENTRY", "JDM_ENTRY_EARLY", "PULLBACK", "GAP_PULLBACK", "EOD")
     realtime_sub_max:     int   = 50          # [2026-05-21] watch_pool_max 와 일치 (50)
     scan_interval:        float = 60.0  # 2026-04-23: 10→60초 (메인 스레드 블로킹 해소, opt10030 TR 시간 여유)
     tr_delay:             float = 0.25        # TRRequestQueue 최소 간격
@@ -276,6 +276,14 @@ class SmartScannerConfig:
     # 0.15: bs+보조 1개 이상 복합 신호 필수 (단독 primary 차단)
     leading_score_min: float = 0.15   # 2026-06-09: 0.05→0.15 (bs 단독 진입 차단, 복합 신호 필수)
 
+    # [JDM_ENTRY_EARLY] 2026-06-19 — 거래량급증(후행지표) 확정 전에 선행지표만으로 진입하는 경로.
+    # 후행지표(1분봉 거래량 비교)는 가격이 이미 오른 뒤에야 확정되는 구조적 지연이 있음 —
+    # A: leading_score 단독 강세, B: 틱속도 가속 단독 강세 중 하나라도 충족하면 거래량 게이트 대체.
+    # 둘 다 일반 진입보다 엄격한 임계값(0.50) 사용 — 조기 진입은 노이즈가 많으므로 확신 높을 때만.
+    early_entry_enabled:          bool  = True
+    early_entry_leading_min:      float = 0.50   # A: 선행점수 단독 트리거 임계값
+    early_entry_tick_accel_min:   float = 0.50   # B: 틱속도 가속 점수 단독 트리거 임계값 (calc_tick_vol_accel_score, 0~1)
+
     # [추세추종] JDM 진입 조건 추세 레벨 오버라이드 파라미터 (2026-04-20)
     # [FIX 2026-05-27] 2 → 99로 사실상 무력화.
     # 이전엔 trend_lv≥2에서 캔들 패턴/EMA 이격 완화/RSI 상한 완화가 모두 적용 → 정점 진입 원인.
@@ -387,11 +395,14 @@ class SmartScannerConfig:
     # 활성 전략 목록: "BREAKOUT", "JDM_ENTRY", "PULLBACK", "EOD"
     # [2026-06-02] BREAKOUT 제거 — "이미 오른 것 확인 후 진입" 구조적 후행성
     # BREAKOUT 승률 낮음 + 신호 11,128건/일(47%) 노이즈 → JDM_ENTRY/PULLBACK/GAP_PULLBACK으로 대체
-    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK", "MORNING_GOLDENTIME")
+    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "JDM_ENTRY_EARLY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK", "MORNING_GOLDENTIME")
     # [2026-06-10] PULLBACK 비중 축소: GAP_PULLBACK 우선, PULLBACK 후순위로 이동
     # 근거: PULLBACK 반복 손실(6/1 33건 21%, 6/8 10건 40%) vs JDM 빅 위너 생산
     # [2026-06-15] MORNING_GOLDENTIME 추가: 09:00~09:30 전용 (내부에서 enabled 플래그로 ON/OFF)
-    strategy_order: tuple[str, ...] = ("MORNING_GOLDENTIME", "JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
+    # [2026-06-19] JDM_ENTRY_EARLY를 JDM_ENTRY 바로 다음에 배치 — 전략 루프가 순서대로 평가하고
+    # 첫 성공에서 멈추므로(smart_scanner.py _evaluate), JDM_ENTRY가 거래량 게이트를 통과하면
+    # EARLY는 평가되지 않고, 통과 못했을 때만 선행지표 단독 트리거를 시도하게 됨.
+    strategy_order: tuple[str, ...] = ("MORNING_GOLDENTIME", "JDM_ENTRY", "JDM_ENTRY_EARLY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
     # 분당 최대 신호 발행 수 — 동시 다발 진입 방지 (1분에 최대 N종목)
     max_entries_per_minute: int = 2  # 2026-05-07: 1→5→2 (UI 프리징 해결, 신호 제한)
     # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
