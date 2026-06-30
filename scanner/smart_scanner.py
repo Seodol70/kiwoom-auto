@@ -402,9 +402,15 @@ class SmartScanner(QObject):
             self._run_pre_filter()
         else:
             secs = self._seconds_until(self.cfg.pre_filter_time)
-            t = threading.Timer(secs, self._run_pre_filter)
-            t.daemon = True
-            t.start()
+            # [FIX 2026-06-29] threading.Timer는 별도(비-Qt) 스레드에서 콜백을 실행한다.
+            # _run_pre_filter -> fetch_opt10030_top_volume -> CommRqData(dynamicCall)까지
+            # 그 스레드에서 그대로 호출되어, QAxWidget(메인 스레드 전용 GUI 객체)을
+            # 다른 스레드에서 두드리게 된다. 09:00:00 정각 키움 서버 응답 지연과 겹치면
+            # OCX 콜백이 블로킹돼도 메인 스레드의 QTimer 타임아웃(2초)조차 발동하지 못하고
+            # 대시보드 전체가 멈춘다(2026-06-29 09:00~10:19 80분 행 사례). QTimer.singleShot은
+            # 메인 스레드(Qt 이벤트 루프)에서 만료·실행되므로 OCX 접근이 항상 안전하다.
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(int(secs * 1000), self._run_pre_filter)
             logger.warning("⏳ [SmartScanner] Pre-Filter %.0f초(= %s) 후 실행 예약", secs, (datetime.now() + timedelta(seconds=secs)).time())
             # 장 시작 전이어도 opt10030 캐시가 있으면 top_mgr + watch_q를 미리 활성화
             # → 이전 세션 캐시 종목으로 대시보드 표시, 09:00 Pre-Filter 실행 시 갱신됨
