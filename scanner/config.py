@@ -401,13 +401,17 @@ class SmartScannerConfig:
     # BREAKOUT 승률 낮음 + 신호 11,128건/일(47%) 노이즈 → JDM_ENTRY/PULLBACK/GAP_PULLBACK으로 대체
     # [2026-06-30] JDM_ENTRY_EARLY 비활성화 — 6/22~6/30 7거래일 누적 17건 중 16건 매칭,
     # 승률 12.5%(2승14패), 평균손익 -1.17%로 지속적 저성과 확인(/analyze-trades 기반).
-    # 코드(scanner/evaluators/jdm.py)는 그대로 유지하고 enabled_strategies에서만 제외 —
-    # 재활성화 시 이 한 줄만 되돌리면 됨.
-    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK", "MORNING_GOLDENTIME")
+    # [2026-06-30] 후행적 성격(눌림목/과열조정 매수) 3개 전략 비활성화 — 전체 로그 분석 결과:
+    #   - PULLBACK: 신호발생 0건(평가 자체가 안 됨, trend_lv>=3 요구치 강화 이후 사실상 죽은 전략)
+    #   - GAP_PULLBACK: 신호발생 0건
+    #   - OVERHEAT_PULLBACK: 6건 진입, 승률 16.7%(1승5패), 평균손익 -0.88%
+    # 코드는 그대로 유지하고 enabled_strategies에서만 제외 — 재활성화 시 이 한 줄만 되돌리면 됨.
+    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "EOD", "MORNING_GOLDENTIME")
     # [2026-06-10] PULLBACK 비중 축소: GAP_PULLBACK 우선, PULLBACK 후순위로 이동
     # 근거: PULLBACK 반복 손실(6/1 33건 21%, 6/8 10건 40%) vs JDM 빅 위너 생산
+    # → 2026-06-30 추가 약화로 신호 자체가 0건이 됨(위 참고)
     # [2026-06-15] MORNING_GOLDENTIME 추가: 09:00~09:30 전용 (내부에서 enabled 플래그로 ON/OFF)
-    strategy_order: tuple[str, ...] = ("MORNING_GOLDENTIME", "JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
+    strategy_order: tuple[str, ...] = ("MORNING_GOLDENTIME", "JDM_ENTRY", "EOD")
     # 분당 최대 신호 발행 수 — 동시 다발 진입 방지 (1분에 최대 N종목)
     max_entries_per_minute: int = 2  # 2026-05-07: 1→5→2 (UI 프리징 해결, 신호 제한)
     # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
