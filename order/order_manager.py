@@ -29,6 +29,7 @@ from logging_config import order_log, position_log
 from order.position_repository import PositionRepository
 from order.order_types import OrderType, PriceType
 from order.pnl_tracker import PnLTracker
+from order.position_sizer import get_position_sizer
 
 logger = logging.getLogger(__name__)
 
@@ -843,43 +844,12 @@ class OrderManager(QObject):
             self.order_failed.emit(msg)
             return
 
+        # [리팩토링 4단계 2026-06-30] 수량 계산 3모드를 order/position_sizer.py의
+        # Strategy 패턴으로 추출. 로직/로그 메시지는 원본과 동일(scanner/smart_scanner.py의
+        # strategy_map과 같은 관용구 — mode 문자열로 Sizer 객체 조회 후 위임).
         mode = getattr(self._scan_cfg, "position_sizing_mode", "EQUAL").upper()
-        qty = 0
-
-        if mode == "FIXED":
-            # 1. FIXED: 설정된 고정 금액 분할 매수
-            budget = int(getattr(self._scan_cfg, "fixed_order_amount", 1_500_000))
-            qty = budget // price if price > 0 else 0
-            order_log.info("[사이징:FIXED] 목표금액=%s원 -> %d주", f"{budget:,}", qty)
-
-        elif mode == "RISK":
-            # 2. RISK: 회당 리스크 한도(예: 총자산 1%) 기반 수량 산출
-            # 공식: qty = (총자산 * 리스크%) / (진입가 - 손절가)
-            risk_pct = float(getattr(self._scan_cfg, "risk_per_trade_pct", 1.0))
-            total_equity = self.total_equity
-            risk_amount = int(total_equity * (risk_pct / 100.0))
-            
-            # 손절가 산출 (기본 손절 % 사용)
-            sl_pct = abs(float(getattr(self._scan_cfg, "jdm_stop_loss_pct", -1.2)))
-            stop_price = int(price * (1 - sl_pct / 100.0))
-            risk_per_share = max(1, price - stop_price)
-            
-            qty = risk_amount // risk_per_share
-            order_log.info(
-                "[사이징:RISK] 총자산=%s원 리스크=%s원(%s%%) 손절가=%s원 -> %d주",
-                f"{total_equity:,}", f"{risk_amount:,}", f"{risk_pct}", f"{stop_price:,}", qty
-            )
-
-        else:
-            # 3. EQUAL (기존 방식): 가용 예수금 / 남은 슬롯
-            # [BUG FIX 2026-05-26] self.cash → self.available_cash (미체결 매수 차감)
-            # remaining_slots에서 _pending(매수+매도 주문 대기)을 빼므로 슬롯 측에서도 중복 방지
-            _cash_avail = self.available_cash
-            remaining_slots = self.max_positions - len(self.positions) - len(self._pending)
-            remaining_slots = max(remaining_slots, 1)
-            budget = _cash_avail // remaining_slots
-            qty = budget // price if price > 0 else 0
-            order_log.info("[사이징:EQUAL] 가용예수금=%s원 슬롯=%d -> %d주", f"{_cash_avail:,}", remaining_slots, qty)
+        sizer = get_position_sizer(mode)
+        qty = sizer.calculate(price, self._scan_cfg, self)
 
         # ── 가용 자금 및 주문 한도 체크 ─────────────────────────────────────────
         # 1회 주문 한도(max_order_amount) 적용
