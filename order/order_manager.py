@@ -364,7 +364,12 @@ class OrderManager(QObject):
         """
         키움 OnReceiveMsg 콜백 — 주문 수신 결과 처리.
         [800033] 매도가능수량 부족: 포지션이 서버에 없음 → 로컬 메모리 정리.
+        [RC4007] 모의투자 매매제한 종목: 매수 자체가 거부됨 → 당일 재진입 차단 등록.
         """
+        if "RC4007" in msg and rq_name.startswith("매수_"):
+            self._handle_trade_restricted_buy(rq_name)
+            return
+
         if "800033" not in msg:
             return
 
@@ -399,6 +404,26 @@ class OrderManager(QObject):
             )
             if self.on_position_closed:
                 self.on_position_closed(code)
+
+    def _handle_trade_restricted_buy(self, rq_name: str) -> None:
+        """
+        [RC4007] 모의투자 매매제한 종목 — 매수 주문 자체가 거부됨.
+        포지션은 생성되지 않으므로 pending 상태만 정리하고, 같은 종목이 당일
+        재신호로 또 거부당하는 낭비를 막기 위해 재진입 차단 목록에 등록한다
+        (헝셩그룹 2026-06-25 사례).
+        """
+        code = rq_name[len("매수_"):]
+        logger.warning(
+            "[RC4007] %s 모의투자 매매제한 종목 — 매수 거부, 당일 재진입 차단 등록",
+            code,
+        )
+        self._pending.discard(code)
+        self._pending_buy_time.pop(code, None)
+        self._pending_buy_info.pop(code, None)
+        self._pending_meta.pop(code, None)
+        self._app_pending_buys.pop(code, None)
+        if code not in self._no_reentry_today:
+            self._no_reentry_today.add(code)
 
     # -----------------------------------------------------------------------
     # 포지션 재구성 헬퍼 (Step 1: 코드 중복 제거, 2026-05-29)
@@ -999,8 +1024,13 @@ class OrderManager(QObject):
                                 _tp = _t3
                         _trail_price = int(pos.peak_price * (1 - _tp / 100))
                         if pos.current_price <= _trail_price:
-                            logger.info("🎯 [트레일스탑] %s(%s) 고점%s→현재%s (고점대비-%.1f%%) — 즉시 매도",
-                                        pos.name, code, f"{pos.peak_price:,}", f"{pos.current_price:,}", _tp)
+                            # [FIX 2026-06-26] force_exit()는 _force_sell_issued로 중복 주문을
+                            # 막지만, 이 로그는 가드보다 앞서 있어 같은 틱 구간에서 매도 체결을
+                            # 기다리는 동안 매번 찍혔다(키스트론 09:18:42~46 4초간 24회). 이미
+                            # 발령 중이면 로그도 찍지 않고 조용히 force_exit 결과만 따른다.
+                            if code not in self._force_sell_issued:
+                                logger.info("🎯 [트레일스탑] %s(%s) 고점%s→현재%s (고점대비-%.1f%%) — 즉시 매도",
+                                            pos.name, code, f"{pos.peak_price:,}", f"{pos.current_price:,}", _tp)
                             self.force_exit(code, pos.name, pos.qty, "트레일스탑")
                             return
 
@@ -1010,8 +1040,11 @@ class OrderManager(QObject):
                 if _be_enabled:
                     _be_buf = float(getattr(getattr(self, "_scan_cfg", None), "breakeven_stop_buffer_pct", 0.0))
                     if pos.pnl_pct <= _be_buf:
-                        logger.info("🛡️ [본절가스탑] %s(%s) 분할익절 후 평단 이탈 (%.2f%%) — 즉시 매도",
-                                    pos.name, code, pos.pnl_pct)
+                        # [FIX 2026-06-26] 트레일스탑과 동일한 로그 폭증 방지 — force_exit 발령
+                        # 중이면 재평가 로그를 찍지 않는다.
+                        if code not in self._force_sell_issued:
+                            logger.info("🛡️ [본절가스탑] %s(%s) 분할익절 후 평단 이탈 (%.2f%%) — 즉시 매도",
+                                        pos.name, code, pos.pnl_pct)
                         self.force_exit(code, pos.name, pos.qty, "본절가스탑")
                         return
 
@@ -1923,9 +1956,16 @@ class OrderManager(QObject):
 
     def _finalize_fill(self, code, name, filled_qty, filled_price, order_type, realized=0, avg_buy=None, remaining_qty: int = 0):
         """체결 공통 마무리 (상태 정리, 신호 발행)"""
-        self._pending.discard(code)
-        self._pending_sell_time.pop(code, None)
-        self._pending_sell_cancel_at.pop(code, None)
+        # [FIX 2026-06-25] 매도 주문이 부분체결(remaining_qty > 0)인 동안 pending을 풀면
+        # check_and_exit_all()의 5초 청산 루프가 같은 포지션에 중복 매도를 발사해
+        # 800033(매도가능수량 부족)/고아응답을 유발한다(남화산업 12:02 사례). 매도 잔량이
+        # 남아있는 한 같은 주문의 나머지 체결을 기다리도록 pending을 유지한다.
+        if order_type == OrderType.SELL and remaining_qty > 0:
+            self._pending_sell_time.setdefault(code, datetime.now())
+        else:
+            self._pending.discard(code)
+            self._pending_sell_time.pop(code, None)
+            self._pending_sell_cancel_at.pop(code, None)
 
         payload = {
             "time": datetime.now().strftime("%H:%M:%S"),
