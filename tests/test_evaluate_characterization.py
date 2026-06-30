@@ -38,6 +38,14 @@ class MockKiwoom:
 def make_scanner(cfg=None):
     kiwoom = MockKiwoom()
     cfg = cfg or SmartScannerConfig()
+    # [FIX] _evaluate()의 시간 필터(entry_start_time~entry_end_time, 기본 07:00~15:30)가
+    # 테스트 실행 시각이 그 범위 밖이면(예: 장 마감 후) 앞단에서 차단해 strategy_map까지
+    # 도달하지 못하는 flaky 실패가 났다(2026-06-30 15:30 이후 실행 시 재현됨). 시간 필터를
+    # 검증하는 test_time_outside_entry_window_blocks_evaluation을 제외한 나머지 테스트는
+    # 오케스트레이션(필터링 -> 위임 -> 첫 신호 중단)만 보면 되므로, 항상 통과하도록
+    # 24시간 전체로 넓혀 실행 시각과 무관하게 만든다.
+    cfg.entry_start_time = dtime(0, 0, 0)
+    cfg.entry_end_time = dtime(23, 59, 59)
     with patch("scanner.smart_scanner.PriorityWatchQueue") as mock_wq:
         mock_wq.return_value = MagicMock()
         scanner = SmartScanner(kiwoom, cfg)
