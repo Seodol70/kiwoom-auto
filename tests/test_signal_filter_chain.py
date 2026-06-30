@@ -217,6 +217,48 @@ class TestOpeningTimeFilter:
         passed, reason = filter.validate(sig, ctx)
         assert passed
 
+    # [FIX 2026-06-30] MORNING_GOLDENTIME 전략은 09:00~09:30 전용으로 설계됐는데
+    # 이 필터의 하드 블록이 전략 구분 없이 그 시간대를 전부 막아 신호가 한 번도
+    # 진입까지 못 가는 충돌이 있었다(시노펙스 6/30 09:26 사례로 발견). 예외 추가 검증.
+    def test_morning_goldentime_exempt_from_hard_block(self):
+        filter = OpeningTimeFilter()
+        sig = MockSignal(signal_type="MORNING_GOLDENTIME")
+        now = datetime.strptime("09:15", "%H:%M").replace(
+            year=datetime.now().year,
+            month=datetime.now().month,
+            day=datetime.now().day
+        )
+        ctx = SignalFilterContext(
+            order_mgr=MockOrderManager(),
+            snap_store=MockSnapshotStore(),
+            trading_cfg=MockConfig(),
+            risk_mgr=Mock(),
+            now=now,
+        )
+
+        passed, reason = filter.validate(sig, ctx)
+        assert passed
+
+    def test_other_strategies_still_blocked_at_same_time(self):
+        """MORNING_GOLDENTIME 예외가 다른 전략까지 풀어주지 않는지 회귀 확인"""
+        filter = OpeningTimeFilter()
+        sig = MockSignal(signal_type="JDM_ENTRY")
+        now = datetime.strptime("09:15", "%H:%M").replace(
+            year=datetime.now().year,
+            month=datetime.now().month,
+            day=datetime.now().day
+        )
+        ctx = SignalFilterContext(
+            order_mgr=MockOrderManager(),
+            snap_store=MockSnapshotStore(),
+            trading_cfg=MockConfig(),
+            risk_mgr=Mock(),
+            now=now,
+        )
+
+        passed, reason = filter.validate(sig, ctx)
+        assert not passed
+
 
 class TestWeakSignalFilter:
     def test_reject_weak_signal_after_0930(self):

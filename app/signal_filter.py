@@ -100,9 +100,20 @@ class OpeningTimeFilter(SignalFilter):
 
     분석 결과(5/21·5/27·5/28) 09:00~09:30 진입은 거의 모든 날 손실 집중.
     09:30 이후부터 승률이 정상화됨 → 개장 30분은 무조건 차단.
+
+    [2026-06-30] MORNING_GOLDENTIME 전략(2026-06-15 도입)은 정의상 09:00~09:30
+    전용으로 설계됐는데, 이 하드 블록이 전략 구분 없이 그 시간대를 전부 막아
+    6/15부터 신호가 한 번도 진입까지 못 가는 충돌이 있었다(시노펙스 6/30 09:26
+    사례로 발견). MORNING_GOLDENTIME은 자체적으로 시가돌파/호가압력/VWAP지지
+    등 09:00~09:30 전용 조건을 갖추고 있으므로 이 필터에서는 예외로 통과시킨다.
     """
 
+    EXEMPT_STRATEGIES = {"MORNING_GOLDENTIME"}
+
     def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
+        if sig.signal_type in self.EXEMPT_STRATEGIES:
+            return True, ""
+
         now = ctx.now or datetime.now()
 
         hard_block_end = datetime.strptime("09:30", "%H:%M").time()
