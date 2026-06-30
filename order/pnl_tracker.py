@@ -5,6 +5,10 @@ PnLTracker — 손익 계산 통합
 흩어진 손익 계산을 단일 모듈로 통합.
 
 수수료 및 세금은 ConfigManager 를 통해 동적으로 가져옴.
+
+TODO(리팩토링 2단계): order_manager.py가 여전히 _FEE/_TAX를 직접 계산하고 있어
+(order_manager.py:34-35, 140-141, 1887, 1913) 이 클래스는 아직 미채택 상태다.
+계산식이 수치적으로 100% 동일함을 단위테스트로 먼저 대조한 뒤 호출부를 교체할 것.
 """
 from __future__ import annotations
 from app.config_manager import config_manager as cfg
