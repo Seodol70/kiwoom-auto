@@ -28,11 +28,9 @@ from app.config_manager import config_manager as cfg
 from logging_config import order_log, position_log
 from order.position_repository import PositionRepository
 from order.order_types import OrderType, PriceType
+from order.pnl_tracker import PnLTracker
 
 logger = logging.getLogger(__name__)
-
-_FEE = cfg.COST.get("fee_rate", 0.00015)
-_TAX = cfg.COST.get("tax_rate", 0.0023)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -133,13 +131,7 @@ class Position:
     @property
     def pnl(self) -> int:
         """평가손익(원): 수수료·세금 차감 후."""
-        if not self.current_price or not self.avg_price:
-            return 0
-        buy_total = self.avg_price * self.qty
-        sell_total = self.current_price * self.qty
-        fees = buy_total * _FEE + sell_total * _FEE
-        tax = sell_total * _TAX
-        return int(sell_total - buy_total - fees - tax)
+        return PnLTracker.calculate_pnl(self.avg_price, self.current_price, self.qty)
 
     @property
     def pnl_pct(self) -> float:
@@ -1884,7 +1876,7 @@ class OrderManager(QObject):
 
         # 공통 마무리 로직
         buy_amt = filled_qty * filled_price
-        fee = int(buy_amt * _FEE)
+        fee = PnLTracker.calculate_buy_fee(filled_price, filled_qty)
         self.cash -= (buy_amt + fee)
         self._today_fill_log.append({
             "ts": datetime.now().strftime("%H:%M:%S"),
@@ -1909,9 +1901,7 @@ class OrderManager(QObject):
         pos = self.positions[code]
         avg_buy_for_log = pos.avg_price
         sell_amount = filled_price * filled_qty
-        buy_amount  = pos.avg_price * filled_qty
-        cost = round(sell_amount * (_FEE + _TAX) + buy_amount * _FEE)
-        realized = (filled_price - pos.avg_price) * filled_qty - cost
+        realized = PnLTracker.calculate_realized_pnl(pos.avg_price, filled_price, filled_qty)
         
         self._today_fill_log.append({
             "ts": datetime.now().strftime("%H:%M:%S"),

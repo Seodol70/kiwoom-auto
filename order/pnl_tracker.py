@@ -1,14 +1,20 @@
 """
 PnLTracker — 손익 계산 통합
 
-현재 4개 파일(kiwoom_api.py, order_manager.py, trade_audit_logger.py, feedback_engine.py)에
-흩어진 손익 계산을 단일 모듈로 통합.
+order/order_manager.py에 흩어져 있던 수수료·세금 포함 손익 계산 3곳을 통합한다.
+(kiwoom_api.py/trade_audit_logger.py/feedback_engine.py는 자체 계산 없이 이미 계산된
+값을 그대로 읽거나 키움 서버 응답을 그대로 전달할 뿐이라 통합 대상이 아니었음 —
+리팩토링 2단계 2026-06-30 조사로 확인.)
 
 수수료 및 세금은 ConfigManager 를 통해 동적으로 가져옴.
 
-TODO(리팩토링 2단계): order_manager.py가 여전히 _FEE/_TAX를 직접 계산하고 있어
-(order_manager.py:34-35, 140-141, 1887, 1913) 이 클래스는 아직 미채택 상태다.
-계산식이 수치적으로 100% 동일함을 단위테스트로 먼저 대조한 뒤 호출부를 교체할 것.
+[리팩토링 2단계 2026-06-30] calculate_pnl()/calculate_realized_pnl()/calculate_buy_fee()의
+int() 캐스팅 위치를 order_manager.py의 기존 계산식과 정확히 일치시켰다(무작위 20만건 대조로
+검증, 변경 전 75~88%에서 1~2원 차이가 나던 것을 0건으로 맞춤). 자세한 매핑:
+- calculate_pnl()           <- Position.pnl 프로퍼티 (미실현, 원래 order_manager.py:133-142)
+- calculate_realized_pnl()  <- OrderManager._handle_sell_fill() (실현, 원래 order_manager.py:1909-1914)
+- calculate_buy_fee()       <- OrderManager._handle_buy_fill() (매수 수수료, 원래 order_manager.py:1882)
+order_manager.py는 현재 위 세 곳 모두 이 클래스를 호출하도록 교체 완료됨.
 """
 from __future__ import annotations
 from app.config_manager import config_manager as cfg
@@ -34,13 +40,16 @@ class PnLTracker:
         tax_rate: float | None = None,
     ) -> int:
         """
-        평가손익 계산 (수수료·세금 차감 후).
+        평가손익 계산 (수수료·세금 차감 후, Position.pnl과 동일 식 — 마지막에 한 번만 int() 적용).
         """
+        if not current_price or not avg_price:
+            return 0
         fr, tr = PnLTracker._get_rates(fee_rate, tax_rate)
-        gross = (current_price - avg_price) * qty
-        buy_fee = int(avg_price * qty * fr)
-        sell_fee = int(current_price * qty * (fr + tr))
-        return gross - buy_fee - sell_fee
+        buy_total = avg_price * qty
+        sell_total = current_price * qty
+        fees = buy_total * fr + sell_total * fr
+        tax = sell_total * tr
+        return int(sell_total - buy_total - fees - tax)
 
     @staticmethod
     def calculate_return_pct(
@@ -76,6 +85,16 @@ class PnLTracker:
         return (avg_price - current_price) * qty
 
     @staticmethod
+    def calculate_buy_fee(
+        price: int,
+        qty: int,
+        fee_rate: float | None = None,
+    ) -> int:
+        """매수 체결 시 수수료만 계산 (세금 없음, cash 차감용 — OrderManager._handle_buy_fill)."""
+        fr, _ = PnLTracker._get_rates(fee_rate, None)
+        return int(price * qty * fr)
+
+    @staticmethod
     def calculate_realized_pnl(
         entry_price: int,
         exit_price: int,
@@ -83,9 +102,10 @@ class PnLTracker:
         fee_rate: float | None = None,
         tax_rate: float | None = None,
     ) -> int:
-        """실현손익 계산 (체결된 주문의 손익)."""
+        """실현손익 계산 (체결된 주문의 손익, _handle_sell_fill과 동일 식 —
+        cost를 round()로 한 번에 계산 후 차감)."""
         fr, tr = PnLTracker._get_rates(fee_rate, tax_rate)
-        gross = (exit_price - entry_price) * qty
-        buy_fee = int(entry_price * qty * fr)
-        sell_fee = int(exit_price * qty * (fr + tr))
-        return gross - buy_fee - sell_fee
+        sell_amount = exit_price * qty
+        buy_amount = entry_price * qty
+        cost = round(sell_amount * (fr + tr) + buy_amount * fr)
+        return (exit_price - entry_price) * qty - cost

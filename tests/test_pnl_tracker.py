@@ -203,3 +203,64 @@ class TestCalculateUnrealizedCostMinusValue:
             qty=10,
         )
         assert cmv == 0
+
+
+class TestEquivalenceWithOrderManager:
+    """
+    [리팩토링 2단계, 2026-06-30] PnLTracker가 order_manager.py의 기존 계산식을
+    완전히 대체하기 위한 동치성 검증. order_manager.py가 PnLTracker로 교체된 뒤에도
+    이 테스트가 두 식(원본 인라인 식 vs PnLTracker) 사이의 회귀를 잡아낸다.
+
+    원본 식 출처:
+    - position_pnl()      <- Position.pnl 프로퍼티 (order_manager.py:133-142)
+    - sell_fill_realized() <- OrderManager._handle_sell_fill() (order_manager.py:1909-1914)
+    """
+
+    FEE = 0.00015
+    TAX = 0.0023
+
+    @staticmethod
+    def _position_pnl(avg_price, current_price, qty, fee=FEE, tax=TAX):
+        if not current_price or not avg_price:
+            return 0
+        buy_total = avg_price * qty
+        sell_total = current_price * qty
+        fees = buy_total * fee + sell_total * fee
+        tax_amt = sell_total * tax
+        return int(sell_total - buy_total - fees - tax_amt)
+
+    @staticmethod
+    def _sell_fill_realized(avg_price, filled_price, qty, fee=FEE, tax=TAX):
+        sell_amount = filled_price * qty
+        buy_amount = avg_price * qty
+        cost = round(sell_amount * (fee + tax) + buy_amount * fee)
+        return (filled_price - avg_price) * qty - cost
+
+    def test_calculate_pnl_matches_position_pnl_random(self):
+        """무작위 2000건에서 calculate_pnl()이 Position.pnl 원본 식과 1원도 틀리지 않는다"""
+        import random
+        random.seed(42)
+        for _ in range(2000):
+            avg = random.randint(100, 500_000)
+            cur = random.randint(100, 500_000)
+            qty = random.randint(1, 1000)
+            expected = self._position_pnl(avg, cur, qty)
+            actual = PnLTracker.calculate_pnl(avg, cur, qty, fee_rate=self.FEE, tax_rate=self.TAX)
+            assert actual == expected, f"avg={avg} cur={cur} qty={qty}: expected={expected} actual={actual}"
+
+    def test_calculate_realized_pnl_matches_sell_fill_random(self):
+        """무작위 2000건에서 calculate_realized_pnl()이 _handle_sell_fill() 원본 식과 1원도 틀리지 않는다"""
+        import random
+        random.seed(43)
+        for _ in range(2000):
+            avg = random.randint(100, 500_000)
+            cur = random.randint(100, 500_000)
+            qty = random.randint(1, 1000)
+            expected = self._sell_fill_realized(avg, cur, qty)
+            actual = PnLTracker.calculate_realized_pnl(avg, cur, qty, fee_rate=self.FEE, tax_rate=self.TAX)
+            assert actual == expected, f"avg={avg} cur={cur} qty={qty}: expected={expected} actual={actual}"
+
+    def test_calculate_pnl_zero_price_returns_zero(self):
+        """Position.pnl과 동일하게 current_price/avg_price가 0이면 0 반환"""
+        assert PnLTracker.calculate_pnl(0, 100_000, 10) == 0
+        assert PnLTracker.calculate_pnl(100_000, 0, 10) == 0
