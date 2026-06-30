@@ -454,16 +454,16 @@ class SmartScannerConfig:
 
 
     # ── 종가매매(EOD) 모드 ────────────────────────────────────────────────────
-    # overnight_mode_enabled: True 시 14:40~14:55 EOD 진입 신호 활성화,
+    # overnight_mode_enabled: True 시 14:50~15:20 EOD 진입 신호 활성화,
     #   당일 15:19 강제청산에서 eod_trade 포지션 제외, 익일 09:00 갭 체크 후 관리.
     overnight_mode_enabled:      bool  = False          # 종가매매 모드 활성화
-    eod_entry_start:             dtime = dtime(14, 40, 0)  # EOD 진입 시작 시각
-    eod_entry_end:               dtime = dtime(14, 55, 0)  # EOD 진입 종료 시각
+    eod_entry_start:             dtime = dtime(14, 50, 0)  # EOD 진입 시작 시각 (2026-06-29: 14:40→14:50)
+    eod_entry_end:               dtime = dtime(15, 20, 0)  # EOD 진입 종료 시각 (2026-06-29: 14:55→15:20)
     eod_near_high_threshold_pct: float = 3.0            # 25일 신고가 근처 판정 (%)
     eod_change_pct_min:          float = 2.0            # 당일 등락률 최소 (%) — 강세 확인
     eod_change_pct_max:          float = 10.0           # 당일 등락률 최대 (%) — 과열 제외
     eod_strength_min:            float = 115.0          # 체결강도 하한 (%)
-    eod_min_trend_level:         int   = 2             # 요셉 추세 최소 단계 (2=Medium 이상만 EOD 진입)
+    eod_min_trend_level:         int   = 3             # 요셉 추세 최소 단계 (2026-06-29: 2→3, 극강추세만 EOD 진입)
     eod_volume_ratio_min:        float = 1.5            # 전일 평균 대비 거래량 배수
     eod_gap_up_exit_pct:         float = 2.0            # 익일 갭 상승 즉시 익절 기준 (%)
     eod_gap_down_exit_pct:       float = -1.5           # 익일 갭 하락 즉시 손절 기준 (%)

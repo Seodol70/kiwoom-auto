@@ -138,12 +138,15 @@ class MarketScheduler(QObject):
         if time(10, 30) <= now_time < time(10, 31):
             self.phase1_cutoff.emit()
 
-        # ─── 09:00~14:55 EOD 당일 수익률 체크 (매분) ──────────────────
-        if time(9, 0) <= now_time < time(14, 55):
+        # ─── 09:00~15:19 EOD 당일 수익률 체크 (매분) ──────────────────
+        # [FIX 2026-06-29] EOD 진입 시간대가 14:50~15:20으로 변경됨에 따라 14:55에
+        # 닫히던 상한을 15:20 강제청산 직전(15:19)까지 확장 — 14:50~14:55 진입분도
+        # 15:20 전까지 일중 손절/익절 감시를 계속 받도록 함.
+        if time(9, 0) <= now_time < time(15, 19):
             self.eod_daytime_check.emit()
 
-        # ─── 09:00~15:15 EOD 추세 체크 (매분, Stage 3) ────────────────
-        if time(9, 0) <= now_time < time(15, 15):
+        # ─── 09:00~15:19 EOD 추세 체크 (매분, Stage 3) ────────────────
+        if time(9, 0) <= now_time < time(15, 19):
             self.eod_trend_check.emit()
 
         # ─── 10:31~15:15 Phase 1 트레일 체크 (매분) ───────────────────

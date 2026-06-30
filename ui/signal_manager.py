@@ -106,11 +106,15 @@ class SignalManager:
         ms.market_closing.connect(self.win._on_market_closing)
         ms.feedback_triggered.connect(self.win._on_feedback_triggered)
         ms.day_reset.connect(self.win._on_day_reset)
-        # [Step 3 Phase 1] 모든 청산 신호를 tick_exit_check()로 통합
-        ms.overnight_gap_check.connect(self.tc.tick_exit_check)
-        ms.eod_daytime_check.connect(self.tc.tick_exit_check)
-        ms.eod_trend_check.connect(self.tc.tick_exit_check)
-        ms.overnight_timecut.connect(self.tc.tick_exit_check)
+        # [FIX 2026-06-29] EOD 전용 청산 신호를 각자의 전용 메서드로 재연결.
+        # 기존엔 5개 신호가 전부 tick_exit_check(check_and_exit_all)에만 연결되어
+        # check_eod_daytime_targets/check_overnight_gap/check_overnight_trend_break/
+        # check_overnight_timecut 4개 메서드가 한 번도 호출되지 않았다.
+        ms.overnight_gap_check.connect(self.tc.check_overnight_gap)
+        ms.eod_daytime_check.connect(self.tc.check_eod_daytime_targets)
+        ms.eod_trend_check.connect(self.tc.check_overnight_trend_break)
+        ms.overnight_timecut.connect(self.tc.check_overnight_timecut)
+        # phase1_cutoff/phase1_trail은 EOD와 무관한 모닝스캘핑(Phase1) 신호이므로 유지
         ms.phase1_cutoff.connect(self.tc.tick_exit_check)
         ms.phase1_trail.connect(self.tc.tick_exit_check)
         ms.overnight_auto_enabled.connect(lambda: self.win.header.set_overnight_checked(True))

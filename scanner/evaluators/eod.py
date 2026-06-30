@@ -21,8 +21,8 @@ def check_eod_entry(
         return None
 
     now = datetime.now().time()
-    _start = getattr(cfg, "eod_entry_start", dtime(14, 40, 0))
-    _end   = getattr(cfg, "eod_entry_end",   dtime(14, 55, 0))
+    _start = getattr(cfg, "eod_entry_start", dtime(14, 50, 0))
+    _end   = getattr(cfg, "eod_entry_end",   dtime(15, 20, 0))
     if not (_start <= now < _end):
         return None
 
@@ -45,11 +45,13 @@ def check_eod_entry(
         return None
 
     # ②-b 분봉 추세 강도
-    # yosep 비활성 시 trend_level=0으로 고정되므로 추세 레벨 체크 스킵
-    _eod_min_trend = int(getattr(cfg, "eod_min_trend_level", 2))
+    # [FIX 2026-06-29] yosep_trend_enabled(전역)가 꺼져 있어도 overnight_mode_enabled가
+    # 켜져 있으면 smart_scanner.py에서 trend_level을 강제로 계산하므로(위 D단계 수정),
+    # EOD 평가에서는 overnight_mode_enabled 켜진 것만으로 추세 체크를 활성화한다.
+    _eod_min_trend = int(getattr(cfg, "eod_min_trend_level", 3))
     _trend_lv = int(getattr(snap, "trend_level", 0))
-    _yosep_on = bool(getattr(cfg, "yosep_trend_enabled", True))
-    if _yosep_on and _trend_lv < _eod_min_trend:
+    _trend_check_on = bool(getattr(cfg, "yosep_trend_enabled", True)) or bool(getattr(cfg, "overnight_mode_enabled", False))
+    if _trend_check_on and _trend_lv < _eod_min_trend:
         ScannerLogger.rejected(snap.code, snap.name, "EOD_TREND", f"분봉 추세 미달 — level {_trend_lv} < {_eod_min_trend}")
         return None
 

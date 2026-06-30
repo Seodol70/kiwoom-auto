@@ -872,7 +872,11 @@ class SmartScanner(QObject):
 
 
         # ②-bis 요셉 시그널 추세 단계 갱신 (분 단위 1회)
-        if getattr(self.cfg, "yosep_trend_enabled", True):
+        # [FIX 2026-06-29] yosep_trend_enabled가 꺼져 있으면 trend_level이 갱신되지 않아
+        # EOD(종가매매) 전용 eod_min_trend_level(=3) 강화가 무의미해진다. EOD 모드가
+        # 켜져 있으면(overnight_mode_enabled) 전역 플래그와 무관하게 trend_level 계산을
+        # 강제로 수행한다 — 전역 yosep_trend_enabled 자체는 건드리지 않는다.
+        if getattr(self.cfg, "yosep_trend_enabled", True) or getattr(self.cfg, "overnight_mode_enabled", False):
             trend_level = IndicatorService.get_trend_status(
                 closes=list(snap.closes_1min or []),
                 highs=list(snap.highs_1min or []),
