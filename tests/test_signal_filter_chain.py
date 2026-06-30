@@ -153,10 +153,15 @@ class TestOverheatPullbackFilter:
 
 
 class TestOpeningTimeFilter:
+    # [FIX 2026-06-10] OpeningTimeFilter가 09:00~09:30을 "완전 차단"으로 강화하면서
+    # (커밋 16028c5) 09:00~09:30 구간은 opening_entry_times를 보지 않고 무조건 거부한다.
+    # 이 두 테스트는 "60초 내 1건 제한" 로직을 검증하려는 의도인데 now=09:05를 써서
+    # 실제로는 완전 차단 분기만 타고 있었다(60초 제한 로직은 검증되지 않은 채 우연히
+    # 통과/실패했음). 60초 제한이 적용되는 09:30~10:00 구간으로 옮겨 의도대로 검증한다.
     def test_reject_multiple_entries_in_60sec(self):
         filter = OpeningTimeFilter()
         sig = MockSignal()
-        now = datetime.strptime("09:05", "%H:%M").replace(
+        now = datetime.strptime("09:45", "%H:%M").replace(
             year=datetime.now().year,
             month=datetime.now().month,
             day=datetime.now().day
@@ -176,7 +181,7 @@ class TestOpeningTimeFilter:
     def test_accept_after_60sec(self):
         filter = OpeningTimeFilter()
         sig = MockSignal()
-        now = datetime.strptime("09:05", "%H:%M").replace(
+        now = datetime.strptime("09:45", "%H:%M").replace(
             year=datetime.now().year,
             month=datetime.now().month,
             day=datetime.now().day

@@ -12,7 +12,7 @@ test_exit_strategy.py — ExitStrategy 경계값 단위 테스트
 
 import pytest
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from strategy.jang_dong_min import JangDongMinStrategy
 from strategy.base import ExitContext
@@ -20,6 +20,26 @@ from scanner.smart_scanner import SmartScannerConfig
 
 
 # ── 공통 헬퍼 ─────────────────────────────────────────────────────────────
+
+# [FIX] jang_dong_min.should_exit()은 entry_time을 두 가지 방식으로 함께 본다:
+# (1) entry_time.time() — OPENING 슬롯(09:00~09:30) 여부 판정 (고정 시각이어야 함)
+# (2) datetime.now() - entry_time — early_hold_sec/Time Cut 경과 시간 (now와 짝이어야 함)
+# entry_time을 datetime.now() 기준 상대 시각으로 만들면 테스트 실행 시각이 우연히
+# OPENING 슬롯에 떨어질 때 (1)이 깨지고, entry_time을 고정 과거 날짜로 박으면 (2)가
+# 깨진다. 두 요구를 동시에 만족시키려면 strategy.jang_dong_min.datetime.now() 자체를
+# 가상의 고정 시각(정오, OPENING 슬롯 밖)으로 patch해 entry_time과 "지금"을 함께 고정한다.
+_FAKE_NOW = datetime(2026, 1, 5, 12, 0, 0)  # 평일 정오, OPENING 슬롯과 무관
+
+
+class _FrozenDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return _FAKE_NOW
+
+
+def _freeze_now():
+    return patch("strategy.jang_dong_min.datetime", _FrozenDateTime)
+
 
 class _Pos:
     """최소한의 Position 대역"""
@@ -33,15 +53,20 @@ class _Pos:
         overnight_held: bool = False,
         trend_level: int = 0,
         partial_sold: bool = False,
+        vel_ratio: float = 0.0,
     ):
         self.avg_price      = avg_price
         self.current_price  = current_price
         self.peak_price     = peak_price if peak_price is not None else current_price
-        self.entry_time     = entry_time or datetime.now()
+        # 기본값은 _FAKE_NOW(정오) 기준 1시간 전 — early_hold_sec(기본 300초) 완화 구간 밖
+        self.entry_time     = entry_time or (_FAKE_NOW - timedelta(hours=1))
         self.eod_trade      = eod_trade
         self.overnight_held = overnight_held
         self.trend_level    = trend_level
         self.partial_sold   = partial_sold
+        # [2026-06-10] strong_trend 타임컷 면제는 trend_level 외에 vel_ratio도 요구함
+        # (strategy/jang_dong_min.py should_exit 5.타임컷, strong_trend_vel_min 기본 1.5)
+        self.vel_ratio       = vel_ratio
         self.code           = "005930"
         self.name           = "삼성전자"
 
@@ -73,13 +98,28 @@ def _ctx(time_cut_min: int = 0, sl_pct: float = -1.5, **kwargs) -> ExitContext:
     )
 
 
+class _FrozenStrategy:
+    """JangDongMinStrategy를 감싸 should_exit() 호출 동안만 datetime.now()를 고정한다."""
+
+    def __init__(self, strategy: JangDongMinStrategy):
+        self._strategy = strategy
+
+    def should_exit(self, *args, **kwargs):
+        with _freeze_now():
+            return self._strategy.should_exit(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._strategy, name)
+
+
 def _es(cfg=None, snap_store=None, order_mgr=None) -> JangDongMinStrategy:
-    return JangDongMinStrategy(
+    strategy = JangDongMinStrategy(
         order_mgr=order_mgr,  # None이어도 됨 (should_trend_decay에서 체크함)
         risk_mgr=MagicMock(),
         scan_cfg=cfg or _cfg(),
         snap_store=snap_store,
     )
+    return _FrozenStrategy(strategy)
 
 
 # ── Hard Stop 경계값 ──────────────────────────────────────────────────────
@@ -174,7 +214,7 @@ class TestTrailStop:
 class TestTimeCut:
 
     def _make_pos_with_age(self, minutes: float) -> _Pos:
-        entry = datetime.now() - timedelta(minutes=minutes)
+        entry = _FAKE_NOW - timedelta(minutes=minutes)
         return _Pos(avg_price=100_000, current_price=100_500, entry_time=entry)
 
     def test_just_under_no_cut(self):
@@ -210,24 +250,28 @@ class TestTimeCut:
         assert ok is False
 
     def test_strong_trend_exempt(self):
-        """Strong Trend(레벨 3+) 포지션은 타임컷 면제"""
+        """Strong Trend(레벨 3+) + vel_ratio 충족 포지션은 타임컷 면제"""
         es = _es(_cfg(
             hard_stop_pct=-3.0, trail_activation_pct=5.0,
             strong_trend_hold_level=3, strong_trend_timecut_exempt=True,
+            strong_trend_vel_min=1.5,
         ))
         pos = self._make_pos_with_age(60)
         pos.trend_level = 3  # Strong Trend
+        pos.vel_ratio = 2.0  # strong_trend_vel_min(1.5) 충족 — 면제 조건은 trend_level과 vel_ratio 둘 다 요구
         ok, _ = es.should_exit(pos, _ctx(time_cut_min=25, sl_pct=-3.0))
         assert ok is False
 
     def test_strong_trend_below_level_not_exempt(self):
-        """레벨 2는 Strong Trend 아님 → 타임컷 발동"""
+        """레벨 2는 Strong Trend 아님(vel_ratio 충족해도) → 타임컷 발동"""
         es = _es(_cfg(
             hard_stop_pct=-3.0, trail_activation_pct=5.0,
             strong_trend_hold_level=3, strong_trend_timecut_exempt=True,
+            strong_trend_vel_min=1.5,
         ))
         pos = self._make_pos_with_age(30)
         pos.trend_level = 2
+        pos.vel_ratio = 2.0  # vel_ratio는 충족하지만 trend_level 미달이라 면제 안 됨
         ok, reason = es.should_exit(pos, _ctx(time_cut_min=25, sl_pct=-3.0))
         assert ok is True
         assert "Time Cut" in reason
