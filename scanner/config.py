@@ -399,14 +399,15 @@ class SmartScannerConfig:
     # 활성 전략 목록: "BREAKOUT", "JDM_ENTRY", "PULLBACK", "EOD"
     # [2026-06-02] BREAKOUT 제거 — "이미 오른 것 확인 후 진입" 구조적 후행성
     # BREAKOUT 승률 낮음 + 신호 11,128건/일(47%) 노이즈 → JDM_ENTRY/PULLBACK/GAP_PULLBACK으로 대체
-    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "JDM_ENTRY_EARLY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK", "MORNING_GOLDENTIME")
+    # [2026-06-30] JDM_ENTRY_EARLY 비활성화 — 6/22~6/30 7거래일 누적 17건 중 16건 매칭,
+    # 승률 12.5%(2승14패), 평균손익 -1.17%로 지속적 저성과 확인(/analyze-trades 기반).
+    # 코드(scanner/evaluators/jdm.py)는 그대로 유지하고 enabled_strategies에서만 제외 —
+    # 재활성화 시 이 한 줄만 되돌리면 됨.
+    enabled_strategies: tuple[str, ...] = ("JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK", "MORNING_GOLDENTIME")
     # [2026-06-10] PULLBACK 비중 축소: GAP_PULLBACK 우선, PULLBACK 후순위로 이동
     # 근거: PULLBACK 반복 손실(6/1 33건 21%, 6/8 10건 40%) vs JDM 빅 위너 생산
     # [2026-06-15] MORNING_GOLDENTIME 추가: 09:00~09:30 전용 (내부에서 enabled 플래그로 ON/OFF)
-    # [2026-06-19] JDM_ENTRY_EARLY를 JDM_ENTRY 바로 다음에 배치 — 전략 루프가 순서대로 평가하고
-    # 첫 성공에서 멈추므로(smart_scanner.py _evaluate), JDM_ENTRY가 거래량 게이트를 통과하면
-    # EARLY는 평가되지 않고, 통과 못했을 때만 선행지표 단독 트리거를 시도하게 됨.
-    strategy_order: tuple[str, ...] = ("MORNING_GOLDENTIME", "JDM_ENTRY", "JDM_ENTRY_EARLY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
+    strategy_order: tuple[str, ...] = ("MORNING_GOLDENTIME", "JDM_ENTRY", "GAP_PULLBACK", "PULLBACK", "EOD", "OVERHEAT_PULLBACK")
     # 분당 최대 신호 발행 수 — 동시 다발 진입 방지 (1분에 최대 N종목)
     max_entries_per_minute: int = 2  # 2026-05-07: 1→5→2 (UI 프리징 해결, 신호 제한)
     # ── 요셉 시그널 추세 필터 ────────────────────────────────────────────────
