@@ -226,6 +226,7 @@ class SmartScanner(QObject):
         from scanner.strategies.overheat_pullback import OverheatPullbackStrategy
         from scanner.strategies.gap_pullback import GapPullbackStrategy  # [2026-06-02] C전략
         from scanner.strategies.morning_goldentime import MorningGoldentimeStrategy  # [2026-06-15] E전략
+        from scanner.strategies.resistance_breakout import ResistanceBreakoutStrategy  # [2026-06-30] ③전략
         self.strategy_map = {
             "BREAKOUT": BreakoutStrategy(),
             "JDM_ENTRY": JdmStrategy(),
@@ -235,6 +236,7 @@ class SmartScanner(QObject):
             "MORNING_GOLDENTIME": MorningGoldentimeStrategy(),  # [2026-06-15] E전략: 오전 골든타임
             "EOD": EODStrategy(),
             "OVERHEAT_PULLBACK": OverheatPullbackStrategy(),
+            "RESISTANCE_BREAKOUT": ResistanceBreakoutStrategy(),  # [2026-06-30] ③전략: 직전N분 고점 돌파 (enabled_strategies 미포함, 관찰용)
         }
 
 

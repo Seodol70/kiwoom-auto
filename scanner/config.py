@@ -262,6 +262,17 @@ class SmartScannerConfig:
     gap_pullback_min_trend_level: int = 2    # 2026-06-15: lv0~1 GAP_PULLBACK 손절 다발 → lv2 이상만 허용
     gap_pullback_vel_ratio_min:  float = 1.0  # 2026-06-15: vel<1.0 GAP_PULLBACK 승률 저하 → 1.0 이상만 허용
 
+    # ── ③전략: RESISTANCE_BREAKOUT (직전 N분 구간 고점 돌파) ──────────────────
+    # [2026-06-30] "오를 종목 포착 3가지 신호" ③번. 과거 BREAKOUT(전일종가+3%,
+    # 47% 노이즈로 2026-06-02 제거)과 달리 국소 저항선을 기준선으로 삼고,
+    # trend_level/거래량 게이트로 허위양성을 줄인다. 신규 도입이라
+    # enabled_strategies에는 아직 미포함 — 신호만 로그에 쌓아 관찰 후 활성화 검토.
+    rb_resistance_lookback_min: int   = 20    # 저항선 산출 구간 (분, 현재 봉 제외)
+    rb_min_trend_level:         int   = 2     # 2026-06-30 분석 근거: lv2+ 승률 31~43.6% vs lv0~1 12.5%
+    rb_volume_surge_mult:       float = 2.0   # 돌파 시 거래량 급증 배수
+    rb_volume_surge_lookback:   int   = 10    # 거래량 평균 계산 구간 (분)
+    rb_signal_cooldown_sec:     float = 60.0  # 종목별 신호 쿨다운
+
     # ── A전략: PULLBACK MTF 연동 ─────────────────────────────────────────────
     pullback_mtf_check: bool = True  # PULLBACK 전략에서 5분봉 방향 일치 확인
     # [NEW] ATR 기반 트레일링 스탑
