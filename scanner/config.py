@@ -69,6 +69,10 @@ class SmartScannerConfig:
     jdm_take_profit_pct:  float = 5.0        # 2026-06-08: 2.5→3.0→5.0% (손익비 개선 — 폭 넓혀 큰 수익 추구)
     jdm_stop_loss_pct:    float = -2.0       # 2026-06-08: -1.2→-1.0→-2.0% (손절 여유 확보 — 즉시청산 방지)
     hard_stop_pct:        float = -3.0       # 2026-06-08: -2.0→-3.0% (손절 -2.0%와 분리 — 급락 시 강제청산)
+    # [NEW 2026-06-23] 손절 데이터 분석: 보유<5분 손절 71건 중 52%가 60분내 +3%반등,
+    # 69%는 청산 후 추가로 -1%p 더 하락(노이즈 구간) → 진입 초반은 손절선을 완화해 노이즈 흡수
+    early_hold_sec:       float = 300        # 진입 후 이 시간(초) 동안은 완화된 손절선 적용
+    early_sl_relax_pct:   float = 1.5        # 초반 구간 손절선 완화폭(%p) — sl_pct/hard_stop_pct에서 차감(더 깊게)
     # [FIX 2026-05-11] 수급 필터 — FID 13 부정확으로 인해 절대값 기반 필터 제거, 순위 기반만 사용
     min_trade_amount:     int = 0                # [DEPRECATED] FID 13 부정확 → 0으로 고정 (더 이상 사용 안 함)
     min_daily_rank:       int = 100              # ✓ 거래대금 상위 순위만 사용 (범위: rank ≤ 100)

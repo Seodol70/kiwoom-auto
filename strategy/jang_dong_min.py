@@ -286,6 +286,15 @@ class JangDongMinStrategy(BaseStrategy):
         _gap_sl, _gap_tp = self._get_gap_dynamic_sl_tp(pos)
         _use_gap_dynamic = _gap_sl != 0.0
 
+        # [NEW 2026-06-23] 초반 노이즈 완화: 진입 후 early_hold_sec 동안은 손절선을 완화
+        # (보유<5분 손절 71건 중 52%가 60분내 +3%반등 — 일시적 흔들림에 너무 민감하게 반응)
+        _early_relax = 0.0
+        if entry_time:
+            _elapsed_sec = (datetime.now() - entry_time).total_seconds()
+            _early_hold_sec = float(getattr(self._scan_cfg, "early_hold_sec", 0))
+            if _elapsed_sec < _early_hold_sec:
+                _early_relax = float(getattr(self._scan_cfg, "early_sl_relax_pct", 0.0))
+
         # 1. 하드 스탑 (절대 손절선) — EOD 포지션도 적용 (절대 손실 방어선 역할)
         # [P0-2 2026-05-21] OPENING 슬롯(09:00~09:30 진입) 종목은 -1.5%로 강화
         # [2026-05-26] 갭 동적 손절이 활성화된 경우 갭 기준 손절 사용 (더 넓은 여유 허용)
@@ -302,6 +311,7 @@ class JangDongMinStrategy(BaseStrategy):
                 # 갭 비활성(갭<2%) + OPENING 진입 (09:00~09:29): 기존 -1.5% 강화 유지
                 # 9:30 이후는 ExitContext else 블록(기본 sl_pct)을 따르므로 포함 안 함
                 _hard_stop = max(_hard_stop, -1.5)
+        _hard_stop -= _early_relax
         if chg <= _hard_stop:
             return True, f"Hard Stop ({_hard_stop:.1f}%)"
 
@@ -329,7 +339,7 @@ class JangDongMinStrategy(BaseStrategy):
 
         # 4. 일반 손절 (EMA 보호 포함)
         # 갭 동적 활성 시 sl_pct를 갭 기준으로 교체
-        _sl_pct = _gap_sl if _use_gap_dynamic else ctx.sl_pct
+        _sl_pct = (_gap_sl if _use_gap_dynamic else ctx.sl_pct) - _early_relax
         if not _is_eod_pre_gap and chg <= _sl_pct:
             if self._check_ema_protection(pos):
                 return False, "EMA20 Support (Hold)"
