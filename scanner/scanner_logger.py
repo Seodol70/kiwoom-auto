@@ -69,6 +69,15 @@ class ScannerLogger:
     _stop_event = threading.Event()
     _bg_thread: threading.Thread | None = None
 
+    # [FIX 2026-06-30] 파일별 고정 헤더 캐시. 기존엔 배치마다 "그 배치 행들의 키
+    # 합집합"으로 fieldnames를 새로 계산했는데, 같은 파일에 서로 다른 전략의 신호
+    # (예: JDM_ENTRY의 li_*/entry_candle_low, MORNING_GOLDENTIME의 mg_*, OVERHEAT_
+    # PULLBACK의 op_*)가 배치마다 다르게 섞이면 배치별 컬럼 순서가 서로 달라져,
+    # DictWriter가 파일에 이미 적힌 헤더와 다른 순서로 값을 써서 컬럼이 밀리는
+    # 사고가 있었다(scanner_signal_20260630.csv에서 li_leading에 mg_vwap_dist 값이
+    # 들어가는 등). 파일별 헤더를 최초 1회만 결정하고 그 순서를 고정 재사용한다.
+    _file_fieldnames: dict[str, list[str]] = {}
+
     # [FIX 2026-06-04] passed() UI 중복 로그 방지 — 동일 (code, step) 60초 쿨다운
     _passed_cooldown: dict[tuple, float] = {}
     _passed_cooldown_sec: float = 60.0
@@ -107,9 +116,20 @@ class ScannerLogger:
             csv_path = log_dir / filename
             file_exists = csv_path.exists()
             try:
+                fieldnames = cls._file_fieldnames.get(filename)
+                if fieldnames is None:
+                    if file_exists:
+                        # 기존 파일이 있으면 그 헤더 순서를 그대로 따른다 (프로세스
+                        # 재시작 후에도 컬럼 밀림이 생기지 않도록).
+                        with open(csv_path, "r", newline="", encoding="utf-8") as rf:
+                            existing_header = next(csv.reader(rf), [])
+                        fieldnames = existing_header or list(
+                            dict.fromkeys(k for row in rows for k in row.keys()))
+                    else:
+                        fieldnames = list(dict.fromkeys(k for row in rows for k in row.keys()))
+                    cls._file_fieldnames[filename] = fieldnames
+
                 with open(csv_path, "a", newline="", encoding="utf-8") as f:
-                    # 배치 내 모든 행의 키 합집합으로 헤더 결정 (삽입 순서 보존)
-                    fieldnames = list(dict.fromkeys(k for row in rows for k in row.keys()))
                     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
                     if not file_exists:
                         writer.writeheader()
