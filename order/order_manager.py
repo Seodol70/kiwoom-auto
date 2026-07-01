@@ -255,6 +255,10 @@ class OrderManager(QObject):
         # {order_no: last_cumulative_qty}
         self._order_fill_cumulative: dict[str, int] = {}
 
+        # 당일 처리 완료된 매도 체결 order_no 세트 — 재연결/재시작 시 동일 chejan 재수신 차단
+        # (모의투자 서버 잔고 불일치 + _order_fill_cumulative 초기화가 맞물린 유령 체결 방지)
+        self._processed_sell_order_nos: set[str] = set()
+
         # [NEW] 당일 손절 블랙리스트 — 손절 체결 종목은 당일 재매수 차단 (2026-04-08)
         # 익절·Time-cut·수동 매도는 포함하지 않음 → 재진입 허용
         self._stop_loss_today: set[str] = set()
@@ -1177,6 +1181,7 @@ class OrderManager(QObject):
             self._fills_initialized = False  # 새 날짜 → 세션 초기화 재허용
             self._stop_loss_today.clear()    # 날짜 변경 시 손절 블랙리스트 초기화
             self._no_reentry_today.clear()   # 날짜 변경 시 강제청산 블랙리스트 초기화
+            self._processed_sell_order_nos.clear()  # 날짜 변경 시 처리완료 매도주문 초기화
             self._queued_signal = None       # 전날 대기 신호 → 익일 오래된 신호로 매수 방지
             self._partial_pending_codes.clear()  # 전날 분할매도 잔존 → 익일 is_partial 오기록 방지
             for p in self.positions.values():
@@ -1870,6 +1875,16 @@ class OrderManager(QObject):
 
     def _handle_sell_fill(self, code: str, name: str, filled_qty: int, filled_price: int, order_no: str) -> None:
         """매도 체결 전담"""
+        # [FIX 2026-07-01] 재연결/재시작 시 동일 order_no의 chejan이 재수신될 수 있음.
+        # _order_fill_cumulative는 세션 초기화로 지워지므로 당일 처리 완료된 order_no를
+        # 별도 세트에 기억해 중복 처리를 원천 차단.
+        # (모의투자 서버 잔고 불일치 + 재시작 맞물림으로 발생한 남화산업 유령체결 사례)
+        if order_no in self._processed_sell_order_nos:
+            logger.debug(
+                "[매도체결][중복차단] %s(%s) order_no=%s 이미 처리됨 — 스킵",
+                name, code, order_no,
+            )
+            return
         if code not in self.positions:
             # [FIX 2026-06-22] 포지션이 이미 다른 체결/청산으로 사라진 뒤 도착한 체잔 —
             # 중복 발송된 이전 매도 주문이 지연 체결된 경우로 추정
@@ -1895,6 +1910,8 @@ class OrderManager(QObject):
         # 분할익절 체결 완료 시각 기록 — 본절가스탑 유예 기산점
         if is_partial_fill and pos is not None:
             pos.partial_sold_at = datetime.now()
+        # 처리 완료 order_no 등록 — 재연결 시 동일 chejan 중복 처리 차단
+        self._processed_sell_order_nos.add(order_no)
         self._append_fill_to_file(
             realized=realized, code=code, name=name,
             sell_price=filled_price, avg_price=pos.avg_price, qty=filled_qty,

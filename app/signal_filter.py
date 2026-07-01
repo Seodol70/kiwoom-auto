@@ -106,21 +106,35 @@ class OpeningTimeFilter(SignalFilter):
     6/15부터 신호가 한 번도 진입까지 못 가는 충돌이 있었다(시노펙스 6/30 09:26
     사례로 발견). MORNING_GOLDENTIME은 자체적으로 시가돌파/호가압력/VWAP지지
     등 09:00~09:30 전용 조건을 갖추고 있으므로 이 필터에서는 예외로 통과시킨다.
+
+    [2026-07-01] 09:00~09:10 초반 10분은 MORNING_GOLDENTIME 포함 전 전략을 차단.
+    호가창/거래량이 안정되기 전이라 슬리피지 크고 승률 낮음.
+    (7/1 9:11~9:16 SK네트웍스·대원전선·삼화전자 3종목 전패 패턴 확인)
     """
 
     EXEMPT_STRATEGIES = {"MORNING_GOLDENTIME"}
 
     def validate(self, sig: ScanSignal, ctx: SignalFilterContext) -> tuple[bool, str]:
-        if sig.signal_type in self.EXEMPT_STRATEGIES:
-            return True, ""
-
         now = ctx.now or datetime.now()
 
+        very_early_end = datetime.strptime("09:10", "%H:%M").time()
         hard_block_end = datetime.strptime("09:30", "%H:%M").time()
         opening_start  = datetime.strptime("09:00", "%H:%M").time()
         opening_end    = datetime.strptime("10:00", "%H:%M").time()
 
-        # 09:00~09:30 — 완전 차단 (분당 제한이 아닌 하드 블록)
+        # 09:00~09:10 — 전 전략 완전 차단 (MORNING_GOLDENTIME 포함)
+        # 호가/거래량 불안정 구간: 슬리피지 크고 노이즈 손절 빈발
+        if opening_start <= now.time() < very_early_end:
+            logger.info(
+                "[개장초반차단] %s(%s) 09:10 이전 진입 전략 불문 차단 (%s)",
+                sig.name, sig.code, now.strftime("%H:%M:%S"),
+            )
+            return False, f"{sig.code}: 09:10 이전 진입 차단 (호가 불안정)"
+
+        if sig.signal_type in self.EXEMPT_STRATEGIES:
+            return True, ""
+
+        # 09:10~09:30 — MORNING_GOLDENTIME 제외한 전략 완전 차단
         if opening_start <= now.time() < hard_block_end:
             logger.info(
                 "[개장차단] %s(%s) 09:30 이전 진입 완전 차단 (%s)",
