@@ -479,7 +479,9 @@ class JangDongMinStrategy(BaseStrategy):
     def _should_trend_decay(self, pos: Any) -> bool:
         if getattr(pos, "eod_trade", False):
             return False
-        if float(pos.price_change_pct_vs_avg) <= 0:
+        pnl = float(pos.price_change_pct_vs_avg)
+        _min_pct = float(getattr(self._scan_cfg, "trend_decay_min_profit_pct", 0.5))
+        if pnl < _min_pct:
             return False
         if self._order_mgr is None:
             return False

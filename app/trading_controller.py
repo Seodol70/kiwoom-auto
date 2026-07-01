@@ -122,9 +122,7 @@ class TradingController(QObject):
         # 리스크 매니저 시그널 연결 — __init__에서 1회만 연결 (중복 방지)
         if self._risk_mgr:
             self._risk_mgr.daily_loss_cut.connect(self.liquidate_all_positions)
-            self._risk_mgr.daily_profit_locked.connect(
-                lambda: self.log_message.emit("💰 [리스크] 당일 수익 목표 달성 — 신규 매수 차단")
-            )
+            self._risk_mgr.daily_profit_locked.connect(self._on_profit_locked_log)
 
         # 틱 손절(hard stop / 확정손절) 경로에서 strategy.mark_loss_exit() 호출 연결
         # check_and_exit_all과 달리 _on_price_updated는 order_manager에 있어 strategy 미접근
@@ -239,7 +237,11 @@ class TradingController(QObject):
 
         # 수익 목표 달성 / 냉각기 — 신규 매수 차단
         if self._risk_mgr and self._risk_mgr.is_new_entry_locked:
-            reason = "당일 수익 목표 달성 — 신규 매수 차단"
+            lock_reason = self._risk_mgr.entry_lock_reason
+            if lock_reason == "cooloff":
+                reason = "연속 손절 냉각기 — 신규 매수 일시 차단"
+            else:
+                reason = "당일 수익 목표 달성 — 신규 매수 차단"
             logger.info("[진입거절] %s(%s) %s", sig.name, sig.code, reason)
             self.signal_rejected.emit(f"{sig.code}: {reason}")
             self._record_signal(sig)
@@ -802,6 +804,14 @@ class TradingController(QObject):
             self._kosdaq_cur, self._kosdaq_chg_pct,
             is_crash
         )
+
+    @pyqtSlot()
+    def _on_profit_locked_log(self) -> None:
+        """수익 목표 달성 or 냉각기 발동 시 원인별 로그 출력"""
+        if self._risk_mgr and self._risk_mgr.entry_lock_reason == "cooloff":
+            self.log_message.emit("❄️ [리스크] 연속 손절 냉각기 — 신규 매수 일시 차단")
+        else:
+            self.log_message.emit("💰 [리스크] 당일 수익 목표 달성 — 신규 매수 차단")
 
     @pyqtSlot(float, float)
     def _on_market_crash_detected(self, kospi_pct: float, kosdaq_pct: float) -> None:

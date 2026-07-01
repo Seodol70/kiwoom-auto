@@ -69,6 +69,7 @@ class SmartScannerConfig:
     jdm_take_profit_pct:  float = 5.0        # 2026-06-08: 2.5→3.0→5.0% (손익비 개선 — 폭 넓혀 큰 수익 추구)
     jdm_stop_loss_pct:    float = -2.0       # 2026-06-08: -1.2→-1.0→-2.0% (손절 여유 확보 — 즉시청산 방지)
     hard_stop_pct:        float = -3.0       # 2026-06-08: -2.0→-3.0% (손절 -2.0%와 분리 — 급락 시 강제청산)
+    trend_decay_min_profit_pct: float = 0.5  # 추세소멸 최소 수익 기준 — 거래비용(~0.26%) 감안해 0.5% 이상일 때만 발동
     # [NEW 2026-06-23] 손절 데이터 분석: 보유<5분 손절 71건 중 52%가 60분내 +3%반등,
     # 69%는 청산 후 추가로 -1%p 더 하락(노이즈 구간) → 진입 초반은 손절선을 완화해 노이즈 흡수
     early_hold_sec:       float = 300        # 진입 후 이 시간(초) 동안은 완화된 손절선 적용
@@ -530,7 +531,7 @@ class SmartScannerConfig:
     # ── 일일 손익 한도 ────────────────────────────────────────────────────────
     # daily_profit_lock_won: 당일 실현손익이 이 금액 이상이면 신규 매수 신호 차단.
     #   0 이면 비활성. 장 마감 후 피드백 엔진이 최근 5일 peak 평균 × 70% 로 자동 조정.
-    daily_profit_lock_won:  int   = 50_000   # 기본 5만원 (FeedbackEngine이 다음날 자동 갱신)
+    daily_profit_lock_won:  int   = 100_000  # 기본 10만원 (FeedbackEngine이 다음날 자동 갱신)
     # daily_loss_cut_won: 당일 실현손익이 이 금액 이하이면 전 포지션 강제 청산 + 매수 차단.
     #   0 이면 비활성. 양수로 지정 (예: 100000 = -10만원 한도).
     #   risk_manager.check()에서 daily_pnl <= -daily_loss_cut_won 으로 비교함.

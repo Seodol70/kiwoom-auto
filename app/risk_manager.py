@@ -6,7 +6,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,11 @@ class RiskManager(QObject):
             self._order_mgr.order_filled.connect(self._on_order_filled)
             self._order_mgr.order_filled.connect(lambda *_: self.check())
 
+        # 냉각기 만료는 매도체결과 무관하게 감지해야 하므로 1분 주기 QTimer로 독립 처리
+        self._periodic_timer = QTimer(self)
+        self._periodic_timer.timeout.connect(self._check_cooloff)
+        self._periodic_timer.start(60_000)
+
     def update_config(self, scan_cfg: SmartScannerConfig) -> None:
         """설정 객체 참조를 갱신한다."""
         self._scan_cfg = scan_cfg
@@ -88,6 +93,15 @@ class RiskManager(QObject):
     def is_new_entry_locked(self) -> bool:
         """신규 매수 차단 여부"""
         return self._state.profit_locked if self._state else False
+
+    @property
+    def entry_lock_reason(self) -> str:
+        """신규 매수 차단 원인 — 로그/UI 메시지 분기용"""
+        if not self.is_new_entry_locked:
+            return ""
+        if self._profit_locked_by_cooloff:
+            return "cooloff"
+        return "profit_target"
 
     @property
     def is_daily_loss_cut_done(self) -> bool:
@@ -126,7 +140,10 @@ class RiskManager(QObject):
                 from logging_config import order_log
                 order_log.warning("[리스크] 포트폴리오 합산 손절 발동: %.2f%% (한도 -%.1f%%)", total_pnl_pct, max_loss_cut)
 
-        # [NEW] 냉각기 상태 업데이트
+        self._check_cooloff()
+
+    def _check_cooloff(self) -> None:
+        """냉각기 만료 체크 — QTimer(1분)와 check() 양쪽에서 호출된다."""
         from datetime import datetime
         if self._cooling_off_until and datetime.now() >= self._cooling_off_until:
             self._cooling_off_until = None

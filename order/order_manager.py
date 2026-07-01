@@ -112,6 +112,7 @@ class Position:
     # [분할 익절] 1차 분할 매도 상태
     partial_sold:     bool = False        # 1차 분할 매도 완료 여부
     qty_partial_sold: int  = 0            # 1차에 매도한 수량
+    partial_sold_at:  Optional[datetime] = None  # 분할익절 체결 완료 시각 (본절가스탑 유예용)
     trend_level: int = 0                  # 요셉 시그널 현재 추세 단계(0~3)
     trend_prev_level: int = 0             # 직전 추세 단계(Strong→No Trend 감시)
     near_daily_high: bool = False         # 진입 시 25일 신고가 근처 → TP 상향 적용
@@ -480,6 +481,7 @@ class OrderManager(QObject):
                 peak_price        = old.peak_price        if old else 0,
                 partial_sold      = old.partial_sold      if old else False,
                 qty_partial_sold  = old.qty_partial_sold  if old else 0,
+                partial_sold_at   = old.partial_sold_at   if old else None,
                 trend_level       = old.trend_level       if old else 0,
                 trend_prev_level  = old.trend_prev_level  if old else 0,
                 entry_phase       = old.entry_phase       if old else 0,
@@ -1000,8 +1002,16 @@ class OrderManager(QObject):
             if getattr(pos, "partial_sold", False):
                 _be_enabled = getattr(getattr(self, "_scan_cfg", None), "breakeven_stop_enabled", True)
                 if _be_enabled:
+                    # 분할익절 체결 직후 N초는 유예 — 평단이 순간 0%로 보이는 오발동 방지
+                    # (예: 다스코 4,495 체결 → 분할익절 4,495 → pnl=0% → 즉시 발동)
+                    _be_grace = float(getattr(getattr(self, "_scan_cfg", None), "breakeven_stop_grace_sec", 30.0))
+                    _sold_at = getattr(pos, "partial_sold_at", None)
+                    _in_grace = (
+                        _sold_at is not None
+                        and (datetime.now() - _sold_at).total_seconds() < _be_grace
+                    )
                     _be_buf = float(getattr(getattr(self, "_scan_cfg", None), "breakeven_stop_buffer_pct", 0.0))
-                    if pos.pnl_pct <= _be_buf:
+                    if not _in_grace and pos.pnl_pct <= _be_buf:
                         # [FIX 2026-06-26] 트레일스탑과 동일한 로그 폭증 방지 — force_exit 발령
                         # 중이면 재평가 로그를 찍지 않는다.
                         if code not in self._force_sell_issued:
@@ -1796,6 +1806,7 @@ class OrderManager(QObject):
                         name, code, filled_price, filled_qty,
                         meta.strategy or "-", meta.sector or "-", int(meta.trend_level), int(meta.entry_phase),
                     )
+                self.mark_no_reentry(code, name, "슬리피지초과즉시매도")
                 self.sell(code, name, filled_qty)
                 return
 
@@ -1881,6 +1892,9 @@ class OrderManager(QObject):
         
         is_partial_fill = code in self._partial_pending_codes
         self._partial_pending_codes.discard(code)
+        # 분할익절 체결 완료 시각 기록 — 본절가스탑 유예 기산점
+        if is_partial_fill and pos is not None:
+            pos.partial_sold_at = datetime.now()
         self._append_fill_to_file(
             realized=realized, code=code, name=name,
             sell_price=filled_price, avg_price=pos.avg_price, qty=filled_qty,
