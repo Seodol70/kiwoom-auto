@@ -99,7 +99,10 @@ class SmartScannerConfig:
     signal_cooldown_sec:  float = 60.0               # 2026-05-26: 45→60초 (신호 과부하 방지, UI 응답성 개선)
     # [NEW] 4중 필터 — JDM 신호 품질 강화
     entry_start_time:     dtime = dtime(7, 0, 0)    # 진입 허용 시작 — 2026-05-11: 08:00→07:00 (신호 기회 확대)
-    entry_end_time:       dtime = dtime(15, 30, 0)  # 진입 허용 종료
+    entry_end_time:       dtime = dtime(10, 0, 0)   # 진입 허용 종료 — 2026-07-01: 15:30→10:00 (10시 이후 51건 -78,517원 분석 결과)
+    # li_vb(거래량폭발 지표) 상한 — 초과 시 허매수벽(가짜 잔량) 의심으로 진입 거절
+    # 수익군 평균 0.41 vs 손실군 3.36: li_vb 과다는 세력 탈출용 허매수 패턴 (2026-07-01 2주 분석)
+    jdm_li_vb_max:        float = 2.0
     # [08:00 조기 시작] 시간 경계
     pre_market_end:       dtime = dtime(9, 0, 0)   # PRE/OPENING 경계 (시간외 종료)
     # PRE_SURGE 파라미터 (08:00~09:00 시간외 단일가)

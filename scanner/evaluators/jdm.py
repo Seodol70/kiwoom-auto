@@ -125,6 +125,16 @@ def _jdm_build_ctx(snap: "StockSnapshot", cfg: "SmartScannerConfig") -> Optional
             return None
         _ctx_leading = _leading  # 임계값 통과: 점수를 ctx에 전달
 
+    # ── [2026-07-01] li_vb(거래량폭발) 상한 차단 — 허매수벽 필터
+    # 손실군 li_vb 평균 3.36 vs 수익군 0.41: 과다 li_vb는 세력 탈출용 가짜 매수잔량 패턴
+    _li_vb_max = float(getattr(cfg, "jdm_li_vb_max", 2.0))
+    _li_vb_val = round(IndicatorService.calc_vol_burst_score(
+        list(getattr(snap, "volumes_1min", None) or [])), 3)
+    if _li_vb_val > _li_vb_max:
+        ScannerLogger.rejected(snap.code, snap.name, "JDM_LIVB",
+            f"li_vb={_li_vb_val:.2f} > 상한 {_li_vb_max:.1f} — 허매수벽 의심")
+        return None
+
     now = datetime.now().time()
     if not (cfg.entry_start_time <= now <= cfg.entry_end_time):
         ScannerLogger.rejected(snap.code, snap.name, "JDM_TIME", "진입 허용 시간 아님")

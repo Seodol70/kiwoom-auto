@@ -18,7 +18,12 @@ from scanner.config import SmartScannerConfig
 
 @pytest.fixture
 def base_config():
-    return SmartScannerConfig()
+    cfg = SmartScannerConfig()
+    # 테스트에서 실행 시각이 entry_end_time(10:00)을 벗어나 차단되지 않도록 24시간 전체로 확장
+    from datetime import time as dtime_t
+    cfg.entry_start_time = dtime_t(0, 0, 0)
+    cfg.entry_end_time   = dtime_t(23, 59, 59)
+    return cfg
 
 @pytest.fixture
 def base_snap():
